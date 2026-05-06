@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CSG } from 'three-csg-ts';
 import { CSGObject, Transform, Keyframe } from '../types';
+import { generateUVs } from './modifiers';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interpolation helpers
@@ -37,18 +38,42 @@ function interpolateTransform(keyframes: Keyframe[], time: number, base: Transfo
 export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
   // If the object has explicit mesh data (new architecture), use it.
   if (obj.vertices && obj.faces) {
-    const geometry = new THREE.BufferGeometry();
-    const positions: number[] = [];
-    obj.vertices.forEach(v => positions.push(...v));
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    let meshData = { vertices: obj.vertices, faces: obj.faces };
+    const hasUVs = obj.faces.some(f => f.uvs && f.uvs.length > 0);
     
+    if (!hasUVs) {
+      meshData = generateUVs(meshData);
+    }
+
+    const geometry = new THREE.BufferGeometry();
     const indices: number[] = [];
-    obj.faces.forEach(face => {
-      // Triangulate fan
-      for (let i = 1; i < face.indices.length - 1; i++) {
-        indices.push(face.indices[0], face.indices[i], face.indices[i+1]);
+    const finalUvs: number[] = [];
+    const finalPositions: number[] = [];
+    const vertMap = new Map<string, number>();
+
+    meshData.faces.forEach(face => {
+      const faceIndices: number[] = [];
+      face.indices.forEach((posIdx, i) => {
+        const uv = face.uvs?.[i] || [0, 0];
+        const key = `${posIdx}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`;
+        if (vertMap.has(key)) {
+          faceIndices.push(vertMap.get(key)!);
+        } else {
+          const newIdx = finalPositions.length / 3;
+          const v = meshData.vertices[posIdx];
+          finalPositions.push(...v);
+          finalUvs.push(...uv);
+          vertMap.set(key, newIdx);
+          faceIndices.push(newIdx);
+        }
+      });
+      for (let i = 1; i < faceIndices.length - 1; i++) {
+        indices.push(faceIndices[0], faceIndices[i], faceIndices[i+1]);
       }
     });
+
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUvs, 2));
     geometry.setIndex(indices);
     geometry.computeVertexNormals();
     return geometry;

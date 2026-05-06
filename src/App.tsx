@@ -1,68 +1,110 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import { Toolbar } from './components/Toolbar';
-import { Sidebar } from './components/Sidebar';
+import { PropertiesPanel } from './components/PropertiesPanel';
 import { Timeline } from './components/Timeline';
 import { MultiViewport } from './components/MultiViewport';
-import { useStore } from './store/useStore';
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function App() {
-  const { undo, redo, removeObject, selectedObjectId } = useStore();
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // Default closed on mobile
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'z') {
-          e.preventDefault();
-          undo();
-        } else if (e.key === 'y') {
-          e.preventDefault();
-          redo();
-        }
-      }
-
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedObjectId && document.activeElement?.tagName !== 'INPUT') {
-          removeObject(selectedObjectId);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, removeObject, selectedObjectId]);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(false);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-black overflow-hidden font-sans selection:bg-indigo-500/30">
+    <div className="flex flex-col h-screen w-screen overflow-hidden font-sans"
+         style={{ background: 'var(--surface-0)' }}>
+
+      {/* ── Top bar ── */}
       <Toolbar />
-      
-      <div className="flex-1 flex overflow-hidden relative">
-        <MultiViewport />
-        
-        {/* Sidebar Toggle Button for Mobile/Small screens - Moved to bottom-right */}
-        <button 
-          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          className="fixed right-4 bottom-24 z-50 p-3 bg-indigo-600 shadow-2xl shadow-indigo-500/40 rounded-2xl text-white border border-indigo-400 lg:hidden active:scale-90 transition-transform"
-          title="Alternar barra lateral"
+
+      {/* ── Main area ── */}
+      <div className="flex-1 flex overflow-hidden relative"
+           style={{ borderTop: '1px solid var(--border)' }}>
+
+        {/* Viewport */}
+        <div className="flex-1 relative overflow-hidden flex flex-col min-w-0">
+          <MultiViewport />
+          
+          {/* Timeline Toggle Button */}
+          <button
+            onClick={() => setIsTimelineCollapsed(v => !v)}
+            className="absolute bottom-4 right-4 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-lg transition-colors hover:bg-white/5"
+            style={{ background: 'var(--surface-1)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+            title={isTimelineCollapsed ? "Expandir línea de tiempo" : "Minimizar línea de tiempo"}
+          >
+            <span className="text-[10px] font-bold uppercase tracking-widest">Línea de tiempo</span>
+            {isTimelineCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+        </div>
+
+        {/* Sidebar separator (desktop) */}
+        <div className="hidden lg:block w-px flex-shrink-0"
+             style={{ background: 'var(--border)' }} />
+
+        {/* Sidebar panel */}
+        <aside
+          className={[
+            'fixed inset-y-0 right-0 z-40',
+            'transform transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
+            'lg:relative lg:translate-x-0 lg:inset-auto',
+            isSidebarOpen ? 'translate-x-0' : 'translate-x-full',
+            'w-80 sm:w-[340px] lg:w-[340px] xl:w-[360px]',
+            'flex flex-col overflow-hidden',
+          ].join(' ')}
+          style={{ background: 'var(--surface-1)' }}
         >
-          {isSidebarOpen ? <PanelLeftClose size={24} /> : <PanelLeftOpen size={24} />}
+          {/* Mobile header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b lg:hidden"
+               style={{ borderColor: 'var(--border)' }}>
+            <span className="text-[10px] font-bold uppercase tracking-widest"
+                  style={{ color: 'var(--text-muted)' }}>Propiedades</span>
+            <button
+              onClick={() => setIsSidebarOpen(false)}
+              className="p-1.5 rounded-lg transition-colors hover:bg-white/5"
+            >
+              <PanelRightClose size={14} style={{ color: 'var(--text-secondary)' }} />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-hidden">
+            <PropertiesPanel />
+          </div>
+        </aside>
+
+        {/* Mobile FAB */}
+        <button
+          onClick={() => setIsSidebarOpen(v => !v)}
+          className="fixed right-4 bottom-28 z-50 p-3 rounded-2xl lg:hidden transition-all duration-200 active:scale-90 shadow-2xl"
+          style={{
+            background: isSidebarOpen ? 'var(--surface-3)' : 'var(--accent)',
+            boxShadow: isSidebarOpen
+              ? '0 8px 32px rgba(0,0,0,0.4)'
+              : '0 8px 32px rgba(99,102,241,0.45)',
+            border: '1px solid rgba(255,255,255,0.12)',
+          }}
+          title="Alternar panel de propiedades"
+        >
+          {isSidebarOpen
+            ? <PanelRightClose size={20} className="text-white" />
+            : <PanelRightOpen  size={20} className="text-white" />
+          }
         </button>
 
-        {/* Removed backdrop to allow seeing viewport while sidebar is open */}
+        {/* Mobile overlay */}
+        {isSidebarOpen && (
+          <div
+            className="fixed inset-0 z-30 lg:hidden"
+            style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(2px)' }}
+            onClick={() => setIsSidebarOpen(false)}
+          />
+        )}
+      </div>
 
-        <div className={`
-          fixed inset-y-0 right-0 z-40 transform transition-transform duration-300 ease-in-out lg:relative lg:translate-x-0
-          ${isSidebarOpen ? 'translate-x-0' : 'translate-x-full'}
-          w-52 sm:w-64 h-full shadow-2xl lg:shadow-none
-        `}>
-          <Sidebar />
+      {/* ── Timeline ── */}
+      {!isTimelineCollapsed && (
+        <div style={{ borderTop: '1px solid var(--border)' }}>
+          <Timeline />
         </div>
-      </div>
-
-      <div className="landscape:h-20 transition-all duration-300">
-        <Timeline />
-      </div>
+      )}
     </div>
   );
 }

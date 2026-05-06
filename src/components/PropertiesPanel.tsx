@@ -13,7 +13,7 @@ import {
   sweepMesh, SWEEP_PROFILES, makeStraightPath, makeArcPath, makeHelixPath,
   loftMesh, circleSection, squareSection, starSection,
 } from '../utils/modifiers';
-import type { V3, MeshFace, MaterialData } from '../types';
+import type { V3, MeshFace, MaterialData, CameraObject, Transform } from '../types';
 import { useStore } from '../store/useStore';
 import type { CSGObject } from '../types';
 import { MapEditorModal } from './MapEditorModal';
@@ -25,7 +25,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   Image as ImageIcon, Upload, Download, FileDown,
-  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft
+  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera
 } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
@@ -218,12 +218,20 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
         </Section>
       );
     case 'SPHERE':
+      return (
+        <Section title="Parámetros" defaultOpen>
+          <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
+            min={3} max={256} step={1} slider/>
+        </Section>
+      );
     case 'CYLINDER':
     case 'CONE':
       return (
         <Section title="Parámetros" defaultOpen>
-          <NumRow label="Segmentos" value={p.segments ?? 16} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
+          <NumRow label="Seg. radiales" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
             min={3} max={256} step={1} slider/>
+          <NumRow label="Seg. altura" value={p.heightSegments ?? 1} onChange={v => up({ heightSegments: Math.max(1, Math.round(v)) })}
+            min={1} max={128} step={1} slider/>
         </Section>
       );
     case 'TORUS':
@@ -232,9 +240,9 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           <NumRow label="Radio" value={p.radius ?? 0.5} onChange={v => up({ radius: v })} min={0.05} step={0.05}/>
           <NumRow label="Tubo" value={p.tube ?? 0.2} onChange={v => up({ tube: v })} min={0.01} step={0.05}/>
           <NumRow label="Seg. radiales" value={p.radialSegments ?? 16} onChange={v => up({ radialSegments: Math.max(3, Math.round(v)) })}
-            min={3} max={128} step={1} slider/>
+            min={3} max={256} step={1} slider/>
           <NumRow label="Seg. tubulares" value={p.tubularSegments ?? 32} onChange={v => up({ tubularSegments: Math.max(6, Math.round(v)) })}
-            min={6} max={256} step={2} slider/>
+            min={6} max={512} step={2} slider/>
         </Section>
       );
     case 'ICOSAHEDRON':
@@ -242,7 +250,20 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
       return (
         <Section title="Parámetros" defaultOpen>
           <NumRow label="Detalle" value={p.detail ?? 0} onChange={v => up({ detail: Math.max(0, Math.round(v)) })}
-            min={0} max={6} step={1} slider/>
+            min={0} max={8} step={1} slider/>
+        </Section>
+      );
+    case 'SHAPE':
+      return (
+        <Section title="Parámetros" defaultOpen>
+          <NumRow label="Segmentos (Bezier)" value={p.segments ?? 20} onChange={v => up({ segments: Math.max(1, Math.round(v)) })}
+            min={1} max={128} step={1} slider/>
+          <NumRow label="Profundidad" value={p.extrusionDepth ?? 0} onChange={v => up({ extrusionDepth: v })}
+            min={0} max={50} step={0.1} />
+          {p.extrusionDepth !== undefined && p.extrusionDepth > 0 && (
+            <NumRow label="Seg. Profundidad" value={p.depthSegments ?? 1} onChange={v => up({ depthSegments: Math.max(1, Math.round(v)) })}
+              min={1} max={128} step={1} slider/>
+          )}
         </Section>
       );
     default:
@@ -609,19 +630,19 @@ import { MATERIAL_LIBRARY, MATERIAL_CATEGORIES, generateMaterial } from '../util
 
 
 
+const LIGHT_ICONS: Record<string, string> = {
+  POINT: '💡', DIRECTIONAL: '☀️', SPOT: '🔦', RECTAREA: '▭', AMBIENT: '🌍'
+};
+const LIGHT_LABELS: Record<string, string> = {
+  POINT: 'Punto', DIRECTIONAL: 'Direccional', SPOT: 'Foco', RECTAREA: 'Área', AMBIENT: 'Ambiental'
+};
+
 const LightPropertiesSection: React.FC<{ light: any }> = ({ light }) => {
   const updateLight = useStore(s => s.updateLight);
   const removeLight = useStore(s => s.removeLight);
   const selectLight = useStore(s => s.selectLight);
 
   const up = (data: any) => updateLight(light.id, data);
-
-  const LIGHT_ICONS: Record<string, string> = {
-    POINT: '💡', DIRECTIONAL: '☀️', SPOT: '🔦', RECTAREA: '▭'
-  };
-  const LIGHT_LABELS: Record<string, string> = {
-    POINT: 'Punto', DIRECTIONAL: 'Direccional', SPOT: 'Foco', RECTAREA: 'Área'
-  };
 
   return (
     <div className="flex flex-col h-full">
@@ -654,9 +675,17 @@ const LightPropertiesSection: React.FC<{ light: any }> = ({ light }) => {
               placeholder="Nombre de la luz"
             />
             <div className="flex items-center gap-2 mt-1">
-              <span className="text-[9px] font-bold uppercase tracking-[0.15em] px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
-                {LIGHT_LABELS[light.type] || light.type}
-              </span>
+              <select
+                value={light.type}
+                onChange={(e) => up({ type: e.target.value as any })}
+                className="bg-zinc-900 border border-white/10 rounded-lg px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-zinc-300 focus:outline-none focus:border-indigo-500 transition-colors cursor-pointer hover:bg-zinc-800"
+              >
+                <option value="POINT">Punto</option>
+                <option value="DIRECTIONAL">Direccional</option>
+                <option value="SPOT">Foco</option>
+                <option value="RECTAREA">Área</option>
+                <option value="AMBIENT">Ambiental</option>
+              </select>
             </div>
           </div>
           {/* Swatch de color */}
@@ -712,7 +741,7 @@ const LightPropertiesSection: React.FC<{ light: any }> = ({ light }) => {
       </div>
 
       <div className="p-4 border-t border-white/5 flex-shrink-0 bg-zinc-950/20">
-        <button onClick={() => { if(confirm('¿Eliminar luz?')) removeLight(light.id); }}
+        <button onClick={() => { removeLight(light.id); }}
           className="w-full flex items-center justify-center gap-2 py-3 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all border border-rose-500/20">
           <Trash2 size={14}/> Eliminar luz
         </button>
@@ -792,18 +821,172 @@ const HierarchyItem: React.FC<{
   );
 };
 
+const CameraPropertiesSection: React.FC<{ camera: CameraObject }> = ({ camera }) => {
+  const { updateCamera, selectCamera } = useStore();
+
+  const handleChange = (field: keyof CameraObject, value: any) => {
+    updateCamera(camera.id, { [field]: value });
+  };
+
+  const handleTransformChange = (field: keyof Transform, value: any) => {
+    updateCamera(camera.id, { transform: { ...camera.transform, [field]: value } });
+  };
+
+  const filmGauge = camera.filmGauge || 35;
+  const focalLength = filmGauge / (2 * Math.tan((camera.fov * Math.PI) / 360));
+
+  const handleFocalLengthChange = (newFocalLength: number) => {
+    const newFov = 2 * Math.atan(filmGauge / (2 * newFocalLength)) * (180 / Math.PI);
+    updateCamera(camera.id, { fov: newFov, focalLength: newFocalLength });
+  };
+
+  const handleFilmGaugeChange = (newFilmGauge: number) => {
+    const newFov = 2 * Math.atan(newFilmGauge / (2 * focalLength)) * (180 / Math.PI);
+    updateCamera(camera.id, { fov: newFov, filmGauge: newFilmGauge });
+  };
+
+  return (
+    <div className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
+      <div className="flex items-center gap-3 mb-6">
+        <button onClick={() => selectCamera(null)} className="p-2 hover:bg-zinc-800 rounded-xl transition-colors text-zinc-400 hover:text-white">
+          <ChevronRight size={16} className="rotate-180" />
+        </button>
+        <div>
+          <h3 className="text-sm font-bold text-white tracking-tight">{camera.name}</h3>
+          <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">Propiedades de Cámara</p>
+        </div>
+      </div>
+
+      <div className="p-4 bg-zinc-900/50 rounded-2xl border border-white/5 space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Nombre</label>
+          <input
+            type="text"
+            value={camera.name}
+            onChange={(e) => handleChange('name', e.target.value)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+          />
+        </div>
+        
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Tipo</label>
+          <select
+            value={camera.type}
+            onChange={(e) => handleChange('type', e.target.value as any)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+          >
+            <option value="PERSPECTIVE">Perspectiva</option>
+            <option value="ORTHOGRAPHIC">Ortográfica</option>
+          </select>
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
+            {camera.type === 'PERSPECTIVE' ? 'FOV (Campo de Visión)' : 'Tamaño (Size)'}
+          </label>
+          <div className="flex gap-2">
+            {camera.type === 'PERSPECTIVE' ? (
+              <>
+                <input
+                  type="range" min="10" max="120" step="1"
+                  value={camera.fov}
+                  onChange={(e) => handleChange('fov', parseFloat(e.target.value))}
+                  className="flex-1 accent-indigo-500"
+                />
+                <span className="text-xs text-zinc-400 font-mono w-8 text-right">{Math.round(camera.fov)}°</span>
+              </>
+            ) : (
+              <>
+                <input
+                  type="range" min="1" max="50" step="0.5"
+                  value={camera.fov} // Reusing fov for orthographic size for simplicity
+                  onChange={(e) => handleChange('fov', parseFloat(e.target.value))}
+                  className="flex-1 accent-indigo-500"
+                />
+                <span className="text-xs text-zinc-400 font-mono w-8 text-right">{camera.fov}</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {camera.type === 'PERSPECTIVE' && (
+          <>
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Distancia Focal (mm)</label>
+              <div className="flex gap-2">
+                <input
+                  type="range" min="10" max="200" step="1"
+                  value={focalLength}
+                  onChange={(e) => handleFocalLengthChange(parseFloat(e.target.value))}
+                  className="flex-1 accent-indigo-500"
+                />
+                <span className="text-xs text-zinc-400 font-mono w-10 text-right">{Math.round(focalLength)}mm</span>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Sensor de Cámara (mm)</label>
+              <div className="flex gap-2">
+                <input
+                  type="range" min="10" max="100" step="1"
+                  value={filmGauge}
+                  onChange={(e) => handleFilmGaugeChange(parseFloat(e.target.value))}
+                  className="flex-1 accent-indigo-500"
+                />
+                <span className="text-xs text-zinc-400 font-mono w-10 text-right">{Math.round(filmGauge)}mm</span>
+              </div>
+            </div>
+          </>
+        )}
+
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">Near / Far</label>
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              type="number" step="0.1"
+              value={camera.near}
+              onChange={(e) => handleChange('near', parseFloat(e.target.value))}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+              placeholder="Near"
+            />
+            <input
+              type="number" step="1"
+              value={camera.far}
+              onChange={(e) => handleChange('far', parseFloat(e.target.value))}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+              placeholder="Far"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="p-4 bg-zinc-900/50 rounded-2xl border border-white/5 space-y-4">
+        <h4 className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-3">Transformación</h4>
+        <XYZRow label="Posición" values={camera.transform.position} onChange={(v) => handleTransformChange('position', v)} step={0.1} />
+        <XYZRow label="Rotación" values={camera.transform.rotation} onChange={(v) => handleTransformChange('rotation', v)} step={0.1} />
+      </div>
+    </div>
+  );
+};
+
 const SceneManager: React.FC = () => {
   const { 
-    project, updateEnvironment, addLight, selectLight, selectedLightId,
+    project, updateEnvironment, addLight, selectLight, selectedLightId, updateLight,
+    addCamera, selectCamera, selectedCameraId,
     selectedObjectId, selectedObjectIds, selectObject, toggleObjectSelection,
     updateObject, selectedGLTFMeshes, toggleGLTFMeshSelection
   } = useStore();
   const env = project.environment;
 
   const selectedLight = project.lights.find(l => l.id === selectedLightId);
+  const selectedCamera = (project.cameras || []).find(c => c.id === selectedCameraId);
 
   if (selectedLight) {
     return <LightPropertiesSection light={selectedLight} />;
+  }
+
+  if (selectedCamera) {
+    return <CameraPropertiesSection camera={selectedCamera} />;
   }
 
   const hdriOptions = [
@@ -811,7 +994,7 @@ const SceneManager: React.FC = () => {
     { name: 'Atardecer',  url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/venice_sunset_1k.hdr', icon: '🌅' },
     { name: 'Urbano',     url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/pedestrian_overpass_1k.hdr', icon: '🏙️' },
     { name: 'Interior (Esplanada)',   url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/royal_esplanade_1k.hdr', icon: '🏛️' },
-    { name: 'Interior (Iglesia)',    url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/memorial_church_1k.hdr', icon: '⛪' },
+    { name: 'Noche',    url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/moonless_golf_1k.hdr', icon: '🌙' },
     { name: 'Estudio',     url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/quarry_01_1k.hdr', icon: '📸' },
   ];
 
@@ -901,7 +1084,33 @@ const SceneManager: React.FC = () => {
                 )}
               </HierarchyItem>
             ))}
-            {project.objects.length === 0 && (
+            {project.lights.map(light => (
+              <HierarchyItem
+                key={light.id}
+                id={light.id}
+                name={light.name}
+                type={`Luz ${LIGHT_LABELS[light.type]}`}
+                isSelected={selectedLightId === light.id}
+                onSelect={(id) => selectLight(id)}
+                visible={light.visible}
+                onToggleVisibility={(id) => updateLight(id, { visible: !light.visible })}
+                icon={<span className="text-[10px]">{LIGHT_ICONS[light.type]}</span>}
+              />
+            ))}
+            {project.cameras?.map(cam => (
+              <HierarchyItem
+                key={cam.id}
+                id={cam.id}
+                name={cam.name}
+                type={`Cámara ${cam.type === 'PERSPECTIVE' ? 'Perspectiva' : 'Ortográfica'}`}
+                isSelected={selectedCameraId === cam.id}
+                onSelect={(id) => selectCamera(id)}
+                visible={true}
+                onToggleVisibility={() => {}}
+                icon={<Camera size={12}/>}
+              />
+            ))}
+            {project.objects.length === 0 && project.lights.length === 0 && (!project.cameras || project.cameras.length === 0) && (
               <div className="py-8 text-center space-y-2">
                 <div className="w-10 h-10 rounded-full bg-zinc-900 border border-white/5 flex items-center justify-center mx-auto text-zinc-700">
                   <Box size={16} />
@@ -913,12 +1122,21 @@ const SceneManager: React.FC = () => {
         </Section>
 
         <Section title="Luces" icon={<Sun size={14}/>} defaultOpen badge={
-          <button 
-            onClick={(e) => { e.stopPropagation(); addLight('POINT'); }}
-            className="p-1.5 rounded-lg bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white transition-all border border-indigo-500/20"
-          >
-            <Plus size={12} />
-          </button>
+          <div className="relative group/light-menu">
+            <button 
+              onClick={(e) => { e.stopPropagation(); }}
+              className="p-1.5 rounded-lg bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white transition-all border border-indigo-500/20 flex items-center gap-1"
+            >
+              <Plus size={12} />
+            </button>
+            <div className="absolute right-0 top-full mt-1 w-32 bg-zinc-900 border border-white/10 rounded-xl shadow-xl opacity-0 invisible group-hover/light-menu:opacity-100 group-hover/light-menu:visible transition-all z-50 overflow-hidden">
+              <button onClick={(e) => { e.stopPropagation(); addLight('POINT'); }} className="w-full text-left px-3 py-2 text-[10px] font-bold text-zinc-400 hover:text-white hover:bg-indigo-600/20 transition-colors">💡 Punto</button>
+              <button onClick={(e) => { e.stopPropagation(); addLight('DIRECTIONAL'); }} className="w-full text-left px-3 py-2 text-[10px] font-bold text-zinc-400 hover:text-white hover:bg-indigo-600/20 transition-colors">☀️ Direccional</button>
+              <button onClick={(e) => { e.stopPropagation(); addLight('SPOT'); }} className="w-full text-left px-3 py-2 text-[10px] font-bold text-zinc-400 hover:text-white hover:bg-indigo-600/20 transition-colors">🔦 Foco</button>
+              <button onClick={(e) => { e.stopPropagation(); addLight('RECTAREA'); }} className="w-full text-left px-3 py-2 text-[10px] font-bold text-zinc-400 hover:text-white hover:bg-indigo-600/20 transition-colors">▭ Área</button>
+              <button onClick={(e) => { e.stopPropagation(); addLight('AMBIENT'); }} className="w-full text-left px-3 py-2 text-[10px] font-bold text-zinc-400 hover:text-white hover:bg-indigo-600/20 transition-colors">🌍 Ambiental</button>
+            </div>
+          </div>
         }>
           <div className="space-y-1">
             {project.lights.map(light => (
@@ -934,7 +1152,7 @@ const SceneManager: React.FC = () => {
                 <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shadow-inner border ${
                   selectedLightId === light.id ? 'bg-white/20 border-white/20' : 'bg-zinc-950/50 border-white/5'
                 }`} style={{ color: light.color }}>
-                  {light.type === 'POINT' ? '💡' : light.type === 'DIRECTIONAL' ? '☀️' : light.type === 'SPOT' ? '🔦' : '▭'}
+                  {light.type === 'POINT' ? '💡' : light.type === 'DIRECTIONAL' ? '☀️' : light.type === 'SPOT' ? '🔦' : light.type === 'AMBIENT' ? '🌍' : '▭'}
                 </div>
                 <div className="flex-1 text-left">
                   <p className="text-[11px] font-bold truncate">{light.name}</p>
@@ -952,6 +1170,47 @@ const SceneManager: React.FC = () => {
             )}
           </div>
         </Section>
+        
+        <Section title="Cámaras" icon={<Camera size={14}/>} defaultOpen badge={
+          <button 
+            onClick={(e) => { e.stopPropagation(); addCamera('PERSPECTIVE'); }}
+            className="p-1.5 rounded-lg bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white transition-all border border-indigo-500/20"
+          >
+            <Plus size={12} />
+          </button>
+        }>
+          <div className="space-y-1">
+            {(project.cameras || []).map(cam => (
+              <button
+                key={cam.id}
+                onClick={() => selectCamera(cam.id)}
+                className={`w-full flex items-center gap-3 p-2.5 rounded-xl border transition-all group ${
+                  selectedCameraId === cam.id 
+                    ? 'bg-indigo-600/90 border-indigo-500/50 text-white shadow-lg shadow-indigo-500/20' 
+                    : 'bg-zinc-900/50 border-white/5 text-zinc-400 hover:bg-zinc-800 hover:border-white/10'
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shadow-inner border ${
+                  selectedCameraId === cam.id ? 'bg-white/20 border-white/20' : 'bg-zinc-950/50 border-white/5'
+                }`}>
+                  🎥
+                </div>
+                <div className="flex-1 text-left">
+                  <p className="text-[11px] font-bold truncate">{cam.name}</p>
+                  <p className={`text-[9px] font-medium uppercase tracking-widest opacity-60`}>
+                    {cam.type} • {cam.fov}°
+                  </p>
+                </div>
+                <ChevronRight size={14} className={`opacity-0 group-hover:opacity-100 transition-all ${selectedCameraId === cam.id ? 'text-white' : 'text-zinc-600'}`} />
+              </button>
+            ))}
+            {(project.cameras || []).length === 0 && (
+              <div className="py-6 text-center border border-dashed border-white/5 rounded-2xl bg-zinc-900/20">
+                <p className="text-[10px] text-zinc-600 font-medium italic">No hay cámaras personalizadas</p>
+              </div>
+            )}
+          </div>
+        </Section>
       </div>
     </div>
   );
@@ -961,7 +1220,7 @@ export const PropertiesPanel: React.FC = () => {
   const {
     project, selectedObjectId, selectedObjectIds, updateObject, removeObject,
     duplicateObject, saveHistory, selectObject, toggleObjectSelection,
-    moveObjectUp, moveObjectDown, selectedLightId
+    moveObjectUp, moveObjectDown, selectedLightId, selectedCameraId
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'MATERIALS' | 'SCENE'>('PROPERTIES');
@@ -970,12 +1229,12 @@ export const PropertiesPanel: React.FC = () => {
 
   // Auto-switch tabs based on selection
   useEffect(() => {
-    if (selectedLightId) {
+    if (selectedLightId || selectedCameraId) {
       setActiveTab('SCENE');
     } else if (selectedObjectId) {
       setActiveTab('PROPERTIES');
     }
-  }, [selectedObjectId, selectedLightId]);
+  }, [selectedObjectId, selectedLightId, selectedCameraId]);
 
   const handleExport = async (format: 'GLB' | 'GLTF' | 'OBJ') => {
     const objectsToExport = (selectedObjectIds && selectedObjectIds.length > 0)
@@ -1176,7 +1435,7 @@ export const PropertiesPanel: React.FC = () => {
                 <button onClick={() => duplicateObject(obj.id)} className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded text-[10px] font-semibold">
                   <Copy size={12}/> Duplicar
                 </button>
-                <button onClick={() => { if(confirm('¿Eliminar?')) removeObject(obj.id); }} className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-300 rounded text-[10px] font-semibold">
+                <button onClick={() => { removeObject(obj.id); }} className="flex-1 flex items-center justify-center gap-1 py-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-300 rounded text-[10px] font-semibold">
                   <Trash2 size={12}/> Eliminar
                 </button>
               </div>

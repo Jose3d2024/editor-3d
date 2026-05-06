@@ -1,0 +1,1791 @@
+// proceduralTextures.ts — Professional PBR Material Library v2
+// All 6 PBR maps (albedo, normal, roughness, metallic, AO, displacement)
+// generated procedurally. Normal/roughness/AO/displacement share a common
+// heightfield so they stay physically consistent.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BACKWARD-COMPATIBLE LEGACY EXPORTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function createNoiseTexture(
+  width = 512, height = 512, scale = 10, intensity = 0.5, isNormal = false
+): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) return '';
+  const imgData = ctx.createImageData(width, height);
+  const data = imgData.data;
+  const noise = (x: number, y: number) =>
+    Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453 % 1);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const nx = x / width * scale, ny = y / height * scale;
+      const val = noise(nx, ny);
+      const i = (y * width + x) * 4;
+      if (isNormal) {
+        data[i]   = ((noise(nx+0.1,ny)-val)*intensity+0.5)*255|0;
+        data[i+1] = ((noise(nx,ny+0.1)-val)*intensity+0.5)*255|0;
+        data[i+2] = 255; data[i+3] = 255;
+      } else {
+        const c = val*255*intensity + 255*(1-intensity)|0;
+        data[i] = data[i+1] = data[i+2] = c; data[i+3] = 255;
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+export function createCheckerTexture(
+  width = 512, height = 512, size = 8, color1 = '#ffffff', color2 = '#000000'
+): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) return '';
+  const sw = width/size, sh = height/size;
+  for (let y = 0; y < size; y++)
+    for (let x = 0; x < size; x++) {
+      ctx.fillStyle = (x+y)%2===0 ? color1 : color2;
+      ctx.fillRect(x*sw, y*sh, sw, sh);
+    }
+  return canvas.toDataURL('image/png');
+}
+
+export function createWoodTexture(
+  width = 512, height = 512, baseColor = '#8b5a2b', ringColor = '#5c3a21'
+): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) return '';
+  const hex2rgb = (h: string) => {
+    const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
+    return r ? { r:parseInt(r[1],16), g:parseInt(r[2],16), b:parseInt(r[3],16) } : {r:0,g:0,b:0};
+  };
+  const c2 = hex2rgb(ringColor);
+  ctx.fillStyle = baseColor; ctx.fillRect(0,0,width,height);
+  for (let i = 0; i < 2000; i++) {
+    ctx.fillStyle = `rgba(${c2.r},${c2.g},${c2.b},${0.1+Math.random()*0.2})`;
+    ctx.fillRect(Math.random()*width,Math.random()*height,1+Math.random()*2,10+Math.random()*100);
+  }
+  return canvas.toDataURL('image/png');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHARED MATH ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function vNoise(x: number, y: number, s = 0): number {
+  const xi=Math.floor(x), yi=Math.floor(y);
+  const xf=x-xi, yf=y-yi;
+  const fade=(t:number)=>t*t*(3-2*t);
+  const hash=(a:number,b:number):number=>{
+    let n=(a*1619+b*31337+s*6971)|0;
+    n=((n>>13)^n)|0;
+    return((n*((n*n*15731+789221)|0)+1376312589)&0x7fffffff)/0x7fffffff;
+  };
+  const u=fade(xf),v=fade(yf);
+  return hash(xi,yi)*(1-u)*(1-v)+hash(xi+1,yi)*u*(1-v)+hash(xi,yi+1)*(1-u)*v+hash(xi+1,yi+1)*u*v;
+}
+
+function fbm(x: number, y: number, oct=5, s=0): number {
+  let val=0,amp=0.5,freq=1,max=0;
+  for(let i=0;i<oct;i++){val+=vNoise(x*freq,y*freq,s+i*137)*amp;max+=amp;amp*=0.5;freq*=2;}
+  return val/max;
+}
+
+function voronoi(px:number,py:number,scale:number,seed=0):{d1:number;d2:number;id:number}{
+  const hash2=(a:number,b:number):[number,number]=>{
+    let h=(a*92837111^b*689287499^seed*6971)|0;
+    h=((h^(h>>>13))*1540483477)|0;
+    return[(h&0xffff)/65536,((h>>>16)&0xffff)/65536];
+  };
+  const xi=Math.floor(px*scale),yi=Math.floor(py*scale);
+  let d1=1e9,d2=1e9,id=0;
+  for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
+    const cx=xi+dx,cy=yi+dy;
+    const[fx,fy]=hash2(cx,cy);
+    const wx=(cx+fx)/scale,wy=(cy+fy)/scale;
+    const d=Math.sqrt((px-wx)**2+(py-wy)**2)*scale;
+    if(d<d1){d2=d1;d1=d;id=(cx&0x3ff)|((cy&0x3ff)<<10);}else if(d<d2){d2=d;}
+  }
+  return{d1:Math.min(d1,1),d2:Math.min(d2,1),id};
+}
+
+function heightToNormal(field:Float32Array,w:number,h:number,strength:number):Uint8ClampedArray{
+  const out=new Uint8ClampedArray(w*h*4);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const xm=Math.max(px-1,0),xp=Math.min(px+1,w-1);
+    const ym=Math.max(py-1,0),yp=Math.min(py+1,h-1);
+    let nx=(field[py*w+xm]-field[py*w+xp])*strength;
+    let ny=(field[ym*w+px]-field[yp*w+px])*strength;
+    let nz=1.0;
+    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
+    nx/=len;ny/=len;nz/=len;
+    const i=(py*w+px)*4;
+    out[i]=(nx*.5+.5)*255|0;out[i+1]=(ny*.5+.5)*255|0;out[i+2]=(nz*.5+.5)*255|0;out[i+3]=255;
+  }
+  return out;
+}
+
+function rgbaToDataURL(rgba:Uint8ClampedArray,w:number,h:number):string{
+  const c=document.createElement('canvas');c.width=w;c.height=h;
+  const ctx=c.getContext('2d')!;
+  const img=ctx.createImageData(w,h);img.data.set(rgba);ctx.putImageData(img,0,0);
+  return c.toDataURL('image/png');
+}
+
+function grayField(field:Float32Array,w:number,h:number,invert=false):string{
+  const rgba=new Uint8ClampedArray(w*h*4);
+  for(let i=0;i<field.length;i++){
+    const v=Math.round(Math.min(1,Math.max(0,invert?1-field[i]:field[i]))*255);
+    rgba[i*4]=rgba[i*4+1]=rgba[i*4+2]=v;rgba[i*4+3]=255;
+  }
+  return rgbaToDataURL(rgba,w,h);
+}
+
+function uniformMap(w:number,h:number,value:number):string{
+  const v=Math.round(value*255);
+  const rgba=new Uint8ClampedArray(w*h*4);
+  for(let i=0;i<w*h;i++){rgba[i*4]=rgba[i*4+1]=rgba[i*4+2]=v;rgba[i*4+3]=255;}
+  return rgbaToDataURL(rgba,w,h);
+}
+
+function mapField(field:Float32Array,fn:(v:number)=>number):Float32Array{
+  const out=new Float32Array(field.length);
+  for(let i=0;i<field.length;i++)out[i]=fn(field[i]);
+  return out;
+}
+
+function clamp(v:number,lo=0,hi=1){return Math.min(hi,Math.max(lo,v));}
+function lerp(a:number,b:number,t:number){return a+(b-a)*t;}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GeneratedMaps {
+  albedo:string; normal:string; roughness:string;
+  metallic:string; ao:string; displacement:string;
+}
+
+export interface ProceduralMaterial {
+  id:string; name:string;
+  category:'wood'|'stone'|'metal'|'paint'|'synthetic'|'ground';
+  icon:string;
+  /** Suggested UV repeat — smaller = texture appears larger on mesh */
+  defaults:{
+    roughness:number; metalness:number;
+    normalScale:number; displacementScale:number; displacementBias:number;
+    /** UV repeat in X and Y — e.g. [2,2] means tile twice */
+    tiling:[number,number];
+    clearcoat?:number;
+    clearcoatRoughness?:number;
+  };
+  generate(width:number,height:number):GeneratedMaps;
+  /** Fast 64x64 albedo preview for the picker UI */
+  thumbnail?():string;
+}
+
+/** Default thumbnail: 128x128 albedo preview */
+function _thumb(mat:{generate(w:number,h:number):GeneratedMaps}):string{
+  return mat.generate(128,128).albedo;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WOOD — Organic continuous grain (no planks)
+// Strategy: distorted annual rings + longitudinal fibre noise + micro pores
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Core wood grain value [0..1] at pixel (px,py).
+ * Returns: { ring, fibre, pore, height }
+ *   ring  – annual ring band (light/dark alternation)
+ *   fibre – longitudinal streak along grain direction
+ *   pore  – open-pore dip (for roughness/height)
+ *   height – heightfield for normal/displacement
+ */
+function woodGrain(
+  px:number, py:number, w:number, h:number,
+  // Grain direction: 0=vertical, Math.PI/2=horizontal
+  angle = 0.0,
+  // How many ring cycles across the tile
+  ringFreq = 6,
+  // How much the rings waver (distortion amount)
+  warp = 0.5,
+  seed = 0
+): {ring:number;fibre:number;pore:number;height:number} {
+  // Normalise to [0..1]
+  const nx = px/w, ny = py/h;
+  // Rotate coordinates to align grain
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const rx = nx*cos - ny*sin;
+  const ry = nx*sin + ny*cos;
+
+  // Multi-octave warp so rings bend organically
+  const warpScale = 4;
+  const warpX = fbm(rx*warpScale,       ry*warpScale,       5, seed)      - 0.5;
+  const warpY = fbm(rx*warpScale+3.7,   ry*warpScale+1.3,   5, seed+111)  - 0.5;
+
+  // Annual rings — sine along the axis perpendicular to grain
+  const ringPos = ry * ringFreq + warpX * warp * ringFreq + warpY * warp * ringFreq * 0.4;
+  const ring = Math.sin(ringPos * Math.PI * 2) * 0.5 + 0.5;
+
+  // Fibre — fine long streaks parallel to grain direction
+  const fibreFreq = 80;
+  const fibre = vNoise(rx*fibreFreq + warpX*8, ry*fibreFreq*0.08 + warpY*2, seed+7);
+
+  // Micro-pores (open grain vessels) — small circular dips
+  const poreScale = 28;
+  const { d1 } = voronoi(rx + warpX*.05, ry + warpY*.05, poreScale, seed+999);
+  const pore = clamp(1 - d1 * 3.5); // 1 = inside pore, 0 = surface
+
+  // Combined height (pore dips, fibre medium, ring high)
+  const height = clamp(ring * 0.55 + fibre * 0.28 + (1-pore) * 0.17);
+
+  return { ring, fibre, pore, height };
+}
+
+/** Build heightfield for a full wood tile */
+function woodField(w:number, h:number, angle:number, ringFreq:number, warp:number, seed:number): Float32Array {
+  const f = new Float32Array(w*h);
+  for(let py=0;py<h;py++) for(let px=0;px<w;px++)
+    f[py*w+px] = woodGrain(px,py,w,h,angle,ringFreq,warp,seed).height;
+  return f;
+}
+
+/** Build RGBA albedo for any wood species given colour palette */
+function woodAlbedo(
+  w:number, h:number,
+  angle:number, ringFreq:number, warp:number, seed:number,
+  // Light ring colour
+  lightR:number, lightG:number, lightB:number,
+  // Dark ring colour
+  darkR:number,  darkG:number,  darkB:number,
+  // Pore colour (usually very dark)
+  poreR:number,  poreG:number,  poreB:number
+): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w*h*4);
+  for(let py=0;py<h;py++) for(let px=0;px<w;px++) {
+    const { ring, fibre, pore } = woodGrain(px,py,w,h,angle,ringFreq,warp,seed);
+    // Blend light/dark ring colours
+    const t = ring;
+    let r = lerp(darkR, lightR, t);
+    let g = lerp(darkG, lightG, t);
+    let b = lerp(darkB, lightB, t);
+    // Fibre adds subtle streaking variation
+    const fv = (fibre - 0.5) * 18;
+    r += fv; g += fv * 0.8; b += fv * 0.5;
+    // Pores darken
+    const pd = pore * 40;
+    r -= pd; g -= pd * 0.9; b -= pd * 0.7;
+    const i = (py*w+px)*4;
+    rgba[i]=clamp(r,0,255)|0; rgba[i+1]=clamp(g,0,255)|0;
+    rgba[i+2]=clamp(b,0,255)|0; rgba[i+3]=255;
+  }
+  return rgba;
+}
+
+const oakPlanks:ProceduralMaterial={
+  id:'oak_planks',name:'Roble',category:'wood',icon:'🪵',
+  defaults:{roughness:.68,metalness:0,normalScale:2.5,displacementScale:.04,displacementBias:-.02,
+    tiling:[2,2]},
+  generate(w,h){
+    const angle=0.05, rf=5, warp=0.55, seed=42;
+    const f=woodField(w,h,angle,rf,warp,seed);
+    return{
+      albedo:rgbaToDataURL(woodAlbedo(w,h,angle,rf,warp,seed, 190,148,90, 120,75,30, 45,22,8),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,7),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.55+(1-v)*.35)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.25+v*.75)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const walnut:ProceduralMaterial={
+  id:'walnut',name:'Nogal',category:'wood',icon:'🪵',
+  defaults:{roughness:.62,metalness:0,normalScale:2,displacementScale:.03,displacementBias:-.015,
+    tiling:[2,2]},
+  generate(w,h){
+    // Walnut: tight wavy grain, dark tones
+    const angle=0.03, rf=7, warp=0.8, seed=77;
+    const f=woodField(w,h,angle,rf,warp,seed);
+    return{
+      albedo:rgbaToDataURL(woodAlbedo(w,h,angle,rf,warp,seed, 90,55,28, 45,22,8, 18,8,2),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,6),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.52+(1-v)*.3)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.2+v*.8)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const pine:ProceduralMaterial={
+  id:'pine',name:'Pino',category:'wood',icon:'🪵',
+  defaults:{roughness:.74,metalness:0,normalScale:1.8,displacementScale:.035,displacementBias:-.017,
+    tiling:[2,2]},
+  generate(w,h){
+    // Pine: wide rings, light tones, strong contrast between early/late wood
+    const angle=0.0, rf=4, warp=0.3, seed=13;
+    const f=woodField(w,h,angle,rf,warp,seed);
+    return{
+      albedo:rgbaToDataURL(woodAlbedo(w,h,angle,rf,warp,seed, 235,205,150, 170,120,55, 80,45,15),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.60+(1-v)*.28)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.3+v*.7)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const mahogany:ProceduralMaterial={
+  id:'mahogany',name:'Caoba',category:'wood',icon:'🪵',
+  defaults:{roughness:.58,metalness:0,normalScale:2.2,displacementScale:.03,displacementBias:-.015,
+    tiling:[2,2]},
+  generate(w,h){
+    // Mahogany: interlocked grain at slight angle, deep red-brown
+    const angle=0.12, rf=6, warp=0.65, seed=99;
+    const f=woodField(w,h,angle,rf,warp,seed);
+    return{
+      albedo:rgbaToDataURL(woodAlbedo(w,h,angle,rf,warp,seed, 155,58,30, 90,28,12, 35,10,4),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,6),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.50+(1-v)*.3)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.2+v*.8)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STONE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function marbleField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*4,y=py/h*4;
+    const t=fbm(x,y,6,11);
+    f[py*w+px]=clamp(Math.sin(x*3+t*8)*.5+.5);
+  }
+  return f;
+}
+
+function marbleAlbedo(w:number,h:number,cr=245,cg=240,cb=238,vr=100,vg=95,vb=90):Uint8ClampedArray{
+  const rgba=new Uint8ClampedArray(w*h*4);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*4,y=py/h*4;
+    const t=fbm(x,y,6,11);
+    const v1=Math.sin(x*3+t*8)*.5+.5;
+    const v2=Math.sin(x*7+y*2+t*5)*.5+.5;
+    const vein=v1*.7+v2*.15;
+    const i=(py*w+px)*4;
+    rgba[i]=lerp(cr,vr,vein)|0;rgba[i+1]=lerp(cg,vg,vein)|0;
+    rgba[i+2]=lerp(cb,vb,vein)|0;rgba[i+3]=255;
+  }
+  return rgba;
+}
+
+const marble:ProceduralMaterial={
+  id:'marble',name:'Mármol Blanco',category:'stone',icon:'⬜',
+  defaults:{roughness:.25,metalness:0,normalScale:.8,displacementScale:.01,displacementBias:-.005,
+    tiling:[1.5,1.5]},
+  generate(w,h){const f=marbleField(w,h);return{
+    albedo:rgbaToDataURL(marbleAlbedo(w,h),w,h),
+    normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+    roughness:grayField(mapField(f,v=>clamp(.15+v*.25)),w,h),
+    metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.7+v*.3)),w,h),
+    displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const marbleBlack:ProceduralMaterial={
+  id:'marble_black',name:'Mármol Negro',category:'stone',icon:'⬛',
+  defaults:{roughness:.2,metalness:0,normalScale:.8,displacementScale:.01,displacementBias:-.005,
+    tiling:[1.5,1.5]},
+  generate(w,h){const f=marbleField(w,h);return{
+    albedo:rgbaToDataURL(marbleAlbedo(w,h,18,18,20,180,175,170),w,h),
+    normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+    roughness:grayField(mapField(f,v=>clamp(.12+v*.2)),w,h),
+    metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+    displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function graniteField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*12,y=py/h*12;
+    f[py*w+px]=clamp(fbm(x,y,5,7)*.5+vNoise(x*3,y*3,55)*.3+.2);
+  }
+  return f;
+}
+
+function graniteAlbedo(w:number,h:number):Uint8ClampedArray{
+  const rgba=new Uint8ClampedArray(w*h*4);
+  const minerals=[[180,170,165],[210,205,200],[60,60,65],[140,120,110],[195,190,185]] as [number,number,number][];
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w,y=py/h;
+    const{d1,id}=voronoi(x,y,18,5);
+    const[mr,mg,mb]=minerals[id%minerals.length];
+    const n=(vNoise(x*18*.5,y*18*.5,99)-.5)*25;
+    const edge=clamp(1-d1*2)*20;
+    const i=(py*w+px)*4;
+    rgba[i]=clamp(mr+n-edge,0,255)|0;rgba[i+1]=clamp(mg+n-edge,0,255)|0;
+    rgba[i+2]=clamp(mb+n-edge,0,255)|0;rgba[i+3]=255;
+  }
+  return rgba;
+}
+
+const granite:ProceduralMaterial={
+  id:'granite',name:'Granito',category:'stone',icon:'🪨',
+  defaults:{roughness:.7,metalness:0,normalScale:1.5,displacementScale:.015,displacementBias:-.007,
+    tiling:[2,2]},
+  generate(w,h){const f=graniteField(w,h);return{
+    albedo:rgbaToDataURL(graniteAlbedo(w,h),w,h),
+    normal:rgbaToDataURL(heightToNormal(f,w,h,5),w,h),
+    roughness:grayField(mapField(f,v=>clamp(.6+(1-v)*.35)),w,h),
+    metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.4+v*.6)),w,h),
+    displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function slateField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*6,y=py/h*6;
+    const layer=Math.sin(y*8+vNoise(x*2,y*2,3)*2)*.5+.5;
+    const frac=vNoise(x*4,y*.3,77)>.8?.15:0;
+    f[py*w+px]=clamp(layer*.7+fbm(x,y,4,22)*.3-frac);
+  }
+  return f;
+}
+
+const slate:ProceduralMaterial={
+  id:'slate',name:'Pizarra',category:'stone',icon:'◼',
+  defaults:{roughness:.85,metalness:0,normalScale:2.5,displacementScale:.025,displacementBias:-.012,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=slateField(w,h);
+    const albedoRgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*6,y=py/h*6;
+      const layer=Math.sin(y*8+vNoise(x*2,y*2,3)*2)*.5+.5;
+      const v=55+layer*35+(vNoise(x*8,y*8,11)-.5)*20;
+      const i=(py*w+px)*4;
+      albedoRgba[i]=clamp(v,0,255)|0;albedoRgba[i+1]=clamp(v+2,0,255)|0;
+      albedoRgba[i+2]=clamp(v+5,0,255)|0;albedoRgba[i+3]=255;
+    }
+    return{albedo:rgbaToDataURL(albedoRgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,8),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.75+(1-v)*.2)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.3+v*.7)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function concreteField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const x=(i%w)/w*10,y=Math.floor(i/w)/h*10;
+    const pore=vNoise(x*3,y*3,66)>.85?-.15:0;
+    f[i]=clamp(.4+fbm(x*.4,y*.4,4,8)*.5+pore);
+  }
+  return f;
+}
+
+const concrete:ProceduralMaterial={
+  id:'concrete',name:'Hormigón',category:'stone',icon:'🏗️',
+  defaults:{roughness:.9,metalness:0,normalScale:1.2,displacementScale:.02,displacementBias:-.01,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    const f=concreteField(w,h);
+    const albedoRgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){
+      const x=(i%w)/w*20,y=Math.floor(i/w)/h*20;
+      const v=110+f[i]*40+(vNoise(x,y,99)-.5)*15;
+      albedoRgba[i*4]=clamp(v,0,255)|0;albedoRgba[i*4+1]=clamp(v-2,0,255)|0;
+      albedoRgba[i*4+2]=clamp(v-5,0,255)|0;albedoRgba[i*4+3]=255;
+    }
+    return{albedo:rgbaToDataURL(albedoRgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,4),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.82+(1-v)*.15)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function cobblestoneField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w,y=py/h;
+    const{d1}=voronoi(x,y,7,3);
+    const stone=clamp(1-d1*1.8);
+    f[py*w+px]=clamp(Math.sin(stone*Math.PI*.5)*.8+fbm(x*8,y*8,3,33)*.1+.05);
+  }
+  return f;
+}
+
+const cobblestone:ProceduralMaterial={
+  id:'cobblestone',name:'Adoquines',category:'stone',icon:'🔲',
+  defaults:{roughness:.9,metalness:0,normalScale:3.5,displacementScale:.06,displacementBias:-.03,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    const f=cobblestoneField(w,h);
+    const albedoRgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w,y=py/h;
+      const{d1,id}=voronoi(x,y,7,3);
+      const sc=90+(id%7)*10,edge=clamp(d1*3)*40;
+      const v=sc-edge+(fbm(x*15,y*15,3,id%100)-.5)*20;
+      const i=(py*w+px)*4;
+      albedoRgba[i]=clamp(v+10,0,255)|0;albedoRgba[i+1]=clamp(v+5,0,255)|0;
+      albedoRgba[i+2]=clamp(v,0,255)|0;albedoRgba[i+3]=255;
+    }
+    return{albedo:rgbaToDataURL(albedoRgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,10),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.75+(1-v)*.2)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(v*.9)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const sandstone:ProceduralMaterial={
+  id:'sandstone',name:'Arenisca',category:'stone',icon:'🟫',
+  defaults:{roughness:.8,metalness:0,normalScale:2,displacementScale:.03,displacementBias:-.015,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){
+      const x=(i%w)/w*8,y=Math.floor(i/w)/h*8;
+      const layer=Math.sin(y*6+fbm(x,y,4,7)*.8)*.5+.5;
+      f[i]=clamp(layer*.65+fbm(x*3,y*3,4,33)*.3+.05);
+    }
+    const albedoRgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){
+      const v=f[i];
+      albedoRgba[i*4]=clamp(195+v*30,0,255)|0;
+      albedoRgba[i*4+1]=clamp(160+v*25,0,255)|0;
+      albedoRgba[i*4+2]=clamp(100+v*20,0,255)|0;albedoRgba[i*4+3]=255;
+    }
+    return{albedo:rgbaToDataURL(albedoRgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,6),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.72+(1-v)*.22)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.35+v*.65)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// METAL
+// ─────────────────────────────────────────────────────────────────────────────
+
+function brushedMetalField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const x=(i%w)/w*60,y=Math.floor(i/w)/h*2;
+    f[i]=clamp(.4+vNoise(x,y,17)*.4+vNoise(x*4,y,55)*.2);
+  }
+  return f;
+}
+
+const brushedSteel:ProceduralMaterial={
+  id:'brushed_steel',name:'Acero Cepillado',category:'metal',icon:'🔩',
+  defaults:{roughness:.3,metalness:1,normalScale:.8,displacementScale:.005,displacementBias:-.002,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=brushedMetalField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=160+f[i]*30|0;rgba[i*4]=v;rgba[i*4+1]=v;rgba[i*4+2]=v+5;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,2),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.2+v*.25)),w,h),
+      metallic:uniformMap(w,h,1),ao:grayField(mapField(f,v=>clamp(.8+v*.2)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const brushedAluminum:ProceduralMaterial={
+  id:'brushed_aluminum',name:'Aluminio Anodizado',category:'metal',icon:'⬜',
+  defaults:{roughness:.22,metalness:1,normalScale:.6,displacementScale:.003,displacementBias:-.001,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=brushedMetalField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=190+f[i]*30|0;rgba[i*4]=v;rgba[i*4+1]=v+2;rgba[i*4+2]=v+5;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,1.5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.15+v*.2)),w,h),
+      metallic:uniformMap(w,h,1),ao:uniformMap(w,h,1),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+
+const rustedIron:ProceduralMaterial={
+  id:'rusted_iron',name:'Hierro Oxidado',category:'metal',icon:'🔧',
+  defaults:{roughness:.82,metalness:.15,normalScale:4.0,displacementScale:.05,displacementBias:-.025,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    // ── Rust layer masks ──────────────────────────────────────────────────
+    // Layer 0: bare/grey metal (metallic=1, smooth, light grey)
+    // Layer 1: light rust — thin surface oxidation (orange-tan)
+    // Layer 2: heavy rust — thick flaky crust (deep red-brown)
+    // Layer 3: dark pits — deep corrosion holes (near-black)
+    // The masks are driven by correlated fbm so they nest naturally.
+
+    const albedoRgba   = new Uint8ClampedArray(w*h*4);
+    const metallicRgba = new Uint8ClampedArray(w*h*4);
+    const field        = new Float32Array(w*h);      // heightfield for normals
+
+    for(let py=0;py<h;py++) for(let px=0;px<w;px++) {
+      const sx = px/w * 5, sy = py/h * 5;           // tile scale
+
+      // Large-scale rust distribution (where patches form)
+      const macro  = fbm(sx,       sy,       6,  7);   // 0..1  slow variation
+      const micro  = fbm(sx*4,     sy*4,     5, 33);   // fine grain
+      const detail = fbm(sx*12,    sy*12,    4, 55);   // surface micro-detail
+      const pits   = fbm(sx*20,    sy*20,    3, 99);   // tiny pit noise
+
+      // ── Layer classification ──────────────────────────────────────────
+      // Voronoi islands so rust has natural "island" shapes
+      const { d1: vd1 } = voronoi(px/w, py/h, 8, 3);
+      const islandMask = clamp(1 - vd1 * 1.8);        // 1=island centre, 0=edge
+
+      // Heavy rust where macro fbm is high AND near island centres
+      const heavyRust  = clamp((macro - 0.38) * 2.5 + islandMask * 0.3 + micro * 0.2);
+      // Light rust fills surrounding areas
+      const lightRust  = clamp((macro - 0.18) * 1.8 + micro * 0.3 - heavyRust * 0.5);
+      // Pits: tiny craters in heavily corroded zones
+      const pitMask    = heavyRust * clamp((pits - 0.55) * 4);
+      // Bare metal: what's left
+      const bareMetal  = clamp(1 - lightRust - heavyRust);
+
+      // ── Heightfield ───────────────────────────────────────────────────
+      // Bare metal = flat-ish (0.7), light rust = slightly raised (0.55),
+      // heavy rust = rough mounds (0.4-0.8), pits = deep holes (0)
+      let h_val = lerp(0.70, 0.55, lightRust);
+      h_val     = lerp(h_val, 0.45 + micro * 0.35 + detail * 0.15, heavyRust);
+      h_val     = lerp(h_val, 0.0, pitMask);
+      // Fine surface roughness everywhere
+      h_val    += detail * 0.04 - 0.02;
+      field[py*w+px] = clamp(h_val);
+
+      // ── Albedo ────────────────────────────────────────────────────────
+      // Bare: cold steel grey with slight blue tint
+      const bR=lerp(145,175,micro), bG=lerp(148,178,micro), bB=lerp(152,182,micro);
+      // Light rust: warm tan/orange
+      const lR=lerp(175,205,detail), lG=lerp(120,148,detail), lB=lerp(60,80,detail);
+      // Heavy rust: deep red-brown with yellow-ochre variation
+      const hR=lerp(lerp(110,155,micro),lerp(170,190,detail),.4+detail*.3);
+      const hG=lerp(lerp(48,75,micro), lerp(100,115,detail),.3+detail*.2);
+      const hB=lerp(lerp(18,32,micro), lerp(40,55,detail), .2);
+      // Pit: near black
+      const pR=20+detail*15, pG=12+detail*10, pB=8+detail*8;
+
+      // Blend layers
+      let r=bR, g=bG, b=bB;
+      r=lerp(r,lR,lightRust); g=lerp(g,lG,lightRust); b=lerp(b,lB,lightRust);
+      r=lerp(r,hR,heavyRust); g=lerp(g,hG,heavyRust); b=lerp(b,hB,heavyRust);
+      r=lerp(r,pR,pitMask);   g=lerp(g,pG,pitMask);   b=lerp(b,pB,pitMask);
+
+      // Subtle green-grey tint in transition zones (iron oxide variety)
+      const greenTint = clamp((lightRust - 0.3) * 0.5) * clamp(1 - heavyRust);
+      g += greenTint * 18;
+
+      const i=(py*w+px)*4;
+      albedoRgba[i]=clamp(r,0,255)|0; albedoRgba[i+1]=clamp(g,0,255)|0;
+      albedoRgba[i+2]=clamp(b,0,255)|0; albedoRgba[i+3]=255;
+
+      // ── Metallic ─────────────────────────────────────────────────────
+      // Only bare metal zones keep metallic=1; rust is fully dielectric
+      const mv = clamp(bareMetal * 0.9 - pitMask) * 255 | 0;
+      metallicRgba[i]=metallicRgba[i+1]=metallicRgba[i+2]=mv; metallicRgba[i+3]=255;
+    }
+
+    // ── Roughness from height ─────────────────────────────────────────
+    // Low zones (pits) are roughest; bare metal is smoothest
+    const roughness = grayField(mapField(field, v => clamp(0.62 + (1-v)*0.35)), w, h);
+
+    // ── AO: pits and crevices get strong occlusion ─────────────────────
+    const ao = grayField(mapField(field, v => clamp(0.15 + v*0.85)), w, h);
+
+    return {
+      albedo:      rgbaToDataURL(albedoRgba, w, h),
+      normal:      rgbaToDataURL(heightToNormal(field, w, h, 12), w, h),
+      roughness,
+      metallic:    rgbaToDataURL(metallicRgba, w, h),
+      ao,
+      displacement: grayField(field, w, h),
+    };
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const chrome:ProceduralMaterial={
+  id:'chrome',name:'Cromo / Espejo',category:'metal',icon:'🪞',
+  defaults:{roughness:.05,metalness:1,normalScale:.3,displacementScale:.002,displacementBias:-.001,
+    tiling:[1,1]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*30,y=Math.floor(i/w)/h*30;f[i]=clamp(.45+vNoise(x,y,7)*.1);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=30+f[i]*20|0;rgba[i*4]=v;rgba[i*4+1]=v;rgba[i*4+2]=v+3;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,1),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.02+v*.06)),w,h),
+      metallic:uniformMap(w,h,1),ao:uniformMap(w,h,1),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function copperField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){const x=(i%w)/w*20,y=Math.floor(i/w)/h*20;f[i]=clamp(.35+fbm(x,y,4,3)*.5+vNoise(x*5,y*5,88)*.15);}
+  return f;
+}
+
+const copper:ProceduralMaterial={
+  id:'copper',name:'Cobre con Pátina',category:'metal',icon:'🔶',
+  defaults:{roughness:.25,metalness:1,normalScale:1,displacementScale:.008,displacementBias:-.004,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    const f=copperField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*20,y=py/h*20;
+      const pa=fbm(x,y,4,44)>.62?(fbm(x,y,4,44)-.62)*3:0;
+      const n=(vNoise(x*3,y*3,55)-.5)*20;
+      const i=(py*w+px)*4;
+      rgba[i]=clamp(lerp(184,70,pa)+n,0,255)|0;
+      rgba[i+1]=clamp(lerp(115,160,pa)+n*.7,0,255)|0;
+      rgba[i+2]=clamp(lerp(51,120,pa)+n*.3,0,255)|0;rgba[i+3]=255;
+    }
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.15+v*.3)),w,h),
+      metallic:uniformMap(w,h,1),ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const gold:ProceduralMaterial={
+  id:'gold',name:'Oro',category:'metal',icon:'⭐',
+  defaults:{roughness:.15,metalness:1,normalScale:.6,displacementScale:.004,displacementBias:-.002,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*25,y=Math.floor(i/w)/h*25;f[i]=clamp(.4+vNoise(x,y,22)*.3+vNoise(x*6,y*6,88)*.15);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){
+      const v=f[i],n=(Math.random()-.5)*8;
+      rgba[i*4]=clamp(230*v*.9+n,180,255)|0;
+      rgba[i*4+1]=clamp(190*v*.85+n,140,210)|0;
+      rgba[i*4+2]=clamp(30+n,0,80)|0;rgba[i*4+3]=255;
+    }
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,1.5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.08+v*.15)),w,h),
+      metallic:uniformMap(w,h,1),ao:uniformMap(w,h,1),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const galvanizedMetal:ProceduralMaterial={
+  id:'galvanized',name:'Metal Galvanizado',category:'metal',icon:'🔘',
+  defaults:{roughness:.45,metalness:1,normalScale:1.5,displacementScale:.008,displacementBias:-.004,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w,y=py/h;
+      const{d1,d2}=voronoi(x,y,18,41);
+      const ridge=clamp((d2-d1)*3)*.6;
+      f[py*w+px]=clamp(.3+ridge+fbm(x*18,y*18,3,55)*.15);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const{d1,id}=voronoi(px/w,py/h,18,41);
+      const base=155+(id%5)*8,ridge=clamp((1-d1*4))*25;
+      const v=base+ridge;
+      const i=(py*w+px)*4;
+      rgba[i]=v|0;rgba[i+1]=(v+2)|0;rgba[i+2]=(v+5)|0;rgba[i+3]=255;
+    }
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,4),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.38+(1-v)*.2)),w,h),
+      metallic:uniformMap(w,h,1),ao:grayField(mapField(f,v=>clamp(.4+v*.6)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAINT
+// ─────────────────────────────────────────────────────────────────────────────
+
+function carPaintField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const x=(i%w)/w,y=Math.floor(i/w)/h;
+    const{d1}=voronoi(x,y,40,12);
+    f[i]=clamp(.45+(1-d1*2)*.4+vNoise(x*40*2,y*40*2,33)*.1);
+  }
+  return f;
+}
+
+export function createCarPaintMaps(w:number,h:number,baseR=180,baseG=20,baseB=20):GeneratedMaps{
+  const f=carPaintField(w,h);
+  const albedoRgba=new Uint8ClampedArray(w*h*4);
+  const metallicRgba=new Uint8ClampedArray(w*h*4);
+  for(let i=0;i<w*h;i++){
+    const shift=(f[i]-.45)*60;
+    albedoRgba[i*4]=clamp(baseR+shift*.4,0,255)|0;
+    albedoRgba[i*4+1]=clamp(baseG+shift*.3,0,255)|0;
+    albedoRgba[i*4+2]=clamp(baseB+shift*.2,0,255)|0;albedoRgba[i*4+3]=255;
+    const mv=clamp((f[i]-.45)*3)*200|0;
+    metallicRgba[i*4]=metallicRgba[i*4+1]=metallicRgba[i*4+2]=mv;metallicRgba[i*4+3]=255;
+  }
+  return{albedo:rgbaToDataURL(albedoRgba,w,h),
+    normal:rgbaToDataURL(heightToNormal(f,w,h,1.5),w,h),
+    roughness:grayField(mapField(f,v=>clamp(.12+v*.1)),w,h),
+    metallic:rgbaToDataURL(metallicRgba,w,h),ao:uniformMap(w,h,1),
+    displacement:grayField(f,w,h)};
+}
+
+const carPaintRed:ProceduralMaterial={id:'car_paint_red',name:'Pintura Auto Roja',category:'paint',icon:'🚗',
+  defaults:{roughness:.15,metalness:.8,normalScale:.5,displacementScale:.002,displacementBias:-.001,
+    tiling:[1,1]},generate:(w,h)=>createCarPaintMaps(w,h,180,20,20)};
+const carPaintBlue:ProceduralMaterial={id:'car_paint_blue',name:'Pintura Auto Azul',category:'paint',icon:'🚙',
+  defaults:{roughness:.15,metalness:.8,normalScale:.5,displacementScale:.002,displacementBias:-.001,
+    tiling:[1,1]},generate:(w,h)=>createCarPaintMaps(w,h,20,40,180)};
+const carPaintBlack:ProceduralMaterial={id:'car_paint_black',name:'Pintura Auto Negra',category:'paint',icon:'⬛',
+  defaults:{roughness:.12,metalness:.9,normalScale:.4,displacementScale:.001,displacementBias:-.0005,
+    tiling:[1,1]},generate:(w,h)=>createCarPaintMaps(w,h,18,18,20)};
+const carPaintGreen:ProceduralMaterial={id:'car_paint_green',name:'Pintura Auto Verde',category:'paint',icon:'🟢',
+  defaults:{roughness:.15,metalness:.8,normalScale:.5,displacementScale:.002,displacementBias:-.001,
+    tiling:[1,1]},generate:(w,h)=>createCarPaintMaps(w,h,20,120,30)};
+
+export function createMattePaintMaps(w:number,h:number,r=220,g=220,b=220):GeneratedMaps{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){const x=(i%w)/w*20,y=Math.floor(i/w)/h*20;f[i]=clamp(.35+fbm(x,y,4,9)*.45+vNoise(x*8,y*8,55)*.1);}
+  const rgba=new Uint8ClampedArray(w*h*4);
+  for(let i=0;i<w*h;i++){const n=(f[i]-.5)*20;
+    rgba[i*4]=clamp(r+n,0,255)|0;rgba[i*4+1]=clamp(g+n,0,255)|0;rgba[i*4+2]=clamp(b+n,0,255)|0;rgba[i*4+3]=255;}
+  return{albedo:rgbaToDataURL(rgba,w,h),
+    normal:rgbaToDataURL(heightToNormal(f,w,h,1.5),w,h),
+    roughness:grayField(mapField(f,v=>clamp(.82+v*.15)),w,h),
+    metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.6+v*.4)),w,h),
+    displacement:grayField(f,w,h)};
+}
+
+const matteWhite:ProceduralMaterial={id:'matte_white',name:'Pintura Mate Blanca',category:'paint',icon:'⬜',
+  defaults:{roughness:.88,metalness:0,normalScale:.6,displacementScale:.005,displacementBias:-.002,
+    tiling:[1,1]},generate:(w,h)=>createMattePaintMaps(w,h,230,230,228)};
+const matteGray:ProceduralMaterial={id:'matte_gray',name:'Pintura Mate Gris',category:'paint',icon:'🩶',
+  defaults:{roughness:.9,metalness:0,normalScale:.6,displacementScale:.005,displacementBias:-.002,
+    tiling:[1,1]},generate:(w,h)=>createMattePaintMaps(w,h,120,120,120)};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SYNTHETIC
+// ─────────────────────────────────────────────────────────────────────────────
+
+function carbonFiberField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  const freq=16;
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*freq*2,y=py/h*freq*2;
+    const u=Math.sin((x+y)*Math.PI)*.5+.5;
+    const v2=Math.sin((x-y)*Math.PI)*.5+.5;
+    const towU=Math.floor(px/w*freq)%2,towV=Math.floor(py/h*freq)%2;
+    f[py*w+px]=clamp((towU===towV?u:v2)*.7+vNoise(x*3,y*3,7)*.1+.1);
+  }
+  return f;
+}
+
+const carbonFiber:ProceduralMaterial={
+  id:'carbon_fiber',name:'Fibra de Carbono',category:'synthetic',icon:'🔲',
+  defaults:{roughness:.2,metalness:0,normalScale:2,displacementScale:.008,displacementBias:-.004,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=carbonFiberField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const b=15+f[i]*35|0;rgba[i*4]=b;rgba[i*4+1]=b+2;rgba[i*4+2]=b+5;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,6),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.12+v*.2)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(v*.85)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const rubber:ProceduralMaterial={
+  id:'rubber',name:'Goma / Caucho',category:'synthetic',icon:'⚫',
+  defaults:{roughness:.95,metalness:0,normalScale:1,displacementScale:.01,displacementBias:-.005,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*15,y=Math.floor(i/w)/h*15;f[i]=clamp(.3+fbm(x,y,4,7)*.5+vNoise(x*6,y*6,33)*.15);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=18+f[i]*15|0;rgba[i*4]=v;rgba[i*4+1]=v;rgba[i*4+2]=v;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.9+v*.08)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.4+v*.6)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+function leatherField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const x=(i%w)/w,y=Math.floor(i/w)/h;
+    const{d1,d2}=voronoi(x,y,28,9);
+    f[i]=clamp(.2+clamp((d2-d1)*2)*.6+clamp(1-d1*3.5)*.1+fbm(x*10,y*10,3,88)*.1);
+  }
+  return f;
+}
+
+const leather:ProceduralMaterial={
+  id:'leather',name:'Cuero',category:'synthetic',icon:'🟫',
+  defaults:{roughness:.65,metalness:0,normalScale:2,displacementScale:.02,displacementBias:-.01,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=leatherField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=100+f[i]*40;rgba[i*4]=clamp(v,0,255)|0;rgba[i*4+1]=clamp(v*.55,0,255)|0;rgba[i*4+2]=clamp(v*.28,0,255)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.55+v*.3)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.25+v*.75)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const plasticGlossy:ProceduralMaterial={
+  id:'plastic_glossy',name:'Plástico Brillante',category:'synthetic',icon:'🔵',
+  defaults:{roughness:.1,metalness:0,normalScale:.3,displacementScale:.002,displacementBias:-.001,
+    tiling:[1,1]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*20,y=Math.floor(i/w)/h*20;f[i]=clamp(.4+vNoise(x*2,y*2,11)*.15+fbm(x,y,3,77)*.1);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=f[i];rgba[i*4]=clamp(30+v*15,0,255)|0;rgba[i*4+1]=clamp(60+v*25,0,255)|0;rgba[i*4+2]=clamp(180+v*30,0,255)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,.8),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.06+v*.08)),w,h),
+      metallic:uniformMap(w,h,0),ao:uniformMap(w,h,1),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const fabricCanvas:ProceduralMaterial={
+  id:'fabric_canvas',name:'Tela / Canvas',category:'synthetic',icon:'🟨',
+  defaults:{roughness:.88,metalness:0,normalScale:1.5,displacementScale:.012,displacementBias:-.006,
+    tiling:[3,3]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    const freq=32;
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*freq,y=py/h*freq;
+      const warpH=Math.sin(x*Math.PI+vNoise(x*.3,y*.3,5)*.6)*.5+.5;
+      const warpV=Math.sin(y*Math.PI+vNoise(x*.3,y*.3,55)*.6)*.5+.5;
+      const tx=Math.floor(px/w*freq)%2,ty=Math.floor(py/h*freq)%2;
+      f[py*w+px]=clamp((tx===ty?warpH:warpV)*.7+.15+vNoise(x*4,y*4,33)*.08);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=175+f[i]*45;rgba[i*4]=clamp(v,0,255)|0;rgba[i*4+1]=clamp(v-10,0,255)|0;rgba[i*4+2]=clamp(v-25,0,255)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,4),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.82+v*.12)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(v*.9)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUND
+// ─────────────────────────────────────────────────────────────────────────────
+
+function gravelField(w:number,h:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const x=(i%w)/w,y=Math.floor(i/w)/h;
+    const{d1}=voronoi(x,y,12,17);
+    f[i]=clamp(Math.sin(clamp(1-d1*2)*Math.PI*.5)*.75+fbm(x*12,y*12,3,44)*.15);
+  }
+  return f;
+}
+
+const gravel:ProceduralMaterial={
+  id:'gravel',name:'Grava',category:'ground',icon:'⚫',
+  defaults:{roughness:.92,metalness:0,normalScale:4,displacementScale:.07,displacementBias:-.035,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=gravelField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const{id}=voronoi(px/w,py/h,12,17);
+      const sb=80+(id%9)*12,v=sb-(1-f[py*w+px])*40;
+      const i=(py*w+px)*4;
+      rgba[i]=clamp(v+8,0,255)|0;rgba[i+1]=clamp(v+4,0,255)|0;rgba[i+2]=clamp(v,0,255)|0;rgba[i+3]=255;
+    }
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,12),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.8+(1-v)*.18)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(v*.85)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const sand:ProceduralMaterial={
+  id:'sand',name:'Arena',category:'ground',icon:'🏖️',
+  defaults:{roughness:.9,metalness:0,normalScale:1.5,displacementScale:.03,displacementBias:-.015,
+    tiling:[1.5,1.5]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*20,y=Math.floor(i/w)/h*20;f[i]=clamp(.4+fbm(x,y,5,29)*.5+vNoise(x*10,y*10,77)*.08);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=190+f[i]*30;rgba[i*4]=clamp(v,0,255)|0;rgba[i*4+1]=clamp(v-15,0,255)|0;rgba[i*4+2]=clamp(v-40,0,255)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.86+v*.1)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const asphalt:ProceduralMaterial={
+  id:'asphalt',name:'Asfalto',category:'ground',icon:'🛣️',
+  defaults:{roughness:.95,metalness:0,normalScale:2,displacementScale:.025,displacementBias:-.012,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){
+      const x=(i%w)/w,y=Math.floor(i/w)/h;
+      const{d1}=voronoi(x,y,25,31);
+      f[i]=clamp(.2+clamp(1-d1*3)*.3+fbm(x*25,y*25,4,66)*.3);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=28+f[i]*35;rgba[i*4]=v|0;rgba[i*4+1]=v|0;rgba[i*4+2]=(v-2)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.88+v*.1)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.35+v*.65)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const dirt:ProceduralMaterial={
+  id:'dirt',name:'Tierra',category:'ground',icon:'🟤',
+  defaults:{roughness:.93,metalness:0,normalScale:2,displacementScale:.04,displacementBias:-.02,
+    tiling:[2,2]},
+  generate(w,h){
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){const x=(i%w)/w*10,y=Math.floor(i/w)/h*10;f[i]=clamp(.3+fbm(x,y,6,88)*.65);}
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){const v=f[i];rgba[i*4]=clamp(100+v*40,0,255)|0;rgba[i*4+1]=clamp(70+v*25,0,255)|0;rgba[i*4+2]=clamp(35+v*15,0,255)|0;rgba[i*4+3]=255;}
+    return{albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,5),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.88+(1-v)*.1)),w,h),
+      metallic:uniformMap(w,h,0),ao:grayField(mapField(f,v=>clamp(.4+v*.6)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROCK MATERIALS — multi-octave fbm + voronoi fractures
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Shared rock heightfield: fbm macro shape + voronoi micro cracks */
+function rockField(w:number,h:number,macroScale:number,crackScale:number,seed:number):Float32Array{
+  const f=new Float32Array(w*h);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*macroScale, y=py/h*macroScale;
+    // Large bumps
+    const bump=fbm(x,y,7,seed)*.7+.15;
+    // Crack network: low d1 = crack valley
+    const{d1,d2}=voronoi(px/w,py/h,crackScale,seed+13);
+    const crack=clamp((d2-d1)*2)*.25; // ridge between cells
+    const crackDip=clamp(1-d1*4)*.18; // depression at crack centre
+    f[py*w+px]=clamp(bump+crack-crackDip);
+  }
+  return f;
+}
+
+/** Rocky albedo with per-facet colour variation via voronoi cell id */
+function rockAlbedo(
+  w:number,h:number,
+  macroScale:number,crackScale:number,seed:number,
+  r0:number,g0:number,b0:number,  // dark tone
+  r1:number,g1:number,b1:number,  // light tone
+  crackDark=true
+):Uint8ClampedArray{
+  const rgba=new Uint8ClampedArray(w*h*4);
+  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+    const x=px/w*macroScale, y=py/h*macroScale;
+    const{d1,id}=voronoi(px/w,py/h,crackScale,seed+13);
+    const macro=fbm(x,y,6,seed);
+    const cellVar=(id%11)/11;        // per-facet hue shift
+    const t=macro*.6+cellVar*.3+vNoise(x*3,y*3,seed+77)*.1;
+    let r=lerp(r0,r1,t)+cellVar*8;
+    let g=lerp(g0,g1,t)+cellVar*5;
+    let b=lerp(b0,b1,t)+cellVar*3;
+    // Crack darkening
+    if(crackDark){const cd=clamp(1-d1*4)*25;r-=cd;g-=cd;b-=cd;}
+    const i=(py*w+px)*4;
+    rgba[i]=clamp(r,0,255)|0;rgba[i+1]=clamp(g,0,255)|0;rgba[i+2]=clamp(b,0,255)|0;rgba[i+3]=255;
+  }
+  return rgba;
+}
+
+const largeRock:ProceduralMaterial={
+  id:'large_rock',name:'Roca Grande',category:'stone',icon:'🗿',
+  defaults:{roughness:.9,metalness:0,normalScale:5,displacementScale:.08,displacementBias:-.04,tiling:[1,1]},
+  generate(w,h){
+    const f=rockField(w,h,6,9,17);
+    return{
+      albedo:rgbaToDataURL(rockAlbedo(w,h,6,9,17, 70,65,60, 145,135,125),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,14),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.78+(1-v)*.2)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.1+v*.9)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const cliffRock:ProceduralMaterial={
+  id:'cliff_rock',name:'Roca Acantilado',category:'stone',icon:'⛰️',
+  defaults:{roughness:.92,metalness:0,normalScale:6,displacementScale:.1,displacementBias:-.05,tiling:[1,1]},
+  generate(w,h){
+    // Cliff: strong horizontal layering + vertical fractures
+    const f=new Float32Array(w*h);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*8,y=py/h*8;
+      const layer=Math.sin(y*5+fbm(x,y,4,7)*.8)*.5+.5;
+      const{d1}=voronoi(px/w,py/h,12,31);
+      const crack=clamp(1-d1*5)*.2;
+      const bump=fbm(x*2,y*2,5,44)*.3;
+      f[py*w+px]=clamp(layer*.5+bump+.1-crack);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*8,y=py/h*8;
+      const layer=Math.sin(y*5+fbm(x,y,4,7)*.8)*.5+.5;
+      const v=fbm(x*2,y*2,5,99);
+      const r=clamp(105+layer*35+v*20,0,255)|0;
+      const g=clamp(95+layer*30+v*18,0,255)|0;
+      const b=clamp(80+layer*25+v*15,0,255)|0;
+      const i=(py*w+px)*4;
+      rgba[i]=r;rgba[i+1]=g;rgba[i+2]=b;rgba[i+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,16),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.82+(1-v)*.15)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.05+v*.95)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const mossyRock:ProceduralMaterial={
+  id:'mossy_rock',name:'Roca con Musgo',category:'stone',icon:'🌿',
+  defaults:{roughness:.93,metalness:0,normalScale:4,displacementScale:.06,displacementBias:-.03,tiling:[1,1]},
+  generate(w,h){
+    const fRock=rockField(w,h,5,8,23);
+    // Moss mask: grows in concave areas (low height)
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w*5,y=py/h*5;
+      const rv=fRock[py*w+px];
+      const mossMask=clamp((1-rv)*1.4+fbm(x*2,y*2,4,88)*.3-.3);
+      // Rock colour: warm grey-brown
+      let r=lerp(90,150,rv)+fbm(x,y,3,11)*20;
+      let g=lerp(80,135,rv)+fbm(x,y,3,22)*18;
+      let b=lerp(65,115,rv)+fbm(x,y,3,33)*14;
+      // Moss: dark olive-green
+      const mr=lerp(38,65,fbm(x*4,y*4,3,55));
+      const mg=lerp(55,88,fbm(x*4,y*4,3,66));
+      const mb=lerp(18,32,fbm(x*4,y*4,3,77));
+      r=lerp(r,mr,mossMask);g=lerp(g,mg,mossMask);b=lerp(b,mb,mossMask);
+      const i=(py*w+px)*4;
+      rgba[i]=clamp(r,0,255)|0;rgba[i+1]=clamp(g,0,255)|0;rgba[i+2]=clamp(b,0,255)|0;rgba[i+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(fRock,w,h,12),w,h),
+      roughness:grayField(mapField(fRock,v=>clamp(.88+(1-v)*.1)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(fRock,v=>clamp(.08+v*.92)),w,h),
+      displacement:grayField(fRock,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const volcanicRock:ProceduralMaterial={
+  id:'volcanic_rock',name:'Roca Volcánica',category:'stone',icon:'🌋',
+  defaults:{roughness:.95,metalness:0,normalScale:5,displacementScale:.09,displacementBias:-.045,tiling:[1.5,1.5]},
+  generate(w,h){
+    // Basalt: very rough, vesicles (gas bubbles = voronoi pits), almost black
+    const f=new Float32Array(w*h);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const x=px/w,y=py/h;
+      const{d1}=voronoi(x,y,20,37);
+      const bubble=clamp(1-d1*4)*.5; // bubble cavity = deep pit
+      const base=fbm(x*8,y*8,5,9)*.5+.25;
+      f[py*w+px]=clamp(base-bubble);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const v=f[py*w+px];
+      const n=fbm(px/w*12,py/h*12,4,55);
+      const base=18+v*35+n*15;
+      const i=(py*w+px)*4;
+      rgba[i]=base|0;rgba[i+1]=(base+2)|0;rgba[i+2]=(base+3)|0;rgba[i+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,18),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.88+(1-v)*.1)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(v*0.95)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const desertRock:ProceduralMaterial={
+  id:'desert_rock',name:'Roca Desértica',category:'stone',icon:'🏜️',
+  defaults:{roughness:.88,metalness:0,normalScale:3,displacementScale:.06,displacementBias:-.03,tiling:[1,1]},
+  generate(w,h){
+    const f=rockField(w,h,5,7,41);
+    // Warm sand/orange tones with bleaching on peaks
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const v=f[py*w+px];
+      const n=fbm(px/w*8,py/h*8,4,33);
+      // Deep: dark red-orange; peaks: warm cream
+      const r=lerp(155,225,v)+n*18;
+      const g=lerp(85,185,v)+n*14;
+      const b=lerp(35,120,v)+n*10;
+      const i=(py*w+px)*4;
+      rgba[i]=clamp(r,0,255)|0;rgba[i+1]=clamp(g,0,255)|0;rgba[i+2]=clamp(b,0,255)|0;rgba[i+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,9),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.80+(1-v)*.15)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.2+v*.8)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLEARCOAT MATERIALS (Three.js MeshPhysicalMaterial)
+// clearcoat=1 → second specular lobe on top of the base material
+// ─────────────────────────────────────────────────────────────────────────────
+
+const varnishedWood:ProceduralMaterial={
+  id:'varnished_wood',name:'Madera Barnizada',category:'wood',icon:'✨',
+  defaults:{roughness:.25,metalness:0,normalScale:1.5,displacementScale:.02,displacementBias:-.01,
+    tiling:[2,2], clearcoat:0.9, clearcoatRoughness:0.1},
+  generate(w,h){
+    // Same grain as oak but smoother + clearcoat maps
+    const angle=0.04,rf=5,warp=0.4,seed=7;
+    const f=woodField(w,h,angle,rf,warp,seed);
+    return{
+      albedo:rgbaToDataURL(woodAlbedo(w,h,angle,rf,warp,seed,210,168,110,140,90,40,50,25,8),w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.18+v*.18)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.3+v*.7)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const carLacquer:ProceduralMaterial={
+  id:'car_lacquer',name:'Laca Auto (Clearcoat)',category:'paint',icon:'🏎️',
+  defaults:{roughness:.05,metalness:0,normalScale:.2,displacementScale:.001,displacementBias:0,
+    tiling:[1,1], clearcoat:1.0, clearcoatRoughness:0.05},
+  generate(w,h){
+    // Deep solid colour with orange-peel micro-texture
+    const f=new Float32Array(w*h);
+    for(let i=0;i<w*h;i++){
+      const x=(i%w)/w*30,y=Math.floor(i/w)/h*30;
+      // Orange peel: very fine Voronoi domes
+      const{d1}=voronoi(x/30,y/30,30,5);
+      f[i]=clamp(.3+clamp(1-d1*4)*.4+fbm(x,y,3,11)*.15);
+    }
+    const rgba=new Uint8ClampedArray(w*h*4);
+    // Pearl white
+    for(let i=0;i<w*h;i++){
+      const v=f[i]*15;
+      rgba[i*4]=clamp(238+v,0,255)|0;rgba[i*4+1]=clamp(235+v,0,255)|0;
+      rgba[i*4+2]=clamp(232+v,0,255)|0;rgba[i*4+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,.8),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.04+v*.06)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:uniformMap(w,h,1),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const ceramicGlazed:ProceduralMaterial={
+  id:'ceramic_glazed',name:'Cerámica Esmaltada',category:'synthetic',icon:'🏺',
+  defaults:{roughness:.08,metalness:0,normalScale:.4,displacementScale:.005,displacementBias:-.002,
+    tiling:[2,2], clearcoat:0.8, clearcoatRoughness:0.08},
+  generate(w,h){
+    // Tile grid with slight grout lines and surface micro-bumps
+    const tileFreq=8;
+    const f=new Float32Array(w*h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    for(let py=0;py<h;py++)for(let px=0;px<w;px++){
+      const tx=px/w*tileFreq, ty=py/h*tileFreq;
+      const lx=tx%1, ly=ty%1;
+      // Grout = near cell edges
+      const grout=Math.min(lx,1-lx,ly,1-ly);
+      const isGrout=grout<0.06;
+      // Slight dome per tile
+      const dome=Math.sin(lx*Math.PI)*Math.sin(ly*Math.PI);
+      const micro=vNoise(tx*8,ty*8,5)*.04;
+      f[py*w+px]=clamp(isGrout?.05:dome*.3+.5+micro);
+      const i=(py*w+px)*4;
+      if(isGrout){rgba[i]=175;rgba[i+1]=170;rgba[i+2]=168;rgba[i+3]=255;}
+      else{
+        // Cream/ivory glaze
+        const gv=dome*12+micro*20;
+        rgba[i]=clamp(240+gv,0,255)|0;rgba[i+1]=clamp(232+gv,0,255)|0;
+        rgba[i+2]=clamp(220+gv,0,255)|0;rgba[i+3]=255;
+      }
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,2),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.06+v*.08)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+const wetConcrete:ProceduralMaterial={
+  id:'wet_concrete',name:'Hormigón Mojado',category:'stone',icon:'💧',
+  defaults:{roughness:.35,metalness:0,normalScale:.8,displacementScale:.015,displacementBias:-.007,
+    tiling:[1.5,1.5], clearcoat:0.6, clearcoatRoughness:0.3},
+  generate(w,h){
+    const f=concreteField(w,h);
+    const rgba=new Uint8ClampedArray(w*h*4);
+    // Wet concrete is darker and more uniform
+    for(let i=0;i<w*h;i++){
+      const v=f[i];
+      const base=70+v*35+(vNoise((i%w)/w*20,Math.floor(i/w)/h*20,99)-.5)*12;
+      rgba[i*4]=base|0;rgba[i*4+1]=(base-1)|0;rgba[i*4+2]=(base-3)|0;rgba[i*4+3]=255;
+    }
+    return{
+      albedo:rgbaToDataURL(rgba,w,h),
+      normal:rgbaToDataURL(heightToNormal(f,w,h,3),w,h),
+      roughness:grayField(mapField(f,v=>clamp(.28+v*.2)),w,h),
+      metallic:uniformMap(w,h,0),
+      ao:grayField(mapField(f,v=>clamp(.5+v*.5)),w,h),
+      displacement:grayField(f,w,h)};
+  },
+  thumbnail(){return _thumb(this);}
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROCKY GROUND WITH MOSS — multi-scale scatter approach
+//
+// Layer stack (bottom → top):
+//   L0  Dirt/soil base          — dark brown fbm
+//   L1  Small gravel chips      — fine Voronoi (scale 35)
+//   L2  Medium stones           — mid Voronoi  (scale 14)
+//   L3  Large angular rocks     — coarse Voronoi (scale 6)
+//   L4  Moss                    — grows in concave/low zones
+//
+// Height is the sum of all stone layers → used for normals, AO, displacement.
+// Each Voronoi cell gets a random size/shape via its cell id so stones
+// look irregular, not uniform.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface StoneLayer {
+  h: number;      // height contribution [0..1]
+  isSurface: boolean; // true = we're on top of a stone (not gap/dirt)
+  cellId: number;
+  stoneT: number; // how much of a stone we are (0=gap, 1=stone centre)
+}
+
+/** Single Voronoi stone layer — returns per-pixel data */
+function stoneLayer(
+  px: number, py: number, w: number, h: number,
+  scale: number, seed: number,
+  heightAmp: number,    // how tall these stones are (use 1.0 for full range)
+  gapWidth: number,     // fraction of cell = gap (0.08 = narrow gap)
+): StoneLayer {
+  const x = px / w, y = py / h;
+  const { d1, d2, id } = voronoi(x, y, scale, seed);
+
+  // Per-cell random size + shape multiplier → irregular angular stones
+  const cellHash = (id * 2654435761) & 0xffff;
+  const sizeVar  = 0.55 + (cellHash & 0xff) / 255 * 0.9;    // 0.55..1.45
+  const flatness = 0.3  + ((cellHash >> 8) & 0xff) / 255 * 0.6; // flat-top factor
+
+  const gap      = d1 * sizeVar;
+  const isSurface = gap > gapWidth;
+
+  // stoneT: 0 = edge of stone, 1 = centre
+  const stoneT = isSurface ? clamp((gap - gapWidth) / (1 - gapWidth)) : 0;
+
+  // Profile: angular stones have FLAT TOPS and SHARP DROP-OFFS
+  // pow(stoneT, flatness) → small flatness = very flat top (angular)
+  //                         large flatness = dome (rounded)
+  const profile = Math.pow(stoneT, flatness);
+
+  // Micro roughness on stone surface
+  const micro = fbm(x * scale * 4, y * scale * 4, 3, seed + 77) * 0.06;
+
+  return {
+    h: isSurface ? (profile + micro) * heightAmp : 0,
+    isSurface,
+    cellId: id,
+    stoneT,
+  };
+}
+
+/** Rocky ground heightfield — combines 3 stone scales.
+ *  Output field is normalised to full [0..1] range:
+ *    0   = dirt/gap between stones  (will be pushed DOWN by displacement)
+ *    1   = top of large stone        (will be pushed UP)
+ *  This maximises the physical displacement contrast.
+ */
+function rockyGroundField(w: number, h: number): {
+  field: Float32Array;
+  large: Float32Array; medium: Float32Array; small: Float32Array;
+  gap: Float32Array;   moss: Float32Array;
+} {
+  const raw    = new Float32Array(w * h);  // un-normalised heights
+  const large  = new Float32Array(w * h);
+  const medium = new Float32Array(w * h);
+  const small  = new Float32Array(w * h);
+  const gap    = new Float32Array(w * h);
+  const moss   = new Float32Array(w * h);
+
+  let rawMin = Infinity, rawMax = -Infinity;
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idx = py * w + px;
+      const x = px / w * 5, y = py / h * 5;
+
+      // Three stone scales — each at full 0..1 amplitude
+      const L = stoneLayer(px, py, w, h,  6,  7,  1.0, 0.08);  // large
+      const M = stoneLayer(px, py, w, h, 16, 31,  1.0, 0.10);  // medium
+      const S = stoneLayer(px, py, w, h, 38, 53,  1.0, 0.14);  // small chips
+
+      let heightVal = 0;
+      let lMask = 0, mMask = 0, sMask = 0, gMask = 0;
+
+      if (L.isSurface) {
+        // Large stone: full height contribution
+        heightVal = L.h * 0.85 + 0.15;          // never fully 0 on a stone
+        lMask = L.stoneT;
+      } else if (M.isSurface) {
+        // Medium stone sits lower than large
+        heightVal = M.h * 0.55 + 0.05;
+        mMask = M.stoneT;
+      } else if (S.isSurface) {
+        // Small chip: barely protrudes
+        heightVal = S.h * 0.25 + 0.02;
+        sMask = S.stoneT;
+      } else {
+        // Pure gap/dirt: truly flat/zero for maximum displacement contrast
+        // tiny fbm so it's not perfectly flat but still very low
+        const dirtBump = fbm(x * 8, y * 8, 3, 99) * 0.04;
+        heightVal = dirtBump;
+        gMask = 1;
+      }
+
+      raw[idx] = heightVal;
+      if (heightVal < rawMin) rawMin = heightVal;
+      if (heightVal > rawMax) rawMax = heightVal;
+
+      large[idx]  = lMask;
+      medium[idx] = mMask;
+      small[idx]  = sMask;
+      gap[idx]    = gMask;
+    }
+  }
+
+  // ── Normalise to full [0..1] so displacement map has maximum contrast ──
+  const field = new Float32Array(w * h);
+  const range = rawMax - rawMin || 1;
+  for (let i = 0; i < raw.length; i++) {
+    field[i] = (raw[i] - rawMin) / range;
+  }
+
+  // ── Moss mask: grows where normalised height is LOW ─────────────────
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idx = py * w + px;
+      const x = px / w * 5, y = py / h * 5;
+      const h_norm = field[idx];
+      const mossNoise = fbm(x * 3, y * 3, 5, 211);
+      const lowZone   = clamp(1 - h_norm * 2.2);
+      moss[idx] = clamp(lowZone * mossNoise * 2.0 - 0.15);
+    }
+  }
+
+  return { field, large, medium, small, gap, moss };
+}
+
+const rockyGroundMoss: ProceduralMaterial = {
+  id: 'rocky_ground_moss',
+  name: 'Terreno Rocoso con Musgo',
+  category: 'ground',
+  icon: '🪨',
+  defaults: {
+    roughness: 0.92,
+    metalness: 0,
+    normalScale: 8.0,
+    displacementScale: 0.45,  // HIGH: stones protrude physically
+    displacementBias: -0.22,  // push base down so gaps go below surface
+    tiling: [1, 1],
+  },
+  generate(w, h) {
+    const { field, large, medium, small, gap, moss } = rockyGroundField(w, h);
+
+    // ── Albedo ────────────────────────────────────────────────────────
+    const albedoRgba = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const x = px / w * 5, y = py / h * 5;
+
+        const lM = large[idx];
+        const mM = medium[idx];
+        const sM = small[idx];
+        const gM = gap[idx];
+        const msM = moss[idx];
+
+        // Cell-based colour variation for stones
+        const { id: lId } = voronoi(px / w, py / h, 6, 7);
+        const { id: mId } = voronoi(px / w, py / h, 16, 31);
+
+        // Large stone colours — grey to warm grey, some bleached tops
+        const lVar = ((lId * 1664525) & 0xff) / 255;
+        const lBright = 0.55 + lVar * 0.35 + field[idx] * 0.25;
+        const lR = lerp(90, 195, lBright);
+        const lG = lerp(85, 185, lBright);
+        const lB = lerp(78, 175, lBright);
+
+        // Medium stones — slightly warmer / darker
+        const mVar = ((mId * 22695477) & 0xff) / 255;
+        const mBright = 0.40 + mVar * 0.30 + field[idx] * 0.2;
+        const mR = lerp(75, 155, mBright);
+        const mG = lerp(70, 148, mBright);
+        const mB = lerp(60, 135, mBright);
+
+        // Small chips — gritty, brownish-grey
+        const sFbm = fbm(x * 8, y * 8, 3, 55);
+        const sR = lerp(80, 140, sFbm);
+        const sG = lerp(72, 130, sFbm);
+        const sB = lerp(60, 115, sFbm);
+
+        // Dirt/soil — dark brown with slight red
+        const dFbm = fbm(x * 6, y * 6, 4, 88);
+        const dR = lerp(42, 75, dFbm);
+        const dG = lerp(32, 58, dFbm);
+        const dB = lerp(18, 38, dFbm);
+
+        // Moss — olive green, darker in shadow
+        const msF = fbm(x * 4, y * 4, 4, 177);
+        const msR = lerp(32, 68, msF);
+        const msG = lerp(52, 95, msF);
+        const msB = lerp(18, 35, msF);
+
+        // ── Composite ────────────────────────────────────────────────
+        // Base = dirt
+        let r = dR, g = dG, b = dB;
+        // Small chips over dirt
+        r = lerp(r, sR, sM); g = lerp(g, sG, sM); b = lerp(b, sB, sM);
+        // Medium stones
+        r = lerp(r, mR, mM); g = lerp(g, mG, mM); b = lerp(b, mB, mM);
+        // Large stones
+        r = lerp(r, lR, lM); g = lerp(g, lG, lM); b = lerp(b, lB, lM);
+        // Moss overlay
+        r = lerp(r, msR, msM); g = lerp(g, msG, msM); b = lerp(b, msB, msM);
+
+        const i = idx * 4;
+        albedoRgba[i]   = clamp(r, 0, 255) | 0;
+        albedoRgba[i+1] = clamp(g, 0, 255) | 0;
+        albedoRgba[i+2] = clamp(b, 0, 255) | 0;
+        albedoRgba[i+3] = 255;
+      }
+    }
+
+    // ── Roughness: stones slightly smoother than dirt/moss ─────────────
+    const roughnessStr = grayField(
+      mapField(field, v => clamp(0.78 + (1 - v) * 0.18)),
+      w, h
+    );
+
+    // ── AO: deep occlusion in gaps, light on stone peaks ───────────────
+    const aoStr = grayField(
+      mapField(field, v => {
+        // Gaps are very dark; stone peaks are bright
+        return clamp(v * 0.85 + (1 - v) * 0.05);
+      }),
+      w, h
+    );
+
+    return {
+      albedo:       rgbaToDataURL(albedoRgba, w, h),
+      normal:       rgbaToDataURL(heightToNormal(field, w, h, 18), w, h),
+      roughness:    roughnessStr,
+      metallic:     uniformMap(w, h, 0),
+      ao:           aoStr,
+      displacement: grayField(field, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); },
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BACKWARD-COMPAT OAK PLANK EXPORTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _oakField(w:number,h:number):Float32Array{return woodField(w,h,0.05,5,0.55,42);}
+export function createOakPlanksTexture(w=512,h=512):string{return rgbaToDataURL(woodAlbedo(w,h,0.05,5,0.55,42,190,148,90,120,75,30,45,22,8),w,h);}
+export function createOakPlanksNormalMap(w=512,h=512,strength=7):string{return rgbaToDataURL(heightToNormal(_oakField(w,h),w,h,strength),w,h);}
+export function createOakPlanksRoughnessMap(w=512,h=512):string{return grayField(mapField(_oakField(w,h),v=>clamp(.55+(1-v)*.35)),w,h);}
+export function createOakPlanksAOMap(w=512,h=512):string{return grayField(mapField(_oakField(w,h),v=>clamp(.25+v*.75)),w,h);}
+export function createOakPlanksDisplacementMap(w=512,h=512):string{return grayField(_oakField(w,h),w,h);}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MATERIAL LIBRARY
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
+  // Wood
+  oakPlanks, walnut, pine, mahogany, varnishedWood,
+  // Stone
+  marble, marbleBlack, granite, slate, concrete, wetConcrete, cobblestone, sandstone,
+  largeRock, cliffRock, mossyRock, volcanicRock, desertRock,
+  // Metal
+  brushedSteel, brushedAluminum, rustedIron, chrome, copper, gold, galvanizedMetal,
+  // Paint
+  carPaintRed, carPaintBlue, carPaintBlack, carPaintGreen, matteWhite, matteGray, carLacquer,
+  // Synthetic
+  carbonFiber, rubber, leather, plasticGlossy, fabricCanvas, ceramicGlazed,
+  // Ground
+  gravel, sand, asphalt, dirt, rockyGroundMoss,
+];
+
+export const MATERIAL_CATEGORIES = [
+  {id:'wood',      label:'Madera',    icon:'🪵'},
+  {id:'stone',     label:'Piedra / Roca', icon:'🪨'},
+  {id:'metal',     label:'Metal',     icon:'⚙️'},
+  {id:'paint',     label:'Pintura',   icon:'🎨'},
+  {id:'synthetic', label:'Sintético', icon:'🔬'},
+  {id:'ground',    label:'Suelo',     icon:'🌍'},
+] as const;
+
+export function generateMaterial(id:string,width=512,height=512):GeneratedMaps|null{
+  const mat=MATERIAL_LIBRARY.find(m=>m.id===id);
+  return mat?mat.generate(width,height):null;
+}
+
+/**
+ * Generate 64x64 thumbnail DataURLs for every material.
+ * Call once on startup to populate the picker grid.
+ * Returns Map<materialId, albedoDataURL>
+ */
+export function generateAllThumbnails():Map<string,string>{
+  const map=new Map<string,string>();
+  for(const mat of MATERIAL_LIBRARY){
+    map.set(mat.id, mat.thumbnail ? mat.thumbnail() : _thumb(mat));
+  }
+  return map;
+}
+
+/**
+ * Apply material defaults to a Three.js MeshPhysicalMaterial.
+ * Usage:
+ *   const mat = MATERIAL_LIBRARY.find(m => m.id === 'varnished_wood')!;
+ *   applyMaterialDefaults(mat, threeMaterial, texture);
+ */
+export function applyMaterialDefaults(
+  def: ProceduralMaterial,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  threeMat: any,
+  maps: GeneratedMaps,
+  THREE: any
+): void {
+  const d = def.defaults;
+  const loader = new THREE.TextureLoader();
+
+  const load = (url: string, sRGB = false) => {
+    const t = loader.load(url);
+    t.colorSpace = sRGB ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(d.tiling[0], d.tiling[1]);
+    return t;
+  };
+
+  threeMat.map              = load(maps.albedo, true);
+  threeMat.normalMap        = load(maps.normal);
+  threeMat.roughnessMap     = load(maps.roughness);
+  threeMat.metalnessMap     = load(maps.metallic);
+  threeMat.aoMap            = load(maps.ao);
+  threeMat.displacementMap  = load(maps.displacement);
+
+  threeMat.normalScale.setScalar(d.normalScale);
+  threeMat.roughness          = d.roughness;
+  threeMat.metalness          = d.metalness;
+  threeMat.displacementScale  = d.displacementScale;
+  threeMat.displacementBias   = d.displacementBias;
+
+  if(d.clearcoat !== undefined){
+    threeMat.clearcoat          = d.clearcoat;
+    threeMat.clearcoatRoughness = d.clearcoatRoughness ?? 0.1;
+  }
+  threeMat.needsUpdate = true;
+}
