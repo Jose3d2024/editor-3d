@@ -10,6 +10,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { MeshoptDecoder } from 'meshoptimizer';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { loadOptimizedEnvironmentTexture } from '../utils/hdrLoader';
 import { createBaseGeometry } from '../utils/csg';
 
 interface RenderModalProps { onClose: () => void; }
@@ -187,9 +188,8 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const envIntensity = project.environment.intensity ?? 1;
     if (project.environment.hdriUrl) {
       try {
-        setStatus('Cargando HDRI...');
-        const loader = new HDRLoader();
-        const tex = await loader.loadAsync(project.environment.hdriUrl);
+        setStatus('Cargando HDRI / EXR...');
+        const tex = await loadOptimizedEnvironmentTexture(project.environment.hdriUrl, { maxDimension: 2048 });
         // Configurar la textura como equirrect para que three-gpu-pathtracer pueda leerla
         tex.mapping    = THREE.EquirectangularReflectionMapping;
         tex.colorSpace = THREE.LinearSRGBColorSpace;
@@ -203,7 +203,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         }
         scene.environmentIntensity = envIntensity;
       } catch (e) {
-        console.warn('HDRI load failed, using synthetic sky:', e);
+        console.warn('HDRI/EXR load failed, using synthetic sky:', e);
         setupSyntheticSky(scene, renderer, envIntensity);
       }
     } else {

@@ -10,6 +10,7 @@ import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { loadOptimizedEnvironmentTexture } from '../utils/hdrLoader';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { MeshoptDecoder } from 'meshoptimizer';
 import { useStore } from '../store/useStore';
@@ -49,6 +50,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.Camera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const bgTextureRef = useRef<THREE.Texture | null>(null);
+  const envTextureRef = useRef<THREE.Texture | null>(null);
   const groupRef = useRef<THREE.Group>(new THREE.Group());
   const primitivesGroupRef = useRef<THREE.Group>(new THREE.Group());
   const siluetaGroupRef = useRef<THREE.Group>(new THREE.Group());
@@ -361,24 +364,76 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   };
 
   const handleAlignToAxes = () => {
-    if (!selectedObjectId) return;
-    const obj = project.objects.find(o => o.id === selectedObjectId);
-    if (!obj) return;
+    const ids = selectedObjectIds.length > 0 ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
+    if (ids.length === 0) return;
     
     // Snap rotation to nearest 90 degrees (Math.PI / 2)
     const snap = (val: number) => Math.round(val / (Math.PI / 2)) * (Math.PI / 2);
     
-    useStore.getState().updateObject(selectedObjectId, {
-      transform: {
-        ...obj.transform,
-        rotation: [
-          snap(obj.transform.rotation[0]),
-          snap(obj.transform.rotation[1]),
-          snap(obj.transform.rotation[2])
-        ]
+    ids.forEach(id => {
+      const obj = project.objects.find(o => o.id === id);
+      if (obj) {
+        useStore.getState().updateObject(id, {
+          transform: {
+            ...obj.transform,
+            rotation: [
+              snap(obj.transform.rotation[0]),
+              snap(obj.transform.rotation[1]),
+              snap(obj.transform.rotation[2])
+            ]
+          }
+        });
       }
     });
     useStore.getState().saveHistory();
+  };
+
+  const handleAlignToFloor = () => {
+    const ids = selectedObjectIds.length > 0 ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
+    if (ids.length === 0) return;
+
+    ids.forEach(id => {
+      const obj = project.objects.find(o => o.id === id);
+      if (!obj) return;
+
+      let posOffset = 0;
+      // Attempt exact bounding box calculation from rendered mesh in primitivesGroupRef
+      const mesh = primitivesGroupRef.current?.children.find((ch: any) => ch.userData.id === id);
+      if (mesh) {
+        const box = new THREE.Box3().setFromObject(mesh);
+        if (isFinite(box.min.y)) {
+          posOffset = 0 - box.min.y;
+        }
+      } else if (obj.vertices && obj.vertices.length > 0) {
+        const euler = new THREE.Euler(obj.transform.rotation[0], obj.transform.rotation[1], obj.transform.rotation[2]);
+        const scale = new THREE.Vector3(...obj.transform.scale);
+        let min = Infinity;
+        obj.vertices.forEach((v, idx) => {
+          const off = obj.vertexOffsets?.[idx] ?? [0,0,0];
+          const p = new THREE.Vector3((v[0]+off[0])*scale.x, (v[1]+off[1])*scale.y, (v[2]+off[2])*scale.z).applyEuler(euler);
+          if (p.y < min) min = p.y;
+        });
+        if (isFinite(min)) {
+          posOffset = 0 - (obj.transform.position[1] + min);
+        }
+      }
+
+      useStore.getState().updateObject(id, {
+        transform: {
+          ...obj.transform,
+          position: [
+            obj.transform.position[0],
+            obj.transform.position[1] + posOffset,
+            obj.transform.position[2]
+          ]
+        }
+      });
+    });
+    useStore.getState().saveHistory();
+  };
+
+  const handleRecenterPivot = () => {
+    useStore.getState().recenterPivotObject();
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -576,12 +631,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const envData = projectRef.current.environment;
     if (envData.hdriUrl) {
-      new HDRLoader().load(envData.hdriUrl, (texture) => {
-        const envMap = pmremGenerator.fromEquirectangular(texture).texture;
-        scene.environment = envMap;
-        if (envData.backgroundVisible) scene.background = envMap;
-        texture.dispose();
-      });
+      loadOptimizedEnvironmentTexture(envData.hdriUrl, { maxDimension: envData.maxResolution || 2048 })
+        .then((texture) => {
+          texture.mapping = THREE.EquirectangularReflectionMapping;
+          const envMap = pmremGenerator.fromEquirectangular(texture).texture;
+          scene.environment = envMap;
+          scene.background = envData.backgroundVisible ? texture : new THREE.Color(0x1a1a1a);
+
+          if (bgTextureRef.current && bgTextureRef.current !== texture) bgTextureRef.current.dispose();
+          if (envTextureRef.current && envTextureRef.current !== envMap) envTextureRef.current.dispose();
+          bgTextureRef.current = texture;
+          envTextureRef.current = envMap;
+        })
+        .catch((e) => console.error('Failed to load initial environment map:', e));
     } else {
       scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     }
@@ -965,15 +1027,22 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       pmremGenerator.compileEquirectangularShader();
       if (env.hdriUrl) {
         try {
-          const texture = await new Promise<THREE.DataTexture>((resolve, reject) => {
-            new HDRLoader().load(env.hdriUrl!, resolve, undefined, reject);
-          });
+          const texture = await loadOptimizedEnvironmentTexture(env.hdriUrl, { maxDimension: env.maxResolution || 2048 });
+          texture.mapping = THREE.EquirectangularReflectionMapping;
           const envMap = pmremGenerator.fromEquirectangular(texture).texture;
           scene.environment = envMap;
-          scene.background = env.backgroundVisible ? envMap : new THREE.Color(0x1a1a1a);
-          texture.dispose();
+          scene.background = env.backgroundVisible ? texture : new THREE.Color(0x1a1a1a);
+
+          if (bgTextureRef.current && bgTextureRef.current !== texture) {
+            bgTextureRef.current.dispose();
+          }
+          if (envTextureRef.current && envTextureRef.current !== envMap) {
+            envTextureRef.current.dispose();
+          }
+          bgTextureRef.current = texture;
+          envTextureRef.current = envMap;
         } catch (e) {
-          console.error('Failed to load HDRI:', e);
+          console.error('Failed to load HDRI/EXR:', e);
           scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
           scene.background = new THREE.Color(0x1a1a1a);
         }
@@ -985,7 +1054,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     };
 
     updateEnv();
-  }, [project.environment.hdriUrl, project.environment.backgroundVisible]);
+  }, [project.environment.hdriUrl, project.environment.backgroundVisible, project.environment.maxResolution]);
 
   useEffect(() => {
     if (rendererRef.current) {
@@ -3143,14 +3212,43 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const curHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
           if (startHit && curHit) move = curHit.sub(startHit);
         } else {
-          const axisVec=gs.activeAxis==='X'?new THREE.Vector3(1,0,0):gs.activeAxis==='Y'?new THREE.Vector3(0,1,0):new THREE.Vector3(0,0,1);
-          const op=new THREE.Vector3(...gs.startPos), ae=op.clone().add(axisVec);
-          op.project(camera); ae.project(camera);
-          const as=new THREE.Vector2(ae.x-op.x,-(ae.y-op.y)).normalize();
-          const rect=rendererRef.current!.domElement.getBoundingClientRect();
-          const proj=new THREE.Vector2(dx,dy).dot(as)/Math.min(rect.width,rect.height)*10;
-          const ms=Math.max(camera.position.distanceTo(new THREE.Vector3(...gs.startPos)),1)*0.3;
-          move.addScaledVector(axisVec,proj*ms);
+          const axisVec = gs.activeAxis==='X' ? new THREE.Vector3(1,0,0) : gs.activeAxis==='Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+          const startPos = new THREE.Vector3(...gs.startPos);
+          
+          // Build a plane passing through startPos containing axisVec and facing camera as much as possible
+          const camDir = new THREE.Vector3();
+          camera.getWorldDirection(camDir);
+          
+          let planeNormal = new THREE.Vector3().crossVectors(camDir, axisVec).cross(axisVec);
+          if (planeNormal.lengthSq() < 1e-5) {
+            planeNormal = new THREE.Vector3().crossVectors(camera.up, axisVec);
+            if (planeNormal.lengthSq() < 1e-5) {
+              planeNormal = new THREE.Vector3(1,0,0);
+            }
+          }
+          planeNormal.normalize();
+          
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, startPos);
+          const raycaster = new THREE.Raycaster();
+          const rect = rendererRef.current!.domElement.getBoundingClientRect();
+          
+          const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
+          const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
+          const startHit = new THREE.Vector3();
+          const hasStartHit = raycaster.ray.intersectPlane(plane, startHit);
+          
+          const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
+          const curHit = new THREE.Vector3();
+          const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
+          
+          if (hasStartHit && hasCurHit) {
+            const rawDelta = curHit.sub(startHit);
+            const distOnAxis = rawDelta.dot(axisVec);
+            move.copy(axisVec).multiplyScalar(distOnAxis);
+          }
         }
 
         if (editMode==='OBJECT') {
@@ -4105,7 +4203,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     >
       <div className="absolute top-1 left-1 sm:top-2 sm:left-2 z-40 flex items-center gap-1">
         <div
-          className="px-1.5 py-0.5 sm:px-2 sm:py-1 bg-black/60 backdrop-blur-sm text-[8px] sm:text-xs text-white rounded font-mono uppercase tracking-wider cursor-pointer hover:text-blue-400 select-none border border-white/10 flex items-center gap-2"
+          className="px-1.5 py-0.5 sm:px-2 sm:py-1 bg-transparent hover:bg-black/40 text-[8px] sm:text-xs text-white rounded font-mono uppercase tracking-wider cursor-pointer hover:text-indigo-300 select-none border border-transparent hover:border-white/20 flex items-center gap-2 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] transition-all"
           onPointerDown={e=>e.stopPropagation()}
           onClick={e=>{e.stopPropagation();setMaximizedViewport(maximizedViewport===type?null:type);}}
         >
@@ -4122,7 +4220,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
         {/* View Selector Dropdown */}
         <div className="relative group" onPointerDown={e=>e.stopPropagation()}>
-          <button className="p-1 sm:p-1.5 bg-black/60 backdrop-blur-sm text-white rounded border border-white/10 hover:bg-zinc-800 transition-colors">
+          <button className="p-1 sm:p-1.5 bg-transparent hover:bg-black/40 text-white rounded border border-transparent hover:border-white/20 transition-colors drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
             <ChevronDown size={12} />
           </button>
           <div className="absolute top-full left-0 mt-1 hidden group-hover:block bg-zinc-900 border border-white/10 rounded shadow-xl overflow-hidden min-w-[100px]">
@@ -4174,7 +4272,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           {fn:handleZoomOut, title:'Alejar', icon:<line x1="5" y1="12" x2="19" y2="12"/>},
           {fn:handleRecenter,title:'Recentrar',  icon:<><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></>},
           {fn:handleResetView,title:'Reset Vista', icon:<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>},
-          ...(selectedObjectId ? [{fn:handleAlignToAxes, title:'Alinear a Ejes', icon:<><path d="M4 20h16"/><path d="M4 4v16"/><path d="M14 10l-4-4-4 4"/><path d="M10 14l4 4 4-4"/></>}] : []),
+          ...(selectedObjectId ? [
+            {fn:handleRecenterPivot, title:'Centrar Pivote / Origen al Objeto', icon:<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>},
+            {fn:handleAlignToAxes, title:'Alinear a Ejes (90°)', icon:<><path d="M4 20h16"/><path d="M4 4v16"/><path d="M14 10l-4-4-4 4"/><path d="M10 14l4 4 4-4"/></>},
+            {fn:handleAlignToFloor, title:'Alinear al Suelo (Y=0)', icon:<><path d="M2 22h20"/><path d="M12 2v14"/><path d="m7 11 5 5 5-5"/></>}
+          ] : []),
         ].map(({fn,title:t,icon})=>(
           <button key={t} onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();fn();}}
             className="p-2 sm:p-1.5 bg-zinc-800/95 hover:bg-zinc-700 text-white rounded-lg shadow-xl cursor-pointer touch-none active:bg-indigo-600 transition-colors border border-white/10" title={t}>

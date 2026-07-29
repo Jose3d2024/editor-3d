@@ -18,7 +18,7 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
-import { MeshoptSimplifier as Meshopt, MeshoptEncoder } from 'meshoptimizer';
+import { MeshoptSimplifier as Meshopt, MeshoptDecoder, MeshoptEncoder } from 'meshoptimizer';
 import { fromThreeGeometry } from './modifiers';
 
 function normalizeGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
@@ -63,53 +63,66 @@ export async function convertImportedToCSG(obj: CSGObject): Promise<CSGObject> {
 
   let geometry = new THREE.BufferGeometry();
 
-  if (obj.meshData.type === 'stl') {
-    geometry = await new Promise<THREE.BufferGeometry>((resolve, reject) => new STLLoader().load(obj.meshData!.data, resolve, undefined, reject));
-  } else if (obj.meshData.type === 'obj') {
-    const object = await new Promise<THREE.Object3D>((resolve, reject) => new OBJLoader().load(obj.meshData!.data, resolve, undefined, reject));
-    const geometries: THREE.BufferGeometry[] = [];
-    object.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) {
-        let geo = (child as THREE.Mesh).geometry.clone();
-        geo.applyMatrix4(child.matrixWorld);
-        if (geo.attributes.position) {
-          geometries.push(normalizeGeometry(geo));
+  try {
+    if (obj.meshData.type === 'stl') {
+      geometry = await new Promise<THREE.BufferGeometry>((resolve, reject) => new STLLoader().load(obj.meshData!.data, resolve, undefined, reject));
+    } else if (obj.meshData.type === 'obj') {
+      const object = await new Promise<THREE.Object3D>((resolve, reject) => new OBJLoader().load(obj.meshData!.data, resolve, undefined, reject));
+      object.updateMatrixWorld(true);
+      const geometries: THREE.BufferGeometry[] = [];
+      object.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          let geo = (child as THREE.Mesh).geometry.clone();
+          geo.applyMatrix4(child.matrixWorld);
+          if (geo.attributes.position) {
+            geometries.push(normalizeGeometry(geo));
+          }
+        }
+      });
+      if (geometries.length > 0) {
+        const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+        if (merged) geometry = merged;
+      }
+    } else if (obj.meshData.type === 'gltf') {
+      const loader = new GLTFLoader();
+      const dracoLoader = new DRACOLoader();
+      dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+      loader.setDRACOLoader(dracoLoader);
+      loader.setMeshoptDecoder(MeshoptDecoder);
+      const gltf = await new Promise<any>((resolve, reject) => loader.load(obj.meshData!.data, resolve, undefined, reject));
+      if (gltf && gltf.scene) {
+        gltf.scene.updateMatrixWorld(true);
+        const geometries: THREE.BufferGeometry[] = [];
+        gltf.scene.traverse((child: THREE.Object3D) => {
+          if ((child as THREE.Mesh).isMesh) {
+            let geo = (child as THREE.Mesh).geometry.clone();
+            geo.applyMatrix4(child.matrixWorld);
+            if (geo.attributes.position) {
+              geometries.push(normalizeGeometry(geo));
+            }
+          }
+        });
+        if (geometries.length > 0) {
+          const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+          if (merged) geometry = merged;
         }
       }
-    });
-    if (geometries.length > 0) {
-      const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
-      if (merged) geometry = merged;
     }
-  } else if (obj.meshData.type === 'gltf') {
-    const loader = new GLTFLoader();
-    const dracoLoader = new DRACOLoader();
-    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
-    loader.setDRACOLoader(dracoLoader);
-    const gltf = await new Promise<any>((resolve, reject) => loader.load(obj.meshData!.data, resolve, undefined, reject));
-    const geometries: THREE.BufferGeometry[] = [];
-    gltf.scene.traverse((child: THREE.Object3D) => {
-      if ((child as THREE.Mesh).isMesh) {
-        let geo = (child as THREE.Mesh).geometry.clone();
-        geo.applyMatrix4(child.matrixWorld);
-        if (geo.attributes.position) {
-          geometries.push(normalizeGeometry(geo));
-        }
-      }
-    });
-    if (geometries.length > 0) {
-      const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
-      if (merged) geometry = merged;
-    }
-  }
 
-  // Merge vertices to create an indexed geometry and share vertices
-  if (geometry.attributes.position) {
-    geometry = BufferGeometryUtils.mergeVertices(geometry);
+    // Merge vertices to create an indexed geometry and share vertices
+    if (geometry.attributes.position) {
+      geometry = BufferGeometryUtils.mergeVertices(geometry);
+    }
+  } catch (err) {
+    console.error('Error en convertImportedToCSG:', err);
   }
 
   const { vertices, faces } = fromThreeGeometry(geometry);
   
+  if (!vertices || vertices.length === 0) {
+    return obj;
+  }
+
   return {
     ...obj,
     vertices,
@@ -515,7 +528,6 @@ export function shapeToProfile(
 
 import { WebIO, PropertyType } from '@gltf-transform/core';
 import { simplify, weld, prune, dedup, resample, meshopt, join, draco, reorder, instance } from '@gltf-transform/functions';
-import { MeshoptDecoder } from 'meshoptimizer';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
 import draco3d from 'draco3dgltf';
 import dracoEncoderWasmUrl from 'draco3dgltf/draco_encoder.wasm?url';
@@ -740,7 +752,7 @@ export async function optimizeGLB(
             continue;
           }
 
-          // Intento 1: Optimización principal
+          // Intento 1: Optimización principal con LockBorder
           let simplifyResult = Meshopt.simplify(
             typedIndices, typedPositions, 3,
             targetCount, pError,
@@ -749,14 +761,23 @@ export async function optimizeGLB(
           let simplifiedIndices = simplifyResult[0];
 
           // Intento 2: Fallback — mismo LockBorder pero con error aún mayor
-          // NO quitamos LockBorder en el fallback: sin él aparecerían grietas aunque
-          // el intento 1 haya fallado. Subimos el error para que meshopt pueda más.
           if (!isCritical && (!simplifiedIndices || simplifiedIndices.length >= minUsefulReduction)) {
             const retryResult = Meshopt.simplify(
               typedIndices, typedPositions, 3,
               targetCount, Math.min(pError * 2, 1.0), ['LockBorder']
             );
             simplifiedIndices = retryResult[0];
+          }
+
+          // Intento 3: Fallback sin LockBorder si la malla tiene bordes o costuras que bloqueaban toda la reducción
+          if (!isCritical && (!simplifiedIndices || simplifiedIndices.length >= minUsefulReduction)) {
+            const retryResult2 = Meshopt.simplify(
+              typedIndices, typedPositions, 3,
+              targetCount, Math.min(pError, 0.5), []
+            );
+            if (retryResult2 && retryResult2[0] && retryResult2[0].length < minUsefulReduction && retryResult2[0].length >= absoluteFloor) {
+              simplifiedIndices = retryResult2[0];
+            }
           }
 
           // Nota: simplifySloppy eliminado — no respeta LockBorder (causa grietas)
@@ -908,180 +929,210 @@ export async function optimizeGLB(
   }
 }
 
-export function simplifyMesh(
-  obj: CSGObject,
+export async function simplifyMesh(
+  objInput: CSGObject,
   ratio: number = 0.5,
-): CSGObject {
-  if (obj.faces.length < 4) return obj;
+): Promise<CSGObject> {
+  let obj = objInput;
+  if (obj.meshData) {
+    try {
+      obj = await convertImportedToCSG(obj);
+    } catch (e) {
+      console.warn("No se pudo convertir el modelo a CSG para simplificar:", e);
+    }
+  }
+
+  if (!obj.faces || obj.faces.length < 4) return obj;
+
+  // Esperar inicialización de WASM de meshoptimizer
+  try {
+    if ((Meshopt as any).ready) {
+      await (Meshopt as any).ready;
+    }
+    if (MeshoptEncoder.ready) {
+      await MeshoptEncoder.ready;
+    }
+  } catch (err) {
+    console.warn("Inicialización de Meshopt falló o ya lista:", err);
+  }
 
   // 0. Reparar malla antes de simplificar para asegurar que sea continua
-  // Soldamos vértices con una pequeña tolerancia para evitar grietas
   const repaired = repairMesh(obj);
   const workingObj = { ...obj, vertices: repaired.vertices, faces: repaired.faces };
 
-  // 1. Crear BufferGeometry temporal triangulada
+  // 1. Crear BufferGeometry temporal triangulada con soldadura topológica de posiciones
   let geometry = new THREE.BufferGeometry();
   const indices: number[] = [];
   const finalPos: number[] = [];
   const finalUv: number[] = [];
-  const vertMap = new Map<string, number>();
+  const posMap = new Map<string, number>();
 
   workingObj.faces.forEach((face) => {
     const faceIndices: number[] = [];
     face.indices.forEach((posIdx, i) => {
-      const uv = face.uvs?.[i] || [0, 0];
-      // Usamos una clave que incluya posición y UV para preservar costuras
-      const key = `${posIdx}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`;
+      const v = workingObj.vertices[posIdx];
+      if (!v) return;
+      const off = workingObj.vertexOffsets?.[posIdx] || [0, 0, 0];
+      const px = v[0] + off[0];
+      const py = v[1] + off[1];
+      const pz = v[2] + off[2];
       
-      if (vertMap.has(key)) {
-        faceIndices.push(vertMap.get(key)!);
+      const posKey = `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}`;
+      
+      let newIdx: number;
+      if (posMap.has(posKey)) {
+        newIdx = posMap.get(posKey)!;
       } else {
-        const newIdx = finalPos.length / 3;
-        const v = workingObj.vertices[posIdx];
-        const off = workingObj.vertexOffsets?.[posIdx] || [0,0,0];
-        finalPos.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+        newIdx = finalPos.length / 3;
+        finalPos.push(px, py, pz);
+        const uv = face.uvs?.[i] || [0, 0];
         finalUv.push(uv[0], uv[1]);
-        vertMap.set(key, newIdx);
-        faceIndices.push(newIdx);
+        posMap.set(posKey, newIdx);
       }
+      faceIndices.push(newIdx);
     });
-    // Triangulación (N-gons a triángulos)
+
     for (let i = 1; i < faceIndices.length - 1; i++) {
-      indices.push(faceIndices[0], faceIndices[i], faceIndices[i+1]);
+      indices.push(faceIndices[0], faceIndices[i], faceIndices[i + 1]);
     }
   });
 
+  if (indices.length === 0 || finalPos.length === 0) return obj;
+
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPos, 3));
-  if (workingObj.faces.some(f => f.uvs && f.uvs.length > 0)) {
+  if (finalUv.length > 0) {
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUv, 2));
   }
   geometry.setIndex(indices);
   
-  // Soldar vértices antes de optimizar (Paso crítico sugerido)
-  geometry = BufferGeometryUtils.mergeVertices(geometry, 0.00001);
+  // Soldar vértices con tolerancia para evitar grietas en la topología
+  geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
 
-  // 2. Aplicar Simplificador (meshoptimizer)
+  // 2. Aplicar Simplificación Avanzada con Protección de Silueta (meshoptimizer + LockBorder)
   const posAttr = geometry.getAttribute('position');
-  const indexAttr = geometry.index!;
+  const indexAttr = geometry.index;
+  if (!posAttr || !indexAttr) return obj;
   
   const posArray = new Float32Array(posAttr.array);
   const indexArray = new Uint32Array(indexAttr.array);
   
-  // --- RATIO INTELIGENTE ---
-  // Ajustamos la agresividad según el tamaño original de la malla
   const originalTriangleCount = indexArray.length / 3;
-  let effectiveRatio = ratio;
-  let targetError = 0.3; 
+  if (originalTriangleCount < 4) return obj;
 
-  if (originalTriangleCount < 1000) {
-    // Para mallas pequeñas, somos conservadores para no romper la forma
-    effectiveRatio = Math.max(ratio, 0.8);
-    targetError = 0.05; 
-  } else if (originalTriangleCount > 10000) {
-    // Para mallas muy densas, somos extra agresivos
-    effectiveRatio = ratio * 0.8;
-    targetError = 0.5;
-  }
+  const targetRatio = Math.max(0.01, Math.min(0.99, ratio));
+  const targetCount = Math.max(12, Math.floor((indexArray.length * targetRatio) / 3) * 3);
 
-  const targetCount = Math.floor(indexArray.length * effectiveRatio);
-  
+  let resultIndices: Uint32Array | null = null;
+
   try {
-    // Guardamos el conteo original para comparar
-    // (ya lo tenemos arriba)
-
-    // Usamos el simplificador de meshoptimizer directamente
+    // Intento 1: 'LockBorder' protege la silueta exterior y contornos abiertos
     const simplifyResult = Meshopt.simplify(
       indexArray,
       posArray,
-      3, // stride
+      3,
       targetCount,
-      targetError,
-      ['LockBorder'] // Protege los bordes y articulaciones
+      0.1,
+      ['LockBorder']
     );
     
-    const resultIndices = simplifyResult[0];
-    
-    if (resultIndices && resultIndices.length < indexArray.length) {
+    if (simplifyResult && simplifyResult[0] && simplifyResult[0].length < indexArray.length && simplifyResult[0].length >= 12) {
+      resultIndices = simplifyResult[0];
+    } else {
+      // Intento 2: Mayor tolerancia conservando siempre 'LockBorder'
+      const retry1 = Meshopt.simplify(
+        indexArray,
+        posArray,
+        3,
+        targetCount,
+        0.5,
+        ['LockBorder']
+      );
+      if (retry1 && retry1[0] && retry1[0].length < indexArray.length && retry1[0].length >= 12) {
+        resultIndices = retry1[0];
+      } else {
+        // Intento 3: Error libre manteniendo 'LockBorder'
+        const retry2 = Meshopt.simplify(
+          indexArray,
+          posArray,
+          3,
+          targetCount,
+          1.0,
+          ['LockBorder']
+        );
+        if (retry2 && retry2[0] && retry2[0].length < indexArray.length && retry2[0].length >= 12) {
+          resultIndices = retry2[0];
+        } else {
+          // Intento 4: Si LockBorder bloqueó toda la reducción por bordes abiertos o costuras, intentar sin LockBorder
+          const retry3 = Meshopt.simplify(
+            indexArray,
+            posArray,
+            3,
+            targetCount,
+            0.5,
+            []
+          );
+          if (retry3 && retry3[0] && retry3[0].length < indexArray.length && retry3[0].length >= 12) {
+            resultIndices = retry3[0];
+          }
+        }
+      }
+    }
+
+    if (resultIndices && resultIndices.length > 0 && resultIndices.length < indexArray.length) {
       const finalTriangleCount = resultIndices.length / 3;
       const reduction = ((1 - (finalTriangleCount / originalTriangleCount)) * 100).toFixed(2);
 
-      // REPORTE DETALLADO EN CONSOLA
-      console.log(`%c 🚀 OPTIMIZACIÓN GLB FINALIZADA `, 'background: #222; color: #bada55');
+      console.log(`%c 🚀 REDUCCIÓN DE MALLA FINALIZADA `, 'background: #222; color: #bada55');
       console.table({
-          "Triángulos Originales": originalTriangleCount,
-          "Triángulos Finales": finalTriangleCount,
-          "Reducción lograda": `${reduction}%`,
-          "Ratio solicitado": ratio
+        "Triángulos Originales": originalTriangleCount,
+        "Triángulos Finales": finalTriangleCount,
+        "Reducción lograda": `${reduction}%`,
+        "Ratio solicitado": ratio
       });
 
       geometry.setIndex(new THREE.BufferAttribute(resultIndices, 1));
     } else {
-      console.warn("⚠️ El simplificador no encontró polígonos que reducir con la configuración actual.");
-      // Fallback if no reduction
-      const modifier = new SimplifyModifier();
-      const countToRemove = Math.max(0, posAttr.count - Math.floor(posAttr.count * ratio));
-      const simplified = modifier.modify(geometry, countToRemove);
-      geometry = simplified;
+      // Fallback a SimplifyModifier (edge collapse con quadric error metrics)
+      try {
+        const modifier = new SimplifyModifier();
+        const currentTris = geometry.index ? geometry.index.count / 3 : originalTriangleCount;
+        const countToRemove = Math.max(0, currentTris - Math.floor(currentTris * targetRatio));
+        if (countToRemove > 0) {
+          geometry = modifier.modify(geometry, countToRemove);
+          console.log(`%c 🚀 REDUCCIÓN VÍA SIMPLIFYMODIFIER COMPLETADA `, 'background: #222; color: #60a5fa');
+        }
+      } catch (eMod) {
+        console.warn("SimplifyModifier fallback fallo o la malla ya está en su límite:", eMod);
+      }
     }
     
-    // --- LIMPIEZA DE NORMALES PARA EVITAR CARAS NEGRAS ---
-    // 1. Borrar normales viejas que ya no coinciden con la nueva malla
     if (geometry.hasAttribute('normal')) {
-        geometry.deleteAttribute('normal');
+      geometry.deleteAttribute('normal');
     }
-
-    // 2. Forzar a Three.js a calcular las nuevas normales de cara
     geometry.computeVertexNormals();
 
     const optimizedCSG = convertBufferGeometryToCSG(geometry, obj);
 
-    // --- CIERRE AUTOMÁTICO DE HUECOS POST-OPTIMIZACIÓN ---
     try {
-        const result = fillHoles(optimizedCSG);
-        const closedMesh: CSGObject = {
-          ...optimizedCSG,
-          vertices: result.vertices,
-          faces: result.faces,
-          stats: { vertices: result.vertices.length, faces: result.faces.length }
-        };
-        
-        // Log para confirmar si se cerraron huecos
-        console.log(`%c 🛡️ MALLA CERRADA `, 'background: #444; color: #00ff00', 
-                    "Huecos sellados automáticamente.");
-                    
-        return closedMesh;
+      const result = fillHoles(optimizedCSG);
+      return {
+        ...optimizedCSG,
+        vertices: result.vertices,
+        faces: result.faces,
+        meshData: undefined,
+        vertexOffsets: {},
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
     } catch (e) {
-        console.warn("No se pudieron cerrar los huecos automáticamente:", e);
-        return optimizedCSG;
+      return {
+        ...optimizedCSG,
+        meshData: undefined,
+        vertexOffsets: {},
+      };
     }
   } catch (e) {
-    console.warn('meshoptimizer failed, falling back to SimplifyModifier', e);
-    const modifier = new SimplifyModifier();
-    const countToRemove = Math.max(0, posAttr.count - Math.floor(posAttr.count * ratio));
-    try {
-      const simplified = modifier.modify(geometry, countToRemove);
-      
-      if (simplified.hasAttribute('normal')) {
-          simplified.deleteAttribute('normal');
-      }
-      simplified.computeVertexNormals();
-      
-      const optimizedCSG = convertBufferGeometryToCSG(simplified, obj);
-      try {
-          const result = fillHoles(optimizedCSG);
-          const closedMesh: CSGObject = {
-            ...optimizedCSG,
-            vertices: result.vertices,
-            faces: result.faces,
-            stats: { vertices: result.vertices.length, faces: result.faces.length }
-          };
-          return closedMesh;
-      } catch (err) {
-          return optimizedCSG;
-      }
-    } catch (e2) {
-      return obj;
-    }
+    console.warn('Error en Meshopt.simplify:', e);
+    return obj;
   }
 }
 

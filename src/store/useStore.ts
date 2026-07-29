@@ -73,6 +73,7 @@ const DEFAULT_PROJECT: Project = {
     backgroundVisible: false,
     intensity: 1,
     exposure: 1,
+    maxResolution: 2048,
   },
   showGrid: true,
 };
@@ -183,6 +184,7 @@ const autoSmoothBezierHandles = (
 
 // ── Store interface ────────────────────────────────────────────────────────
 interface Store extends AppState {
+  resetProject: () => void;
   setProject: (project: Project) => void;
   addObject: (type: PrimitiveType) => void;
   addLight: (type: LightType) => void;
@@ -274,6 +276,11 @@ interface Store extends AppState {
   repairObject: (id: string) => Promise<void>;
   healObject: (id: string) => Promise<void>;
   fillHolesObject: (id: string) => Promise<void>;
+  voxelRemeshObject: (id: string, resolution?: number, smoothIterations?: number) => Promise<void>;
+  shrinkWrapObject: (id: string, resolution?: number) => Promise<void>;
+  separateLoosePartsObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
+  ungroupSelectedObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
+  recenterPivotObject: (idInput?: string) => Promise<void>;
   alignToGrid: (id: string) => void;
   alignToGround: (id: string) => void;
 }
@@ -351,6 +358,7 @@ function solidExtrudeMesh(
 // ── Store ──────────────────────────────────────────────────────────────────
 export const useStore = create<Store>()((set, get) => ({
   project: DEFAULT_PROJECT,
+  meshProcessing: null,
   selectedObjectId: null,
   selectedObjectIds: [] as string[],
   currentTime: 0,
@@ -376,6 +384,24 @@ export const useStore = create<Store>()((set, get) => ({
   maximizedViewport: null,
   viewportCameras: {},
   clipboard: null,
+
+  resetProject: () => {
+    const freshProject: Project = JSON.parse(JSON.stringify(DEFAULT_PROJECT));
+    set({
+      project: freshProject,
+      selectedObjectId: null,
+      selectedLightId: null,
+      selectedCameraId: null,
+      selectedVertexIndices: [],
+      selectedFaceIndices: [],
+      selectedEdgeIndices: [],
+      selectedGLTFMeshes: [],
+      history: [freshProject],
+      historyIndex: 0,
+      currentTime: 0,
+      isPlaying: false,
+    });
+  },
 
   setProject: (project) => {
     const { project: currentProject } = get();
@@ -1649,16 +1675,30 @@ export const useStore = create<Store>()((set, get) => ({
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Optimización Poligonal',
+        subtitle: 'Calculando colapso de aristas...',
+        progress: 15,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length,
+        faceCount: obj.faces?.length,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
     
     try {
       if (obj.meshData) {
         if (obj.meshData.type === 'gltf') {
-          const { optimizeGLB } = await import('../utils/modifiers_advanced');
-          const optimizedObj = await optimizeGLB(obj, ratio, selectedMeshes);
-          if (optimizedObj === obj) {
-            console.warn('Optimization did not produce a new object.');
-            return;
-          }
+          const { optimizeGLBModel } = await import('../utils/glb_processor');
+          const resLevel = Math.max(1, Math.min(12, Math.round(ratio * 12)));
+          const optimizedObj = await optimizeGLBModel(obj, resLevel, (prog, step) => {
+            set(s => ({
+              meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+            }));
+          });
           set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? optimizedObj : o)}});
           get().saveHistory();
           return;
@@ -1667,11 +1707,14 @@ export const useStore = create<Store>()((set, get) => ({
         }
       }
       
-      const result = simplifyMesh(obj, ratio);
+      const result = await simplifyMesh(obj, ratio);
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
       get().saveHistory();
     } catch (error) {
-      console.error('Error optimizing object:', error);
+      console.error('Error optimizando objeto:', error);
+    } finally {
+      await new Promise(r => setTimeout(r, 250));
+      set({ meshProcessing: null });
     }
   },
 
@@ -1700,24 +1743,60 @@ export const useStore = create<Store>()((set, get) => ({
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
-    if (obj.meshData) obj = await convertImportedToCSG(obj);
-    const result = repairMesh(obj);
-    set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
-    get().saveHistory();
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Reparación de Malla',
+        subtitle: 'Corrigiendo normales y desarticulaciones...',
+        progress: 20,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length,
+        faceCount: obj.faces?.length,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      const result = repairMesh(obj);
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+      get().saveHistory();
+    } finally {
+      await new Promise(r => setTimeout(r, 250));
+      set({ meshProcessing: null });
+    }
   },
 
   healObject: async (id) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
-    if (obj.meshData) obj = await convertImportedToCSG(obj);
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Curado Topológico Manifold',
+        subtitle: 'Cerrando vacíos y consolidando sólido...',
+        progress: 25,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length,
+        faceCount: obj.faces?.length,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
     try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
       const { healMesh } = await import('../utils/manifoldUtils');
       const result = await healMesh(obj.vertices, obj.faces);
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
       get().saveHistory();
     } catch (e) {
       console.error('Manifold heal failed', e);
+    } finally {
+      await new Promise(r => setTimeout(r, 250));
+      set({ meshProcessing: null });
     }
   },
 
@@ -1725,10 +1804,359 @@ export const useStore = create<Store>()((set, get) => ({
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
-    if (obj.meshData) obj = await convertImportedToCSG(obj);
-    const result = fillHoles(obj);
-    set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Tapar Agujeros Poligonales',
+        subtitle: 'Buscando bordes abiertos y triangulando huecos...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length,
+        faceCount: obj.faces?.length,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      const result = fillHoles(obj);
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+      get().saveHistory();
+    } finally {
+      await new Promise(r => setTimeout(r, 250));
+      set({ meshProcessing: null });
+    }
+  },
+
+  voxelRemeshObject: async (id, resolution = 40, smoothIterations = 0) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Remallado Voxel (Marching Cubes)',
+        subtitle: 'Generando espacio Voxel e isosuperficie...',
+        progress: 15,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length,
+        faceCount: obj.faces?.length,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) {
+        set(s => ({
+          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 30 } : null
+        }));
+        await new Promise(r => setTimeout(r, 20));
+        obj = await convertImportedToCSG(obj);
+      }
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Extrayendo volumen poligonal...', progress: 60 } : null
+      }));
+      await new Promise(r => setTimeout(r, 20));
+
+      const { voxelRemesh, smoothMesh } = await import('../utils/modifiers');
+      const voxelized = voxelRemesh(obj, resolution);
+
+      let finalResult = voxelized;
+      if (smoothIterations > 0) {
+        set(s => ({
+          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Aplicando suavizado de superficie...', progress: 85 } : null
+        }));
+        await new Promise(r => setTimeout(r, 20));
+        finalResult = smoothMesh(
+          { ...obj, vertices: voxelized.vertices, faces: voxelized.faces },
+          0.3,
+          smoothIterations
+        );
+      }
+
+      set({
+        project: {
+          ...get().project,
+          objects: get().project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  type: 'MESH',
+                  parameters: {},
+                  meshData: undefined,
+                  vertices: finalResult.vertices,
+                  faces: finalResult.faces,
+                  vertexOffsets: {},
+                  stats: { vertices: finalResult.vertices.length, faces: finalResult.faces.length }
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } catch (e) {
+      console.error("Error en Voxel Remesh:", e);
+    } finally {
+      await new Promise(r => setTimeout(r, 300));
+      set({ meshProcessing: null });
+    }
+  },
+
+  shrinkWrapObject: async (id, resolution = 3) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Remallado Envolvente (Shrink-Wrap)',
+        subtitle: 'Inicializando estructura y leyendo polígonos...',
+        progress: 5,
+        objectName: obj.name,
+        vertCount: obj.vertices?.length || obj.stats?.vertices,
+        faceCount: obj.faces?.length || obj.stats?.faces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData && obj.meshData.type === 'gltf') {
+        const { optimizeGLBModel } = await import('../utils/glb_processor');
+        const optimizedObj = await optimizeGLBModel(obj, resolution, async (prog, step) => {
+          set(s => ({
+            meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+          }));
+          await new Promise(r => setTimeout(r, 5));
+        });
+        set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? optimizedObj : o)}});
+        get().saveHistory();
+        return;
+      }
+
+      if (obj.meshData) {
+        set(s => ({
+          meshProcessing: s.meshProcessing
+            ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 12 }
+            : null
+        }));
+        await new Promise(r => setTimeout(r, 20));
+        obj = await convertImportedToCSG(obj);
+      }
+
+      const { shrinkWrapMesh } = await import('../utils/modifiers');
+      const shrinkWrapped = await shrinkWrapMesh(obj, resolution, async (prog, step) => {
+        set(s => ({
+          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+        }));
+        await new Promise(r => setTimeout(r, 5));
+      });
+
+      set({
+        project: {
+          ...get().project,
+          objects: get().project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  type: 'MESH',
+                  parameters: {},
+                  meshData: undefined,
+                  vertices: shrinkWrapped.vertices,
+                  faces: shrinkWrapped.faces,
+                  vertexOffsets: {},
+                  stats: { vertices: shrinkWrapped.vertices.length, faces: shrinkWrapped.faces.length }
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } catch (e) {
+      console.error("Error en Shrink-Wrap:", e);
+    } finally {
+      await new Promise(r => setTimeout(r, 350));
+      set({ meshProcessing: null });
+    }
+  },
+
+  separateLoosePartsObject: async (id) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const { separateLooseParts } = await import('../utils/meshExplode');
+    const result = await separateLooseParts(obj);
+
+    if (!result.success || !result.objects) {
+      return result;
+    }
+
+    const updatedObjects = project.objects.flatMap(o =>
+      o.id === id ? result.objects! : [o]
+    );
+
+    set({
+      project: { ...get().project, objects: updatedObjects },
+      selectedObjectId: result.objects[0].id,
+      selectedObjectIds: result.objects.map(o => o.id),
+    });
     get().saveHistory();
+
+    return { success: true, message: result.message, count: result.objects.length };
+  },
+
+  ungroupSelectedObject: async (id) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const { ungroupObject } = await import('../utils/ungroup');
+    const result = await ungroupObject(obj);
+
+    if (!result.success || !result.objects || result.objects.length === 0) {
+      return result;
+    }
+
+    const updatedObjects = project.objects.flatMap(o =>
+      o.id === id ? result.objects! : [o]
+    );
+
+    const newSelectedIds = result.objects.map(o => o.id);
+
+    set({
+      project: { ...get().project, objects: updatedObjects },
+      selectedObjectId: result.objects[0].id,
+      selectedObjectIds: newSelectedIds,
+    });
+    get().saveHistory();
+
+    return { success: true, message: result.message, count: result.objects.length };
+  },
+
+  recenterPivotObject: async (idInput?: string) => {
+    const { project, selectedObjectId, selectedObjectIds } = get();
+    const targetIds = idInput ? [idInput] : (selectedObjectIds.length > 0 ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []));
+    if (targetIds.length === 0) return;
+
+    const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+    const { createBaseGeometry } = await import('../utils/csg');
+    const { fromThreeGeometry } = await import('../utils/modifiers');
+
+    let updatedObjects = [...project.objects];
+    let changed = false;
+
+    for (const id of targetIds) {
+      let obj = updatedObjects.find(o => o.id === id);
+      if (!obj) continue;
+
+      if (obj.meshData) {
+        try {
+          obj = await convertImportedToCSG(obj);
+        } catch (e) {
+          console.error('Error convirtiendo modelo para centrar pivote:', e);
+        }
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        try {
+          const geo = createBaseGeometry(obj);
+          const res = fromThreeGeometry(geo);
+          obj = {
+            ...obj,
+            vertices: res.vertices,
+            faces: res.faces,
+            meshData: undefined,
+          };
+        } catch (e) {
+          console.error('Error generando geometría para centrar pivote:', e);
+          continue;
+        }
+      }
+
+      let vertices = obj.vertices || [];
+      if (!vertices.length) continue;
+
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+      vertices.forEach((v, idx) => {
+        const off = obj.vertexOffsets?.[idx] ?? [0, 0, 0];
+        const vx = v[0] + off[0];
+        const vy = v[1] + off[1];
+        const vz = v[2] + off[2];
+        if (vx < minX) minX = vx;
+        if (vy < minY) minY = vy;
+        if (vz < minZ) minZ = vz;
+        if (vx > maxX) maxX = vx;
+        if (vy > maxY) maxY = vy;
+        if (vz > maxZ) maxZ = vz;
+      });
+
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const cz = (minZ + maxZ) / 2;
+
+      if (Math.hypot(cx, cy, cz) < 1e-4) {
+        if (obj.vertexOffsets && Object.keys(obj.vertexOffsets).length > 0) {
+          const flushedVertices: V3[] = vertices.map((v, idx) => {
+            const off = obj.vertexOffsets?.[idx] ?? [0, 0, 0];
+            return [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
+          });
+          updatedObjects = updatedObjects.map(o => o.id === id ? {
+            ...obj,
+            vertices: flushedVertices,
+            vertexOffsets: {},
+            meshData: undefined,
+          } : o);
+          changed = true;
+        } else if (obj.meshData) {
+          updatedObjects = updatedObjects.map(o => o.id === id ? {
+            ...obj,
+            meshData: undefined,
+          } : o);
+          changed = true;
+        }
+        continue;
+      }
+
+      const newVertices: V3[] = vertices.map((v, idx) => {
+        const off = obj.vertexOffsets?.[idx] ?? [0, 0, 0];
+        return [v[0] + off[0] - cx, v[1] + off[1] - cy, v[2] + off[2] - cz];
+      });
+
+      const scale = new THREE.Vector3(...obj.transform.scale);
+      const euler = new THREE.Euler(...obj.transform.rotation, 'XYZ');
+      const localOffset = new THREE.Vector3(cx, cy, cz).multiply(scale).applyEuler(euler);
+
+      const newPos: [number, number, number] = [
+        obj.transform.position[0] + localOffset.x,
+        obj.transform.position[1] + localOffset.y,
+        obj.transform.position[2] + localOffset.z,
+      ];
+
+      updatedObjects = updatedObjects.map(o => o.id === id ? {
+        ...obj,
+        vertices: newVertices,
+        faces: obj.faces,
+        vertexOffsets: {},
+        meshData: undefined,
+        transform: {
+          ...obj.transform,
+          position: newPos,
+        }
+      } : o);
+
+      changed = true;
+    }
+
+    if (changed) {
+      set({ project: { ...get().project, objects: updatedObjects } });
+      get().saveHistory();
+    }
   },
 
   capSelectedFacesObject: async (id) => {

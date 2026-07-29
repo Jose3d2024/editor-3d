@@ -7,6 +7,11 @@
 
 import { MaterialPanel } from './MaterialPanel';
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import * as THREE from 'three';
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import {
   generatePolygon, generateArc,
   latheMesh, LATHE_PRESETS,
@@ -25,10 +30,12 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   Image as ImageIcon, Upload, Download, FileDown,
-  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera
+  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split,
+  ArrowUpFromLine, Target
 } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
+import { hasChildrenOrSubObjects } from '../utils/ungroup';
 
 // ─── Tipos de label por categoría ────────────────────────────────────────────
 
@@ -355,7 +362,7 @@ const GeneratedSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 };
 
 const AlignSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
-  const { project, selectedObjectIds, updateObject, saveHistory } = useStore();
+  const { project, selectedObjectIds, updateObject, saveHistory, recenterPivotObject } = useStore();
   
   const alignObjects = (axis: 'x'|'y'|'z', mode: 'min'|'center'|'max') => {
     const ids = (selectedObjectIds && selectedObjectIds.length > 1) ? selectedObjectIds : [obj.id];
@@ -372,16 +379,88 @@ const AlignSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     saveHistory();
   };
 
+  const handleAlignToFloor = () => {
+    const ids = (selectedObjectIds && selectedObjectIds.length > 1) ? selectedObjectIds : [obj.id];
+    const selected = project.objects.filter(o => ids.includes(o.id));
+    selected.forEach(targetObj => {
+      let minYRel = 0;
+      if (targetObj.vertices && targetObj.vertices.length > 0) {
+        const euler = new THREE.Euler(targetObj.transform.rotation[0], targetObj.transform.rotation[1], targetObj.transform.rotation[2]);
+        const scale = new THREE.Vector3(...targetObj.transform.scale);
+        let min = Infinity;
+        targetObj.vertices.forEach((v, idx) => {
+          const off = targetObj.vertexOffsets?.[idx] ?? [0,0,0];
+          const p = new THREE.Vector3((v[0]+off[0])*scale.x, (v[1]+off[1])*scale.y, (v[2]+off[2])*scale.z).applyEuler(euler);
+          if (p.y < min) min = p.y;
+        });
+        if (isFinite(min)) minYRel = min;
+      }
+      updateObject(targetObj.id, {
+        transform: {
+          ...targetObj.transform,
+          position: [targetObj.transform.position[0], -minYRel, targetObj.transform.position[2]]
+        }
+      });
+    });
+    saveHistory();
+  };
+
+  const handleAlignToAxes = () => {
+    const ids = (selectedObjectIds && selectedObjectIds.length > 1) ? selectedObjectIds : [obj.id];
+    const snap = (val: number) => Math.round(val / (Math.PI / 2)) * (Math.PI / 2);
+    ids.forEach(id => {
+      const targetObj = project.objects.find(o => o.id === id);
+      if (targetObj) {
+        updateObject(id, {
+          transform: {
+            ...targetObj.transform,
+            rotation: [
+              snap(targetObj.transform.rotation[0]),
+              snap(targetObj.transform.rotation[1]),
+              snap(targetObj.transform.rotation[2])
+            ]
+          }
+        });
+      }
+    });
+    saveHistory();
+  };
+
   return (
-    <Section title="Alinear" icon={<AlignCenterHorizontal size={12}/>} defaultOpen={false}>
-      <div className="grid grid-cols-3 gap-1">
-        {['x','y','z'].map(ax => (
-          <React.Fragment key={ax}>
-            <button onClick={()=>alignObjects(ax as any,'min')} className="p-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[9px]">{ax.toUpperCase()} Min</button>
-            <button onClick={()=>alignObjects(ax as any,'center')} className="p-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[9px]">{ax.toUpperCase()} Cen</button>
-            <button onClick={()=>alignObjects(ax as any,'max')} className="p-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[9px]">{ax.toUpperCase()} Max</button>
-          </React.Fragment>
-        ))}
+    <Section title="Alinear / Pivote" icon={<AlignCenterHorizontal size={12}/>} defaultOpen={false}>
+      <div className="space-y-2">
+        <button 
+          onClick={() => recenterPivotObject(obj.id)} 
+          className="w-full p-1.5 bg-amber-900/40 hover:bg-amber-800/60 border border-amber-500/30 rounded text-[10px] font-bold text-amber-200 flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+          title="Centra el origen / pivote de transformación exactamente en el centro geométrico del objeto sin mover su posición en la escena"
+        >
+          <Target size={12} className="text-amber-400" /> Centrar Pivote / Origen al Objeto
+        </button>
+        <div className="grid grid-cols-2 gap-1.5">
+          <button 
+            onClick={handleAlignToFloor} 
+            className="p-1.5 bg-indigo-900/40 hover:bg-indigo-800/60 border border-indigo-500/30 rounded text-[10px] font-bold text-indigo-200 flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+            title="Sienta la base del objeto exactamente sobre el suelo (Y = 0)"
+          >
+            <ArrowUpFromLine size={12} className="rotate-180 text-indigo-400" /> Alinear al Suelo (Y=0)
+          </button>
+          <button 
+            onClick={handleAlignToAxes} 
+            className="p-1.5 bg-zinc-800 hover:bg-zinc-700 border border-white/10 rounded text-[10px] font-bold text-zinc-200 flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+            title="Alinea la rotación a los ejes más cercanos (ángulos de 90°)"
+          >
+            <Target size={12} className="text-zinc-400" /> Alinear a Ejes (90°)
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-1 pt-1">
+          {['x','y','z'].map(ax => (
+            <React.Fragment key={ax}>
+              <button onClick={()=>alignObjects(ax as any,'min')} className="p-1 bg-zinc-800/80 hover:bg-zinc-700 rounded text-[9px] font-mono">{ax.toUpperCase()} Min</button>
+              <button onClick={()=>alignObjects(ax as any,'center')} className="p-1 bg-zinc-800/80 hover:bg-zinc-700 rounded text-[9px] font-mono">{ax.toUpperCase()} Cen</button>
+              <button onClick={()=>alignObjects(ax as any,'max')} className="p-1 bg-zinc-800/80 hover:bg-zinc-700 rounded text-[9px] font-mono">{ax.toUpperCase()} Max</button>
+            </React.Fragment>
+          ))}
+        </div>
       </div>
     </Section>
   );
@@ -458,10 +537,37 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
 
 const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
-  const { smoothObject, subdivideObject, optimizeObject, updateObject, fillHolesObject, capSelectedFacesObject, repairObject, healObject, editMode, selectedGLTFMeshes, setSelectedGLTFMeshes, isolateGLTFSelection, setIsolateGLTFSelection } = useStore();
+  const { smoothObject, subdivideObject, optimizeObject, updateObject, fillHolesObject, capSelectedFacesObject, repairObject, healObject, separateLoosePartsObject, voxelRemeshObject, shrinkWrapObject, editMode, selectedGLTFMeshes, setSelectedGLTFMeshes, isolateGLTFSelection, setIsolateGLTFSelection } = useStore();
   const [smoothFactor, setSmoothFactor] = useState(0.5);
   const [optimizeRatio, setOptimizeRatio] = useState(0.3);
+  const [voxelResolution, setVoxelResolution] = useState(45);
+  const [shrinkResolution, setShrinkResolution] = useState(3);
+  const [isVoxelizing, setIsVoxelizing] = useState(false);
+  const [isShrinkWrapping, setIsShrinkWrapping] = useState(false);
   const [isHealing, setIsHealing] = useState(false);
+  const [isSeparating, setIsSeparating] = useState(false);
+  const [separateMsg, setSeparateMsg] = useState<string | null>(null);
+
+  const handleVoxelRemesh = async () => {
+    setIsVoxelizing(true);
+    await voxelRemeshObject(obj.id, voxelResolution, 2);
+    setIsVoxelizing(false);
+  };
+
+  const handleShrinkWrap = async () => {
+    setIsShrinkWrapping(true);
+    await shrinkWrapObject(obj.id, shrinkResolution);
+    setIsShrinkWrapping(false);
+  };
+
+  const handleSeparateLooseParts = async () => {
+    setIsSeparating(true);
+    setSeparateMsg(null);
+    const res = await useStore.getState().separateLoosePartsObject(obj.id);
+    setIsSeparating(false);
+    setSeparateMsg(res.message);
+    setTimeout(() => setSeparateMsg(null), 5000);
+  };
 
   const handleHeal = async () => {
     setIsHealing(true);
@@ -518,6 +624,27 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           </button>
         </div>
         <button onClick={() => subdivideObject(obj.id)} className="w-full py-1 bg-indigo-700 rounded text-[10px] font-bold">Subdividir</button>
+        
+        <div className="pt-1 pb-0.5">
+          <button
+            onClick={handleSeparateLooseParts}
+            disabled={isSeparating}
+            className={`w-full py-1.5 px-2 rounded text-[10px] font-bold text-white flex items-center justify-center gap-1.5 transition-all shadow cursor-pointer ${
+              isSeparating
+                ? 'bg-purple-900/60 animate-pulse border border-purple-500/40'
+                : 'bg-purple-700 hover:bg-purple-600 border border-purple-500/40 shadow-purple-950/30'
+            }`}
+            title="Separar por partes sueltas: Analiza conectividad y divide objetos o mallas unificadas en piezas independientes"
+          >
+            <Split size={12} />
+            {isSeparating ? 'Analizando partes...' : 'Separar por partes sueltas'}
+          </button>
+          {separateMsg && (
+            <div className="mt-1.5 p-1.5 bg-purple-950/80 border border-purple-500/40 rounded text-[9px] text-purple-200 text-center font-medium animate-fadeIn">
+              {separateMsg}
+            </div>
+          )}
+        </div>
         <div className="space-y-1">
           <NumRow label="Suavizar" value={smoothFactor} min={0} max={1} onChange={setSmoothFactor} slider />
           <button onClick={() => smoothObject(obj.id, smoothFactor)} className="w-full py-1 bg-indigo-700 rounded text-[10px] font-bold">Aplicar Suavizado</button>
@@ -576,6 +703,53 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
           <button onClick={() => optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined)} className="w-full py-1 bg-violet-700 rounded text-[10px] font-bold mt-1">
             Optimizar {selectedGLTFMeshes.length > 0 ? 'Selección' : 'Completo'}
+          </button>
+        </div>
+
+        <div className="space-y-1 pt-2 border-t border-white/5">
+          <NumRow 
+            label="Resolución Voxel" 
+            value={voxelResolution} 
+            min={16} 
+            max={128} 
+            step={1} 
+            onChange={setVoxelResolution} 
+            slider 
+          />
+          <button 
+            onClick={handleVoxelRemesh} 
+            disabled={isVoxelizing}
+            className={`w-full py-1.5 rounded text-[10px] font-bold text-white transition-all shadow ${
+              isVoxelizing 
+                ? 'bg-blue-900/60 animate-pulse border border-blue-500/40' 
+                : 'bg-gradient-to-r from-blue-700 to-indigo-700 hover:from-blue-600 hover:to-indigo-600 shadow-blue-950/30'
+            }`}
+            title="Reconstruye la malla de manera volumétrica cerrando huecos y aislando la silueta externa"
+          >
+            {isVoxelizing ? 'Remallando Voxel...' : 'Remallado Voxel (Cerrar y Unificar)'}
+          </button>
+        </div>
+        <div className="space-y-1 pt-2 border-t border-white/5">
+          <NumRow 
+            label="Detalle Envolvente" 
+            value={shrinkResolution} 
+            min={1} 
+            max={12} 
+            step={1} 
+            onChange={setShrinkResolution} 
+            slider 
+          />
+          <button 
+            onClick={handleShrinkWrap} 
+            disabled={isShrinkWrapping}
+            className={`w-full py-1.5 rounded text-[10px] font-bold text-white transition-all shadow cursor-pointer ${
+              isShrinkWrapping 
+                ? 'bg-emerald-900/60 animate-pulse border border-emerald-500/40' 
+                : 'bg-gradient-to-r from-emerald-700 to-teal-700 hover:from-emerald-600 hover:to-teal-600 shadow-teal-950/30'
+            }`}
+            title="Contrae una caja segmentada simple hasta que toque la superficie exterior del objeto, manteniendo ángulos y caras planas"
+          >
+            {isShrinkWrapping ? 'Ejecutando Shrink-Wrap...' : 'Remallado Envolvente (Shrink-Wrap)'}
           </button>
         </div>
         <div className="grid grid-cols-2 gap-1">
@@ -991,18 +1165,19 @@ const SceneManager: React.FC = () => {
 
   const hdriOptions = [
     { name: 'Ninguno',    url: null,   icon: '○' },
-    { name: 'Atardecer',  url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/venice_sunset_1k.hdr', icon: '🌅' },
-    { name: 'Urbano',     url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/pedestrian_overpass_1k.hdr', icon: '🏙️' },
-    { name: 'Interior (Esplanada)',   url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/royal_esplanade_1k.hdr', icon: '🏛️' },
-    { name: 'Noche',    url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/moonless_golf_1k.hdr', icon: '🌙' },
-    { name: 'Estudio',     url: 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/equirectangular/quarry_01_1k.hdr', icon: '📸' },
+    { name: 'Atardecer',  url: 'https://threejs.org/examples/textures/equirectangular/venice_sunset_1k.hdr', icon: '🌅' },
+    { name: 'Urbano',     url: 'https://threejs.org/examples/textures/equirectangular/pedestrian_overpass_1k.hdr', icon: '🏙️' },
+    { name: 'Interior (Puente)', url: 'https://threejs.org/examples/textures/equirectangular/san_giuseppe_bridge_2k.hdr', icon: '🏛️' },
+    { name: 'Noche',      url: 'https://threejs.org/examples/textures/equirectangular/moonless_golf_1k.hdr', icon: '🌙' },
+    { name: 'Estudio',    url: 'https://threejs.org/examples/textures/equirectangular/quarry_01_1k.hdr', icon: '📸' },
   ];
 
   const handleHDRIUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const url = await fileToDataURL(file);
-      updateEnvironment({ hdriUrl: url });
+      const dataUrl = await fileToDataURL(file);
+      const urlWithFilename = `${dataUrl}#${file.name}`;
+      updateEnvironment({ hdriUrl: urlWithFilename });
     }
   };
 
@@ -1026,10 +1201,11 @@ const SceneManager: React.FC = () => {
                   <span className="text-[9px] font-bold uppercase tracking-tighter truncate w-full text-center">{opt.name}</span>
                 </button>
               ))}
-              <label className="flex flex-col items-center gap-2 p-3 rounded-xl border border-dashed border-white/10 bg-zinc-900/30 text-zinc-500 hover:bg-zinc-800 hover:border-white/20 cursor-pointer transition-all">
-                <Upload size={16} />
-                <span className="text-[9px] font-bold uppercase tracking-tighter">Subir HDR</span>
-                <input type="file" accept=".hdr" onChange={handleHDRIUpload} className="hidden" />
+              <label className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl border border-dashed border-indigo-500/30 bg-indigo-950/20 text-indigo-300 hover:bg-indigo-900/30 hover:border-indigo-400 cursor-pointer transition-all">
+                <Upload size={16} className="text-indigo-400" />
+                <span className="text-[9px] font-bold uppercase tracking-tighter text-center">Subir HDR / EXR</span>
+                <span className="text-[7.5px] text-zinc-400 text-center leading-tight">EXR, HDR, JPG, PNG<br/><span className="text-emerald-400 font-semibold">Auto-reducción FPS</span></span>
+                <input type="file" accept=".hdr,.exr,.png,.jpg,.jpeg,.webp,.avif" onChange={handleHDRIUpload} className="hidden" />
               </label>
             </div>
 
@@ -1042,6 +1218,18 @@ const SceneManager: React.FC = () => {
                 >
                   <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${env.backgroundVisible ? 'left-6' : 'left-1'}`} />
                 </button>
+              </div>
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[10px] text-zinc-400 font-medium">Límite Res. (FPS)</span>
+                <select
+                  value={env.maxResolution || 2048}
+                  onChange={e => updateEnvironment({ maxResolution: parseInt(e.target.value, 10) })}
+                  className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-[10px] rounded px-2 py-1 font-mono focus:border-indigo-500"
+                >
+                  <option value={1024}>1K (Ultra FPS)</option>
+                  <option value={2048}>2K (Recomendado)</option>
+                  <option value={4096}>4K (Alta Calidad)</option>
+                </select>
               </div>
               <NumRow label="Intensidad HDRI" value={env.intensity} onChange={v => updateEnvironment({ intensity: v })} min={0} max={5} step={0.1} slider />
               <NumRow label="Exposición" value={env.exposure} onChange={v => updateEnvironment({ exposure: v })} min={0} max={5} step={0.1} slider />
@@ -1216,6 +1404,47 @@ const SceneManager: React.FC = () => {
   );
 };
 
+const UngroupHeaderButton: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const ungroupSelectedObject = useStore(s => s.ungroupSelectedObject);
+  const [isWorking, setIsWorking] = useState(false);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  const canUngroup = hasChildrenOrSubObjects(obj);
+
+  const handleUngroup = async () => {
+    if (!canUngroup || isWorking) return;
+    setIsWorking(true);
+    setStatusMsg(null);
+    const res = await ungroupSelectedObject(obj.id);
+    setIsWorking(false);
+    setStatusMsg(res.message);
+    setTimeout(() => setStatusMsg(null), 4000);
+  };
+
+  return (
+    <div className="mt-2 pt-2 border-t border-zinc-800/80">
+      <button
+        onClick={handleUngroup}
+        disabled={!canUngroup || isWorking}
+        className={`w-full py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-2 transition-all shadow-md ${
+          canUngroup
+            ? 'bg-gradient-to-r from-purple-600 via-indigo-600 to-violet-600 hover:from-purple-500 hover:to-violet-500 text-white shadow-purple-950/40 border border-purple-400/40 cursor-pointer active:scale-[0.98]'
+            : 'bg-zinc-800/60 text-zinc-500 border border-zinc-700/40 cursor-not-allowed opacity-60'
+        }`}
+        title="Desagrupar / Separar Conjunto: Extrae todos los sub-objetos del modelo y los posiciona de forma independiente en la escena"
+      >
+        <Split size={13} className={canUngroup ? 'text-purple-200 animate-pulse' : ''} />
+        {isWorking ? 'Desagrupando objetos...' : 'Desagrupar / Separar Conjunto'}
+      </button>
+      {statusMsg && (
+        <div className="mt-1 p-1 bg-purple-950/90 border border-purple-500/40 rounded text-[9px] text-purple-200 text-center font-medium animate-fadeIn">
+          {statusMsg}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const PropertiesPanel: React.FC = () => {
   const {
     project, selectedObjectId, selectedObjectIds, updateObject, removeObject,
@@ -1253,6 +1482,74 @@ export const PropertiesPanel: React.FC = () => {
     } finally {
       setIsExporting(false);
     }
+  };
+
+  const handleAutoFitSelectedObject = async (targetObj: CSGObject) => {
+    let targetObjOrGeo: THREE.Object3D | THREE.BufferGeometry | null = null;
+
+    if (targetObj.meshData) {
+      if (targetObj.meshData.type === 'obj') {
+        targetObjOrGeo = await new Promise<THREE.Object3D>((res, rej) =>
+          new OBJLoader().load(targetObj.meshData!.data, res, undefined, rej)
+        ).catch(() => null);
+      } else if (targetObj.meshData.type === 'stl') {
+        targetObjOrGeo = await new Promise<THREE.BufferGeometry>((res, rej) =>
+          new STLLoader().load(targetObj.meshData!.data, res, undefined, rej)
+        ).catch(() => null);
+      } else if (targetObj.meshData.type === 'gltf') {
+        const gltf = await new Promise<any>((res, rej) => {
+          const loader = new GLTFLoader();
+          const dracoLoader = new DRACOLoader();
+          dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+          loader.setDRACOLoader(dracoLoader);
+          loader.load(targetObj.meshData!.data, res, undefined, rej);
+        }).catch(() => null);
+        if (gltf?.scene) targetObjOrGeo = gltf.scene;
+      }
+    } else if (targetObj.vertices && targetObj.vertices.length > 0) {
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(targetObj.vertices.flat());
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      targetObjOrGeo = geo;
+    }
+
+    if (!targetObjOrGeo) return;
+
+    const box = new THREE.Box3();
+    if ((targetObjOrGeo as THREE.BufferGeometry).isBufferGeometry) {
+      const geo = targetObjOrGeo as THREE.BufferGeometry;
+      geo.computeBoundingBox();
+      if (geo.boundingBox) box.copy(geo.boundingBox);
+    } else {
+      box.setFromObject(targetObjOrGeo as THREE.Object3D);
+    }
+
+    if (box.isEmpty() || !isFinite(box.min.x) || !isFinite(box.max.x)) return;
+
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim === 0) return;
+
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+
+    const targetSize = 3.0;
+    let scaleFactor = targetSize / maxDim;
+    scaleFactor = parseFloat(scaleFactor.toFixed(4));
+
+    const posX = parseFloat((-center.x * scaleFactor).toFixed(3));
+    const posY = parseFloat((-box.min.y * scaleFactor).toFixed(3));
+    const posZ = parseFloat((-center.z * scaleFactor).toFixed(3));
+
+    updateObject(targetObj.id, {
+      transform: {
+        ...targetObj.transform,
+        scale: [scaleFactor, scaleFactor, scaleFactor],
+        position: [posX, posY, posZ],
+      }
+    });
+    saveHistory();
   };
 
   return (
@@ -1350,6 +1647,7 @@ export const PropertiesPanel: React.FC = () => {
                     {OPERATION_LABELS[obj.operation]}
                   </span>
                 </div>
+                <UngroupHeaderButton obj={obj} />
               </div>
 
               <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
@@ -1377,6 +1675,14 @@ export const PropertiesPanel: React.FC = () => {
                   <XYZRow label="Posición" values={obj.transform.position} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, position: v } })} step={0.1} />
                   <XYZRow label="Rotación" values={obj.transform.rotation} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, rotation: v } })} step={0.1} />
                   <XYZRow label="Escala" values={obj.transform.scale} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, scale: v } })} step={0.1} min={0.01} />
+                  <button
+                    onClick={() => handleAutoFitSelectedObject(obj)}
+                    className="w-full mt-2 py-1.5 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                    title="Ajusta automáticamente la escala y posición para que el objeto quepa perfectamente en la vista"
+                  >
+                    <Maximize2 size={12} />
+                    Auto-escalar y Centrar
+                  </button>
                 </Section>
 
                 <ParametersSection obj={obj}/>

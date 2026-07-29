@@ -8,8 +8,9 @@ import {
   Copy, Clipboard, FlipHorizontal, Image as ImageIcon,
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid,
   GripVertical, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
-  Edit3, RefreshCw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine
+  Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split
 } from 'lucide-react';
+import { ConfirmModal } from './ConfirmModal';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
@@ -35,6 +36,7 @@ import {
 } from '../utils/modifiers_advanced';
 import { SiluetaTab } from './SiluetaTab';
 import { RenderModal } from './RenderModal';
+import { CodeExporterModal } from './CodeExporterModal';
 
 // ── Import helper: BufferGeometry → CSGObject ─────────────────────────────────
 const textureToDataURL = (texture: THREE.Texture): string | undefined => {
@@ -410,6 +412,8 @@ const DEFAULT_TEXTURES = [
 ];
 
 export const Toolbar: React.FC = () => {
+  const historyIndex = useStore(s => s.historyIndex);
+  const history = useStore(s => s.history);
   const {
     addObject, undo, redo, viewMode, setViewMode,
     editMode, setEditMode, transformMode, setTransformMode,
@@ -436,6 +440,7 @@ export const Toolbar: React.FC = () => {
   const [showTextures, setShowTextures] = useState(false);
   const [showMesh,    setShowMesh]    = useState(false);
   const [showRender,  setShowRender]  = useState(false);
+  const [showCodeExporter, setShowCodeExporter] = useState(false);
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
@@ -468,7 +473,7 @@ export const Toolbar: React.FC = () => {
   const [loftN,  setLoftN]  = useState(8);
   // Silueta: state in <SiluetaTab/>
   // Herramientas avanzadas
-  const [advTab,      setAdvTab]      = useState<'extrude'|'chamfer'|'offset'|'array'|'cap'>('extrude');
+  const [advTab,      setAdvTab]      = useState<'extrude'|'chamfer'|'offset'|'array'|'cap'|'separate'>('extrude');
   const [advChamferD, setAdvChamferD] = useState(0.08);
   const [advChamferA, setAdvChamferA] = useState(30);
   const [advOffsetD,  setAdvOffsetD]  = useState(0.05);
@@ -572,6 +577,11 @@ export const Toolbar: React.FC = () => {
 
   // ── File ops ──────────────────────────────────────────────────────────────
   const [isExporting, setIsExporting] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+
+  const handleReset = () => {
+    setShowResetModal(true);
+  };
 
   const handleSave = () => {
     const blob = new Blob([JSON.stringify(project,null,2)],{type:'application/json'});
@@ -666,6 +676,59 @@ export const Toolbar: React.FC = () => {
       const baseName=file.name.split('.').slice(0,-1).join('.')||'Importado';
       const geos: { geo?: THREE.BufferGeometry; name?: string; mat?: THREE.Material; csgObj?: CSGObject; materials?: any[] }[] = [];
 
+      const computeAutoFitTransform = (
+        target: THREE.Object3D | THREE.BufferGeometry,
+        targetSize = 3.0
+      ): { scale: [number, number, number]; position: [number, number, number] } => {
+        const box = new THREE.Box3();
+        if ((target as THREE.BufferGeometry).isBufferGeometry) {
+          const geo = target as THREE.BufferGeometry;
+          geo.computeBoundingBox();
+          if (geo.boundingBox) box.copy(geo.boundingBox);
+        } else {
+          box.setFromObject(target as THREE.Object3D);
+        }
+
+        if (box.isEmpty() || !isFinite(box.min.x) || !isFinite(box.max.x)) {
+          return { scale: [1, 1, 1], position: [0, 0, 0] };
+        }
+
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+
+        let scaleFactor = 1.0;
+        if (maxDim > 0 && (maxDim > 6.0 || maxDim < 0.2)) {
+          scaleFactor = targetSize / maxDim;
+          scaleFactor = parseFloat(scaleFactor.toFixed(4));
+        }
+
+        let posX = 0;
+        let posY = 0;
+        let posZ = 0;
+
+        if (scaleFactor !== 1.0 || Math.abs(center.x) > maxDim * 0.1 || Math.abs(center.z) > maxDim * 0.1) {
+          posX = -center.x * scaleFactor;
+          posZ = -center.z * scaleFactor;
+        }
+
+        if (scaleFactor !== 1.0 || Math.abs(box.min.y) > maxDim * 0.1) {
+          posY = -box.min.y * scaleFactor;
+        }
+
+        return {
+          scale: [scaleFactor, scaleFactor, scaleFactor],
+          position: [
+            parseFloat(posX.toFixed(3)),
+            parseFloat(posY.toFixed(3)),
+            parseFloat(posZ.toFixed(3)),
+          ],
+        };
+      };
+
       const getStatsFromObject = (obj: THREE.Object3D | THREE.BufferGeometry) => {
         let vertices = 0;
         let faces = 0;
@@ -705,12 +768,13 @@ export const Toolbar: React.FC = () => {
           const geo = await new Promise<THREE.BufferGeometry>((resolve, reject) => new STLLoader().load(blobUrl, resolve, undefined, reject));
           URL.revokeObjectURL(blobUrl);
           const stats = getStatsFromObject(geo);
+          const autoTransform = computeAutoFitTransform(geo);
           const csgObj: CSGObject = {
             id: Math.random().toString(36).substr(2, 9),
             name: baseName,
             type: 'MESH',
             operation: 'ADD',
-            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            transform: { position: autoTransform.position, rotation: [0, 0, 0], scale: autoTransform.scale },
             parameters: {},
             vertices: [],
             faces: [],
@@ -729,13 +793,14 @@ export const Toolbar: React.FC = () => {
           URL.revokeObjectURL(blobUrl);
           const stats = getStatsFromObject(object);
           const extractedMaterials = extractMaterialsFromObject(object);
+          const autoTransform = computeAutoFitTransform(object);
           
           const csgObj: CSGObject = {
             id: Math.random().toString(36).substr(2, 9),
             name: baseName,
             type: 'MESH',
             operation: 'ADD',
-            transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            transform: { position: autoTransform.position, rotation: [0, 0, 0], scale: autoTransform.scale },
             parameters: {},
             vertices: [],
             faces: [],
@@ -761,6 +826,7 @@ export const Toolbar: React.FC = () => {
               const scene = gltf.scene;
               const stats = getStatsFromObject(scene);
               const extractedMaterials = extractMaterialsFromObject(scene);
+              const autoTransform = computeAutoFitTransform(scene);
               
               const maxDuration = Math.max(...animations.map(a => a.duration), 0);
               const fps = 24;
@@ -792,7 +858,7 @@ export const Toolbar: React.FC = () => {
                 name: baseName,
                 type: 'MESH',
                 operation: 'ADD',
-                transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+                transform: { position: autoTransform.position, rotation: [0, 0, 0], scale: autoTransform.scale },
                 parameters: {},
                 vertices: [],
                 faces: [],
@@ -921,7 +987,7 @@ export const Toolbar: React.FC = () => {
         className={`bg-zinc-950 border border-zinc-800 flex items-center px-3 justify-between text-zinc-300 select-none relative z-[50] transition-all duration-300 ${
           isFloating
             ? 'fixed top-20 left-1/2 -translate-x-1/2 rounded-xl shadow-2xl border-white/10 p-1 h-auto flex-col gap-2 w-auto max-w-[95vw]'
-            : 'min-h-[3.5rem] py-1 border-b w-full min-w-0 flex-wrap gap-y-2'
+            : 'h-11 border-b w-full min-w-0 flex-nowrap gap-1.5 overflow-x-auto overflow-y-visible'
         }`}
         style={!isFloating?{overflowX:'visible',overflowY:'visible',scrollbarWidth:'thin',scrollbarColor:'#3f3f46 transparent'}:{}}
       >
@@ -931,7 +997,7 @@ export const Toolbar: React.FC = () => {
           </div>
         )}
 
-        <div className={`flex items-center gap-2 flex-shrink-0 ${isFloating?'flex-wrap justify-center':'flex-wrap'}`}>
+        <div className={`flex items-center gap-1.5 flex-shrink-0 ${isFloating?'flex-wrap justify-center':'flex-nowrap'}`}>
 
           {/* Pin */}
           <button onClick={()=>setIsFloating(!isFloating)}
@@ -944,7 +1010,9 @@ export const Toolbar: React.FC = () => {
           {!isFloating&&<><div className="flex items-center gap-2 flex-shrink-0"><div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center text-white font-bold text-sm">R</div><span className="font-bold text-sm tracking-tight hidden lg:block">CSG Pro</span></div><Sep/></>}
 
           {/* ── Archivo ── */}
-          <Dropdown label="Archivo" icon={<FolderOpen size={14}/>} isOpen={showFile} setIsOpen={setShowFile} containerRef={fileRef} width={160}>
+          <Dropdown label="Archivo" icon={<FolderOpen size={14}/>} isOpen={showFile} setIsOpen={setShowFile} containerRef={fileRef} width={180}>
+            <button onClick={()=>{handleReset();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-rose-400 font-medium"><RotateCcw size={14}/> Reiniciar Proyecto</button>
+            <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{handleLoad();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><FolderOpen size={14}/> Abrir</button>
             <button onClick={()=>{handleImport();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Upload size={14}/> Importar</button>
             <button onClick={()=>{handleSave();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Save size={14}/> Guardar</button>
@@ -954,8 +1022,30 @@ export const Toolbar: React.FC = () => {
             <button onClick={()=>{handleExportGLTF(false);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLTF</button>
             <button onClick={()=>{handleExportGLTF(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLB</button>
             <div className="h-px bg-zinc-800 my-1"/>
-            <button onClick={()=>{handleCopyJSON();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Code size={14}/> Copiar JSON</button>
+            <button onClick={()=>{setShowCodeExporter(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-indigo-300 font-semibold bg-indigo-950/40"><Code size={14} className="text-indigo-400"/> Exportar Código Three.js</button>
+            <button onClick={()=>{handleCopyJSON();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Code size={14} className="text-zinc-500"/> Copiar JSON (Proyecto)</button>
           </Dropdown>
+
+          {/* ── Deshacer / Rehacer (Siempre Visibles) ── */}
+          <div className="flex items-center gap-0.5 flex-shrink-0 bg-zinc-900/60 p-0.5 rounded-lg border border-zinc-800" title="Deshacer / Rehacer">
+            <button
+              onClick={undo}
+              disabled={historyIndex <= 0}
+              className="p-1.5 rounded hover:bg-zinc-700/80 text-zinc-200 disabled:opacity-25 disabled:hover:bg-transparent transition-all flex items-center justify-center active:scale-95"
+              title="Deshacer (Ctrl+Z)"
+            >
+              <Undo2 size={16} />
+            </button>
+            <button
+              onClick={redo}
+              disabled={historyIndex >= history.length - 1}
+              className="p-1.5 rounded hover:bg-zinc-700/80 text-zinc-200 disabled:opacity-25 disabled:hover:bg-transparent transition-all flex items-center justify-center active:scale-95"
+              title="Rehacer (Ctrl+Y)"
+            >
+              <Redo2 size={16} />
+            </button>
+          </div>
+          <Sep/>
 
           {/* ── Crear (Grouped) ── */}
           <div className="relative flex-shrink-0" ref={mainCreateRef}>
@@ -1385,6 +1475,11 @@ export const Toolbar: React.FC = () => {
                           <button onClick={()=>{useStore.getState().applyBoolean('ADD');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Combine size={14}/> Unión</button>
                           <button onClick={()=>{useStore.getState().applyBoolean('SUBTRACT');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Scissors size={14}/> Diferencia</button>
                           <button onClick={()=>{useStore.getState().applyBoolean('INTERSECT');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Target size={14}/> Intersección</button>
+                          <button onClick={async ()=>{
+                            const selId = useStore.getState().selectedObjectId;
+                            if (selId) await useStore.getState().ungroupSelectedObject(selId);
+                            setShowMainEdit(false);
+                          }} className="flex items-center gap-2 px-3 py-2 bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 rounded text-[11px] font-bold transition-all cursor-pointer"><Split size={14}/> Desagrupar</button>
                         </div>
 
                         <PTitle icon="📤" title="Extrusión" desc="Crea volumen a partir de formas o caras."/>
@@ -1491,8 +1586,8 @@ export const Toolbar: React.FC = () => {
           <Sep/>
 
           {/* ── Quick Tools (Gap) ── */}
-          {!isFloating && (
-            <div className="flex-1 flex items-center gap-2 px-4 min-w-0 overflow-hidden">
+          {!isFloating && (showMainEdit || editMode !== 'OBJECT' || showMainCreate) && (
+            <div className="flex items-center gap-1 px-1 min-w-0 overflow-hidden flex-shrink">
               <AnimatePresence mode="wait">
                 {showMainEdit || editMode !== 'OBJECT' ? (
                   <motion.div 
@@ -1523,19 +1618,7 @@ export const Toolbar: React.FC = () => {
                     <QuickButton active={createTab==='dibujar'}   onClick={()=>setCreateTab('dibujar')}   icon={<Pencil size={14}/>} label="Dibujar" />
                     <QuickButton active={createTab==='ingenieria'} onClick={()=>setCreateTab('ingenieria')} icon={<Combine size={14}/>} label="Ingeniería" />
                   </motion.div>
-                ) : (
-                  <motion.div 
-                    key="default-quick"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="flex items-center gap-4"
-                  >
-                    <div className="flex items-center gap-1">
-                      <TB icon={<Undo2 size={16}/>} label="Deshacer" shortcut="Ctrl+Z" onClick={undo} disabled={useStore.getState().historyIndex <= 0}/>
-                      <TB icon={<Redo2 size={16}/>} label="Rehacer" shortcut="Ctrl+Y" onClick={redo} disabled={useStore.getState().historyIndex >= useStore.getState().history.length - 1}/>
-                    </div>
-                  </motion.div>
-                )}
+                ) : null}
               </AnimatePresence>
             </div>
           )}
@@ -1701,17 +1784,10 @@ export const Toolbar: React.FC = () => {
               </div>
             )}
           </div>
-          <Sep/>
-
-          {/* Undo/Redo */}
-          <div className="flex items-center gap-0.5">
-            <TB icon={<Undo2 size={17}/>} label="Deshacer (Ctrl+Z)" onClick={undo}/>
-            <TB icon={<Redo2 size={17}/>} label="Rehacer (Ctrl+Y)"  onClick={redo}/>
-          </div>
         </div>
 
         {/* ── Derecha ── */}
-        <div className={`flex items-center gap-2 flex-shrink-0 ml-2 ${isFloating?'flex-wrap justify-center':'flex-wrap'}`}>
+        <div className={`flex items-center gap-1.5 flex-shrink-0 ml-2 ${isFloating?'flex-wrap justify-center':'flex-nowrap'}`}>
           {/* ── Vista ── */}
           <Dropdown label="Vista" icon={<Layers3 size={14}/>} isOpen={showView} setIsOpen={setShowView} containerRef={viewRef} width={160}>
             <button onClick={()=>{setMaximizedViewport(maximizedViewport === null ? 'TOP' : null);setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Layers3 size={14}/> {maximizedViewport === null ? '1 Vista' : '4 Vistas'}</button>
@@ -1773,6 +1849,17 @@ export const Toolbar: React.FC = () => {
 
         {/* Render Modal */}
       {showRender && <RenderModal onClose={() => setShowRender(false)} />}
+      {showCodeExporter && <CodeExporterModal isOpen={showCodeExporter} onClose={() => setShowCodeExporter(false)} />}
+      <ConfirmModal
+        isOpen={showResetModal}
+        onClose={() => setShowResetModal(false)}
+        onConfirm={() => useStore.getState().resetProject()}
+        title="Reiniciar Proyecto"
+        message="¿Estás seguro de que deseas reiniciar el proyecto? Esta acción eliminará todos los objetos de la escena actual y restaurará la escena inicial por defecto."
+        confirmLabel="Sí, reiniciar"
+        cancelLabel="Cancelar"
+        isDanger={true}
+      />
 
       {/* Tooltip */}
         {tooltip&&(
@@ -2105,7 +2192,7 @@ const LoftFromShapeTab: React.FC<{
 // HERRAMIENTAS AVANZADAS CAD
 // ════════════════════════════════════════════════════════════════════════════
 const AdvancedTab: React.FC<{
-  advTab:'extrude'|'chamfer'|'offset'|'array'|'cap'; setAdvTab:(v:any)=>void;
+  advTab:'extrude'|'chamfer'|'offset'|'array'|'cap'|'separate'; setAdvTab:(v:any)=>void;
   advChamferD:number; setAdvChamferD:(v:number)=>void;
   advChamferA:number; setAdvChamferA:(v:number)=>void;
   advOffsetD:number;  setAdvOffsetD:(v:number)=>void;
@@ -2137,9 +2224,9 @@ const AdvancedTab: React.FC<{
   const canExtrudeFaces = editMode === 'FACE' && selectedFaceIndices.length > 0;
 
   return(<>
-    <PTitle icon="⚙️" title="Modificación avanzada" desc="Extrusión, Chaflán 3D, equidistancia, array y cerrar huecos."/>
-    <div className="grid grid-cols-5 gap-1">
-      {([{id:'extrude',label:'Extruir',icon:'📤'},{id:'chamfer',label:'Chaflán',icon:'◥'},{id:'offset',label:'Offset',icon:'⊡'},{id:'array',label:'Array',icon:'⠿'},{id:'cap',label:'Tapar',icon:'⬜'}] as const).map(op=>(
+    <PTitle icon="⚙️" title="Modificación avanzada" desc="Extrusión, Chaflán 3D, equidistancia, array, tapar y separar partes sueltas."/>
+    <div className="grid grid-cols-6 gap-1">
+      {([{id:'extrude',label:'Extruir',icon:'📤'},{id:'chamfer',label:'Chaflán',icon:'◥'},{id:'offset',label:'Offset',icon:'⊡'},{id:'array',label:'Array',icon:'⠿'},{id:'cap',label:'Tapar',icon:'⬜'},{id:'separate',label:'Partes',icon:'🧩'}] as const).map(op=>(
         <button key={op.id} onClick={()=>setAdvTab(op.id)}
           className={`flex flex-col items-center py-2 rounded text-[9px] font-bold transition-colors ${advTab===op.id?'bg-violet-600 text-white':'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}>
           <span className="text-base mb-0.5">{op.icon}</span>{op.label}
@@ -2239,6 +2326,19 @@ const AdvancedTab: React.FC<{
           ▣ Tapar Selección
         </button>
       </div>
+    </>)}
+    {advTab==='separate'&&(<>
+      <div className="text-[9px] text-zinc-400 bg-zinc-800/50 rounded p-2 space-y-1">
+        <p className="text-zinc-300 font-bold">Separar por partes sueltas (Mesh Explode)</p>
+        <p>Analiza la conectividad geométrica del objeto seleccionado. Si consta de piezas independientes desconectadas, creará un objeto individual para cada sub-malla en la jerarquía de la escena.</p>
+      </div>
+      <button disabled={!hasSel} onClick={async ()=>{
+        if(!selectedObject) return;
+        const res = await useStore.getState().ungroupSelectedObject(selectedObject.id);
+        alert(res.message);
+      }} className={`w-full py-2.5 px-3 rounded text-[11px] font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${hasSel?'bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-900/30':'bg-zinc-700 text-zinc-500 cursor-not-allowed'}`}>
+        <Split size={14} /> Separar por partes sueltas
+      </button>
     </>)}
   </>);
 };

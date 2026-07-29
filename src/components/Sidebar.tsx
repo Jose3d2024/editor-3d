@@ -6,11 +6,12 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   CheckCircle, AlertTriangle, Wrench, Wand2, Maximize2,
-  Move, RotateCw, Download, FileDown,
+  Move, RotateCw, Download, FileDown, Split
 } from 'lucide-react';
 import { CSGOperation, PrimitiveType } from '../types';
 import { validateMesh } from '../utils/modifiers';
 import { Exporter } from '../utils/exporters';
+import { hasChildrenOrSubObjects } from '../utils/ungroup';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 const Section = ({ title, icon: Icon, children, defaultOpen = true, badge }: {
@@ -316,6 +317,24 @@ export const Sidebar: React.FC = () => {
                     />
                   </div>
                 </div>
+
+                <button
+                  disabled={!hasChildrenOrSubObjects(selectedObject)}
+                  onClick={async () => {
+                    if (selectedObject) {
+                      await useStore.getState().ungroupSelectedObject(selectedObject.id);
+                    }
+                  }}
+                  className={`w-full py-1.5 px-2 rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow cursor-pointer ${
+                    hasChildrenOrSubObjects(selectedObject)
+                      ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/40 border border-purple-400/40'
+                      : 'bg-zinc-800 text-zinc-500 cursor-not-allowed opacity-50 border border-zinc-700'
+                  }`}
+                  title="Desagrupar / Separar Conjunto: Extrae todos los sub-objetos del modelo en objetos independientes"
+                >
+                  <Split size={12} />
+                  Desagrupar / Separar Conjunto
+                </button>
                 <div className="flex flex-col gap-1">
                   <div className="flex justify-between items-center">
                     <label className="text-[9px] uppercase text-zinc-500 font-bold">Opacidad</label>

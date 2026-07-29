@@ -1,13 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Toolbar } from './components/Toolbar';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { Timeline } from './components/Timeline';
 import { MultiViewport } from './components/MultiViewport';
-import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp } from 'lucide-react';
+import { MeshProgressModal } from './components/MeshProgressModal';
+import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp, Film } from 'lucide-react';
 
 export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(false);
+  const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(true);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+      if (e.key === 't' || e.key === 'T') {
+        if (!e.ctrlKey && !e.altKey && !e.metaKey) {
+          setIsTimelineCollapsed(prev => !prev);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden font-sans"
@@ -27,11 +42,17 @@ export default function App() {
           {/* Timeline Toggle Button */}
           <button
             onClick={() => setIsTimelineCollapsed(v => !v)}
-            className="absolute bottom-4 right-4 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-lg transition-colors hover:bg-white/5"
-            style={{ background: 'var(--surface-1)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-            title={isTimelineCollapsed ? "Expandir línea de tiempo" : "Minimizar línea de tiempo"}
+            className={`absolute bottom-3 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full shadow-2xl backdrop-blur-md transition-all duration-200 active:scale-95 ${
+              isTimelineCollapsed
+                ? 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/40 shadow-indigo-600/30'
+                : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/80'
+            }`}
+            title={isTimelineCollapsed ? "Expandir línea de tiempo y controles de animación (T)" : "Minimizar línea de tiempo para mayor visibilidad (T)"}
           >
-            <span className="text-[10px] font-bold uppercase tracking-widest">Línea de tiempo</span>
+            <Film size={13} className={isTimelineCollapsed ? "animate-pulse text-indigo-200" : "text-zinc-400"} />
+            <span className="text-[10px] font-bold uppercase tracking-wider">
+              {isTimelineCollapsed ? "Mostrar Línea de Tiempo" : "Minimizar Línea de Tiempo"}
+            </span>
             {isTimelineCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
         </div>
@@ -102,9 +123,12 @@ export default function App() {
       {/* ── Timeline ── */}
       {!isTimelineCollapsed && (
         <div style={{ borderTop: '1px solid var(--border)' }}>
-          <Timeline />
+          <Timeline onToggleCollapse={() => setIsTimelineCollapsed(true)} />
         </div>
       )}
+
+      {/* ── Mesh Operation Progress Modal ── */}
+      <MeshProgressModal />
     </div>
   );
 }

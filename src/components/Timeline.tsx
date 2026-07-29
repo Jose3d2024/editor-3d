@@ -20,7 +20,11 @@ const OP_COLOR: Record<string, string> = {
   INTERSECT: '#f59e0b',
 };
 
-export const Timeline: React.FC = () => {
+interface TimelineProps {
+  onToggleCollapse?: () => void;
+}
+
+export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
   const {
     project, currentTime, setCurrentTime,
     isPlaying, setIsPlaying,
@@ -190,14 +194,24 @@ export const Timeline: React.FC = () => {
           </div>
         </div>
 
-        {/* Derecha: label */}
+        {/* Derecha: label y botón de minimizar */}
         <div className="flex items-center gap-2">
-          <span className="text-[9px] uppercase font-bold tracking-[0.2em] text-zinc-600 hidden lg:block">
+          <span className="text-[9px] uppercase font-bold tracking-[0.2em] text-zinc-500 hidden lg:block">
             Línea de Tiempo
           </span>
-          <div className="w-8 h-8 rounded-lg bg-white/[0.02] border border-white/5 flex items-center justify-center text-zinc-500">
-            <Layers size={14} />
+          <div className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/5 flex items-center justify-center text-zinc-400">
+            <Layers size={13} />
           </div>
+          {onToggleCollapse && (
+            <button
+              onClick={onToggleCollapse}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-all border border-white/10 shadow-sm active:scale-95"
+              title="Minimizar línea de tiempo para ocultarla y aumentar la visibilidad de los visores (T)"
+            >
+              <span className="text-[10px] font-bold">Minimizar</span>
+              <ChevronDown size={14} />
+            </button>
+          )}
         </div>
       </div>
 

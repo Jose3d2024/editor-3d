@@ -245,6 +245,7 @@ export interface EnvironmentSettings {
   backgroundVisible: boolean;
   intensity: number;
   exposure: number;
+  maxResolution?: number;
 }
 
 export type ViewportType   = 'PERSPECTIVE' | 'TOP' | 'BOTTOM' | 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT';
@@ -279,8 +280,19 @@ export interface ViewportCameraState {
   [key: string]: CameraState;
 }
 
+export interface MeshProcessingState {
+  active: boolean;
+  title: string;
+  subtitle?: string;
+  progress: number;
+  objectName?: string;
+  vertCount?: number;
+  faceCount?: number;
+}
+
 export interface AppState {
   project:           Project;
+  meshProcessing?:   MeshProcessingState | null;
   selectedObjectId:  string | null;
   selectedLightId?:  string | null;
   selectedCameraId?: string | null;

@@ -7,9 +7,20 @@
 
 import * as THREE from 'three';
 import { CSG } from 'three-csg-ts';
+import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
+import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import type { CSGObject, MeshFace, V3, CSGOperation } from '../types';
 import { generatePrimitive } from './geometry';
 import { repairMesh, fillHoles, capSelectedFaces } from './meshUtils';
+
+// Register BVH extensions on THREE prototypes
+if (!(THREE.BufferGeometry.prototype as any).computeBoundsTree) {
+  (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
+  (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
+  (THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -251,26 +262,62 @@ export function subdivideMesh(
 // ─── Optimize (decimate) ──────────────────────────────────────────────────────
 
 /**
- * Mesh optimization: merge vertices that are within a distance threshold,
- * remove degenerate faces, and optionally collapse short edges.
- * @param ratio  0–1: higher = more aggressive merging (threshold = ratio * bounding diagonal * 0.05)
+ * Mesh optimization using SimplifyModifier (Quadric Error Metric edge collapse)
+ * with pre-welding of duplicate vertices to protect topology and prevent getting stuck.
+ * @param ratio Target proportion of original faces to retain (0.1 = keep 10%)
  */
 export function optimizeMesh(
   obj: CSGObject,
   ratio: number,
 ): { vertices: V3[]; faces: MeshFace[] } {
-  if (obj.vertices.length === 0) return { vertices: [], faces: [] };
+  if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [] };
 
-  // Compute bounding box diagonal for adaptive threshold
+  try {
+    // 1. Convert to indexed Three.js geometry
+    let geometry = toThreeGeometry(obj);
+
+    // 2. Pre-weld vertices to connect seams and unblock topology
+    geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
+
+    const totalOriginalFaces = geometry.index ? geometry.index.count / 3 : 0;
+    if (totalOriginalFaces < 10) return { vertices: obj.vertices, faces: obj.faces };
+
+    // 3. Calculate target face count and amount to remove
+    const targetCount = Math.max(4, Math.floor(totalOriginalFaces * Math.max(0.01, Math.min(0.99, ratio))));
+    const amountToRemove = totalOriginalFaces - targetCount;
+
+    if (amountToRemove <= 0) return { vertices: obj.vertices, faces: obj.faces };
+
+    // 4. Advanced edge collapse simplification
+    const modifier = new SimplifyModifier();
+    const optimizedGeo = modifier.modify(geometry, amountToRemove);
+
+    if (optimizedGeo.hasAttribute('normal')) {
+      optimizedGeo.deleteAttribute('normal');
+    }
+    optimizedGeo.computeVertexNormals();
+
+    return fromThreeGeometry(optimizedGeo);
+  } catch (e) {
+    console.error('El optimizador avanzado SimplifyModifier falló, usando fallback adaptativo:', e);
+    return optimizeMeshFallback(obj, ratio);
+  }
+}
+
+function optimizeMeshFallback(
+  obj: CSGObject,
+  ratio: number,
+): { vertices: V3[]; faces: MeshFace[] } {
+  if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [] };
+
   let minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
   for (const [x,y,z] of obj.vertices) {
     if (x<minX) minX=x; if (y<minY) minY=y; if (z<minZ) minZ=z;
     if (x>maxX) maxX=x; if (y>maxY) maxY=y; if (z>maxZ) maxZ=z;
   }
   const diag = Math.sqrt((maxX-minX)**2+(maxY-minY)**2+(maxZ-minZ)**2);
-  const threshold = Math.max(0.0001, diag * ratio * 0.04);
+  const threshold = Math.max(0.0001, diag * ratio * 0.08);
 
-  // Step 1: merge close vertices
   const remap: number[] = new Array(obj.vertices.length).fill(-1);
   const newVerts: V3[] = [];
 
@@ -278,7 +325,6 @@ export function optimizeMesh(
     if (remap[i] !== -1) continue;
     remap[i] = newVerts.length;
     newVerts.push([...obj.vertices[i]] as V3);
-    // Find other vertices within threshold
     for (let j = i + 1; j < obj.vertices.length; j++) {
       if (remap[j] !== -1) continue;
       if (vecDist(obj.vertices[i], obj.vertices[j]) <= threshold) {
@@ -287,22 +333,14 @@ export function optimizeMesh(
     }
   }
 
-  // Step 2: remap faces, remove degenerate, PRESERVE UVs
   const newFaces: MeshFace[] = [];
   for (const face of obj.faces) {
     const remapped = face.indices.map(i => remap[i]);
-    // Remove degenerate: any two indices the same
     const unique = [...new Set(remapped)];
-    if (unique.length < 3) continue; // degenerate
-    
-    // Preserve other properties
-    newFaces.push({ 
-      ...face,
-      indices: remapped 
-    });
+    if (unique.length < 3) continue;
+    newFaces.push({ ...face, indices: remapped });
   }
 
-  // Step 3: remove unused vertices
   const used = new Set<number>();
   for (const f of newFaces) for (const i of f.indices) used.add(i);
   const compact: number[] = new Array(newVerts.length).fill(-1);
@@ -312,12 +350,475 @@ export function optimizeMesh(
     compact[i] = finalVerts.length;
     finalVerts.push(newVerts[i]);
   }
-  const finalFaces = newFaces.map(f => ({ 
+  const finalFaces = newFaces.map(f => ({
     ...f,
-    indices: f.indices.map(i => compact[i]) 
+    indices: f.indices.map(i => compact[i])
   }));
 
   return { vertices: finalVerts, faces: finalFaces };
+}
+
+// Point-to-triangle distance squared in 3D (Real-Time Collision Detection algorithm)
+function distSqToTriangle(
+  px: number, py: number, pz: number,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number
+): number {
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) return apx * apx + apy * apy + apz * apz;
+
+  const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+  const d3 = abx * bpx + aby * bpy + abz * bpz;
+  const d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) return bpx * bpx + bpy * bpy + bpz * bpz;
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    const x = apx - v * abx, y = apy - v * aby, z = apz - v * abz;
+    return x * x + y * y + z * z;
+  }
+
+  const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+  const d5 = abx * cpx + aby * cpy + abz * cpz;
+  const d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) return cpx * cpx + cpy * cpy + cpz * cpz;
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    const x = apx - w * acx, y = apy - w * acy, z = apz - w * acz;
+    return x * x + y * y + z * z;
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    const x = bpx - w * (cx - bx), y = bpy - w * (cy - by), z = bpz - w * (cz - bz);
+    return x * x + y * y + z * z;
+  }
+
+  const denom = 1 / (va + vb + vc);
+  const v = vb * denom;
+  const w = vc * denom;
+  const x = apx - v * abx - w * acx;
+  const y = apy - v * aby - w * acy;
+  const z = apz - v * abz - w * acz;
+  return x * x + y * y + z * z;
+}
+
+/**
+ * Voxel Remeshing
+ * Reconstructs the object as a uniform smooth volumetric envelope using Marching Cubes SDF.
+ * @param resolution Number of grid divisions along the spatial bounding box
+ */
+export function voxelRemesh(
+  obj: CSGObject,
+  resolution: number = 45
+): { vertices: V3[]; faces: MeshFace[] } {
+  if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
+    return { vertices: [], faces: [] };
+  }
+
+  // 1. Calculate Bounding Box of World Vertices
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+  const worldVerts: [number, number, number][] = new Array(obj.vertices.length);
+  for (let i = 0; i < obj.vertices.length; i++) {
+    const v = obj.vertices[i];
+    const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+    const x = v[0] + off[0];
+    const y = v[1] + off[1];
+    const z = v[2] + off[2];
+    worldVerts[i] = [x, y, z];
+
+    if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
+  }
+
+  const sizeX = maxX - minX || 0.001;
+  const sizeY = maxY - minY || 0.001;
+  const sizeZ = maxZ - minZ || 0.001;
+  const maxDim = Math.max(sizeX, sizeY, sizeZ);
+
+  // Resolution clamped between 16 and 64 for high speed and smooth surface quality
+  const gridRes = Math.max(16, Math.min(64, Math.round(resolution)));
+  const pad = (maxDim / gridRes) * 1.5;
+
+  const boundMinX = minX - pad, boundMaxX = maxX + pad;
+  const boundMinY = minY - pad, boundMaxY = maxY + pad;
+  const boundMinZ = minZ - pad, boundMaxZ = maxZ + pad;
+
+  const centerX = (boundMinX + boundMaxX) / 2;
+  const centerY = (boundMinY + boundMaxY) / 2;
+  const centerZ = (boundMinZ + boundMaxZ) / 2;
+
+  const halfSizeX = (boundMaxX - boundMinX) / 2;
+  const halfSizeY = (boundMaxY - boundMinY) / 2;
+  const halfSizeZ = (boundMaxZ - boundMinZ) / 2;
+
+  // 2. Extract Triangles and Build Spatial Bucket Grid for O(1) Distance Queries
+  const bucketSize = Math.max(halfSizeX, halfSizeY, halfSizeZ) * 2 / Math.max(2, gridRes / 4);
+  const buckets = new Map<string, Array<{ ax: number; ay: number; az: number; bx: number; by: number; bz: number; cx: number; cy: number; cz: number }>>();
+  const getBucketKey = (bx: number, by: number, bz: number) => `${bx + 1000}_${by + 1000}_${bz + 1000}`;
+
+  type Tri = { ax: number; ay: number; az: number; bx: number; by: number; bz: number; cx: number; cy: number; cz: number };
+  const tris: Tri[] = [];
+
+  obj.faces.forEach((face) => {
+    const idxs = face.indices;
+    if (idxs.length < 3) return;
+
+    for (let t = 1; t < idxs.length - 1; t++) {
+      const p0 = worldVerts[idxs[0]];
+      const p1 = worldVerts[idxs[t]];
+      const p2 = worldVerts[idxs[t + 1]];
+      if (!p0 || !p1 || !p2) continue;
+
+      const ax = p0[0], ay = p0[1], az = p0[2];
+      const bx = p1[0], by = p1[1], bz = p1[2];
+      const cx = p2[0], cy = p2[1], cz = p2[2];
+
+      const triObj: Tri = { ax, ay, az, bx, by, bz, cx, cy, cz };
+      tris.push(triObj);
+
+      const tMinX = Math.min(ax, bx, cx), tMaxX = Math.max(ax, bx, cx);
+      const tMinY = Math.min(ay, by, cy), tMaxY = Math.max(ay, by, cy);
+      const tMinZ = Math.min(az, bz, cz), tMaxZ = Math.max(az, bz, cz);
+
+      const minBx = Math.floor(tMinX / bucketSize), maxBx = Math.floor(tMaxX / bucketSize);
+      const minBy = Math.floor(tMinY / bucketSize), maxBy = Math.floor(tMaxY / bucketSize);
+      const minBz = Math.floor(tMinZ / bucketSize), maxBz = Math.floor(tMaxZ / bucketSize);
+
+      for (let x = minBx; x <= maxBx; x++) {
+        for (let y = minBy; y <= maxBy; y++) {
+          for (let z = minBz; z <= maxBz; z++) {
+            const k = getBucketKey(x, y, z);
+            let arr = buckets.get(k);
+            if (!arr) { arr = []; buckets.set(k, arr); }
+            arr.push(triObj);
+          }
+        }
+      }
+    }
+  });
+
+  if (tris.length === 0) return { vertices: obj.vertices, faces: obj.faces };
+
+  // Fast spatial distance to nearest triangle
+  function getMinDistSq(px: number, py: number, pz: number): number {
+    const bx = Math.floor(px / bucketSize);
+    const by = Math.floor(py / bucketSize);
+    const bz = Math.floor(pz / bucketSize);
+
+    let minDistSq = Infinity;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const arr = buckets.get(getBucketKey(bx + dx, by + dy, bz + dz));
+          if (arr) {
+            for (let i = 0; i < arr.length; i++) {
+              const t = arr[i];
+              const dSq = distSqToTriangle(px, py, pz, t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz);
+              if (dSq < minDistSq) minDistSq = dSq;
+            }
+          }
+        }
+      }
+    }
+
+    if (minDistSq === Infinity) {
+      for (let i = 0; i < tris.length; i++) {
+        const t = tris[i];
+        const dSq = distSqToTriangle(px, py, pz, t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz);
+        if (dSq < minDistSq) minDistSq = dSq;
+      }
+    }
+
+    return minDistSq;
+  }
+
+  // Temporary Mesh for Raycast Winding Number Inside/Outside classification
+  const tempGeo = new THREE.BufferGeometry();
+  const flatPos = new Float32Array(tris.length * 9);
+  for (let i = 0; i < tris.length; i++) {
+    const t = tris[i];
+    flatPos[i * 9]     = t.ax; flatPos[i * 9 + 1] = t.ay; flatPos[i * 9 + 2] = t.az;
+    flatPos[i * 9 + 3] = t.bx; flatPos[i * 9 + 4] = t.by; flatPos[i * 9 + 5] = t.bz;
+    flatPos[i * 9 + 6] = t.cx; flatPos[i * 9 + 7] = t.cy; flatPos[i * 9 + 8] = t.cz;
+  }
+  tempGeo.setAttribute('position', new THREE.BufferAttribute(flatPos, 3));
+  const tempMesh = new THREE.Mesh(tempGeo, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+  tempMesh.updateMatrixWorld(true);
+
+  const raycaster = new THREE.Raycaster();
+  const dirZ = new THREE.Vector3(0, 0, 1);
+  const dirX = new THREE.Vector3(1, 0, 0);
+  const pt = new THREE.Vector3();
+
+  // 3. Compute Marching Cubes Signed Distance Field
+  const mc = new MarchingCubes(gridRes, new THREE.MeshBasicMaterial(), false, false, 150000);
+  mc.init(gridRes);
+  mc.reset();
+
+  const field = mc.field;
+
+  for (let x = 0; x < gridRes; x++) {
+    const lx = x * (2.0 / gridRes) - 1.0;
+    const px = centerX + lx * halfSizeX;
+
+    for (let y = 0; y < gridRes; y++) {
+      const ly = y * (2.0 / gridRes) - 1.0;
+      const py = centerY + ly * halfSizeY;
+
+      for (let z = 0; z < gridRes; z++) {
+        const lz = z * (2.0 / gridRes) - 1.0;
+        const pz = centerZ + lz * halfSizeZ;
+
+        let inside = false;
+        if (px >= minX - 1e-4 && px <= maxX + 1e-4 && py >= minY - 1e-4 && py <= maxY + 1e-4 && pz >= minZ - 1e-4 && pz <= maxZ + 1e-4) {
+          pt.set(px, py, pz);
+          raycaster.set(pt, dirZ);
+          const hitsZ = raycaster.intersectObject(tempMesh).length;
+          if (hitsZ % 2 === 1) {
+            inside = true;
+          } else {
+            raycaster.set(pt, dirX);
+            const hitsX = raycaster.intersectObject(tempMesh).length;
+            if (hitsX % 2 === 1) inside = true;
+          }
+        }
+
+        const dist = Math.sqrt(getMinDistSq(px, py, pz));
+        const sdf = inside ? dist : -dist;
+
+        const idx = x + y * gridRes + z * gridRes * gridRes;
+        field[idx] = sdf;
+      }
+    }
+  }
+
+  mc.isolation = 0;
+  mc.update();
+
+  tempGeo.dispose();
+
+  if (mc.count === 0) return { vertices: obj.vertices, faces: obj.faces };
+
+  // 4. Transform Marching Cubes Geometry back to World Space & Weld Vertices
+  const activeVertCount = mc.count;
+  const mcPositions = mc.geometry.attributes.position.array;
+
+  const rawGeo = new THREE.BufferGeometry();
+  const worldPositions = new Float32Array(activeVertCount * 3);
+
+  for (let i = 0; i < activeVertCount; i++) {
+    const lx = mcPositions[i * 3];
+    const ly = mcPositions[i * 3 + 1];
+    const lz = mcPositions[i * 3 + 2];
+
+    worldPositions[i * 3]     = centerX + lx * halfSizeX;
+    worldPositions[i * 3 + 1] = centerY + ly * halfSizeY;
+    worldPositions[i * 3 + 2] = centerZ + lz * halfSizeZ;
+  }
+
+  rawGeo.setAttribute('position', new THREE.BufferAttribute(worldPositions, 3));
+  const indexedGeo = BufferGeometryUtils.mergeVertices(rawGeo, 1e-4);
+
+  const finalPos = indexedGeo.attributes.position;
+  const finalIdx = indexedGeo.index;
+
+  const resVertices: V3[] = [];
+  for (let i = 0; i < finalPos.count; i++) {
+    resVertices.push([finalPos.getX(i), finalPos.getY(i), finalPos.getZ(i)]);
+  }
+
+  const resFaces: MeshFace[] = [];
+  if (finalIdx) {
+    for (let i = 0; i < finalIdx.count; i += 3) {
+      resFaces.push({ indices: [finalIdx.getX(i), finalIdx.getX(i + 1), finalIdx.getX(i + 2)] });
+    }
+  }
+
+  rawGeo.dispose();
+  indexedGeo.dispose();
+
+  return { vertices: resVertices, faces: resFaces };
+}
+
+/**
+ * ShrinkWrap Remesher (Pipeline de Voxelización + Marching Cubes + Proyección Shrinkwrap + Transferencia de Datos BVH)
+ * Genera una piel uniforme sobre el volumen del objeto y proyecta matemáticamente los vértices
+ * sobre la superficie original usando aceleración por BVH (three-mesh-bvh).
+ * Preserva coordenadas UV y geometría continua.
+ * 
+ * @param resolution Nivel de detalle (1 = baja resolución/alta simplificación, 12 = alto detalle)
+ * @param onProgress Callback opcional para reportar progreso y estado
+ */
+export async function shrinkWrapMesh(
+  obj: CSGObject,
+  resolution: number = 3,
+  onProgress?: (progress: number, stepText: string) => Promise<void> | void
+): Promise<{ vertices: V3[]; faces: MeshFace[] }> {
+  if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [] };
+
+  if (onProgress) await onProgress(10, 'Analizando volumen y estructura de la malla...');
+
+  // 1. Convertir CSGObject a Three.js BufferGeometry y soldar costuras
+  let origGeo = toThreeGeometry(obj);
+  try {
+    origGeo = BufferGeometryUtils.mergeVertices(origGeo, 1e-4);
+  } catch (e) {
+    // Continuar con geometría sin soldar si falla
+  }
+  origGeo.computeVertexNormals();
+
+  const initialVerts = origGeo.attributes.position ? origGeo.attributes.position.count : 0;
+  if (initialVerts <= 4) {
+    const res = fromThreeGeometry(origGeo);
+    origGeo.dispose();
+    if (onProgress) await onProgress(100, 'Remallado finalizado.');
+    return res;
+  }
+
+  // 2. Mapear resolución de control (1..12) a densidad de voxelización (16..56)
+  const clampedRes = Math.max(1, Math.min(12, resolution));
+  const gridRes = Math.max(16, Math.min(56, Math.round(16 + clampedRes * 3.2)));
+
+  if (onProgress) await onProgress(25, `Voxelizando objeto a resolución ${gridRes}x${gridRes}x${gridRes}...`);
+
+  const bbox = new THREE.Box3();
+  bbox.setFromBufferAttribute(origGeo.attributes.position as THREE.BufferAttribute);
+  bbox.expandByScalar(0.08); // Margen de seguridad para la piel
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
+    size.set(Math.max(0.1, size.x), Math.max(0.1, size.y), Math.max(0.1, size.z));
+  }
+  const center = bbox.getCenter(new THREE.Vector3());
+
+  // Crear Isosuperficie con MarchingCubes
+  const dummyMat = new THREE.MeshBasicMaterial();
+  const mc = new MarchingCubes(gridRes, dummyMat, true, true, 200000);
+  mc.scale.copy(size);
+  mc.position.copy(center);
+  mc.init(gridRes);
+
+  const posOrig = origGeo.attributes.position;
+  const ballRadius = Math.max(size.x, size.y, size.z) / (gridRes * 1.15);
+  const vTemp = new THREE.Vector3();
+
+  // Muestrear vértices en la cuadrícula 3D
+  for (let i = 0; i < posOrig.count; i++) {
+    vTemp.fromBufferAttribute(posOrig, i);
+    const xLocal = (vTemp.x - bbox.min.x) / size.x;
+    const yLocal = (vTemp.y - bbox.min.y) / size.y;
+    const zLocal = (vTemp.z - bbox.min.z) / size.z;
+    if (xLocal >= 0 && xLocal <= 1 && yLocal >= 0 && yLocal <= 1 && zLocal >= 0 && zLocal <= 1) {
+      mc.addBall(xLocal, yLocal, zLocal, ballRadius, 0.5);
+    }
+  }
+
+  mc.update();
+
+  const drawCount = mc.geometry.drawRange.count;
+  if (!drawCount || drawCount === 0) {
+    // Si la voxelización no generó vértices (objeto extremadamente pequeño), fallback seguro
+    const res = fromThreeGeometry(origGeo);
+    origGeo.dispose();
+    if (onProgress) await onProgress(100, 'Remallado preservado.');
+    return res;
+  }
+
+  // Extraer y escalar posiciones del MarchingCubes
+  const mcPositions = (mc.geometry.attributes.position.array as Float32Array).slice(0, drawCount * 3);
+  for (let i = 0; i < drawCount; i++) {
+    mcPositions[i * 3 + 0] = mcPositions[i * 3 + 0] * size.x + bbox.min.x;
+    mcPositions[i * 3 + 1] = mcPositions[i * 3 + 1] * size.y + bbox.min.y;
+    mcPositions[i * 3 + 2] = mcPositions[i * 3 + 2] * size.z + bbox.min.z;
+  }
+
+  const rawSkinGeo = new THREE.BufferGeometry();
+  rawSkinGeo.setAttribute('position', new THREE.BufferAttribute(mcPositions, 3));
+  let skinGeo = BufferGeometryUtils.mergeVertices(rawSkinGeo, 1e-4);
+  rawSkinGeo.dispose();
+
+  // 3. Proyección Shrinkwrap acelerada con BVH y transferencia de atributos
+  if (onProgress) await onProgress(50, 'Acelerando raycasting BVH y proyectando vértices...');
+
+  (origGeo as any).computeBoundsTree();
+  const origMesh = new THREE.Mesh(origGeo, dummyMat);
+
+  const posSkin = skinGeo.attributes.position;
+  const skinCount = posSkin.count;
+
+  const raycaster = new THREE.Raycaster();
+  (raycaster as any).firstHitOnly = true;
+
+  const pointSkin = new THREE.Vector3();
+  const dir = new THREE.Vector3();
+
+  // Matriz de UVs proyectadas si aplica
+  const hasUVs = !!origGeo.attributes.uv;
+  const newUVs = hasUVs ? new Float32Array(skinCount * 2) : null;
+
+  const batchSize = 120;
+  for (let i = 0; i < skinCount; i++) {
+    pointSkin.fromBufferAttribute(posSkin, i);
+
+    // Dirección del rayo hacia el centro del volumen
+    dir.copy(pointSkin).sub(center).negate().normalize();
+    raycaster.set(pointSkin, dir);
+
+    const hits = raycaster.intersectObject(origMesh);
+    if (hits.length > 0) {
+      const hit = hits[0];
+      posSkin.setXYZ(i, hit.point.x, hit.point.y, hit.point.z);
+
+      if (newUVs && hit.uv) {
+        newUVs[i * 2 + 0] = hit.uv.x;
+        newUVs[i * 2 + 1] = hit.uv.y;
+      }
+    }
+
+    // Async chunking para mantener la interfaz fluida
+    if (i % batchSize === 0) {
+      if (onProgress) {
+        const prog = Math.min(92, 50 + Math.round((i / skinCount) * 42));
+        await onProgress(prog, `Proyectando piel sobre contornos (${i}/${skinCount})...`);
+      }
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  posSkin.needsUpdate = true;
+  skinGeo.computeVertexNormals();
+
+  if (newUVs) {
+    skinGeo.setAttribute('uv', new THREE.BufferAttribute(newUVs, 2));
+  }
+
+  // Liberar árboles BVH
+  (origGeo as any).disposeBoundsTree();
+
+  if (onProgress) await onProgress(96, 'Extrayendo topología envolvente...');
+  await new Promise(r => setTimeout(r, 10));
+
+  const result = fromThreeGeometry(skinGeo);
+
+  skinGeo.dispose();
+  origGeo.dispose();
+
+  if (onProgress) await onProgress(100, '¡Remallado Envolvente Shrink-Wrap completado!');
+
+  return result;
 }
 
 export { repairMesh, fillHoles, capSelectedFaces };
