@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import * as THREE from 'three';
-import { WebGLPathTracer } from 'three-gpu-pathtracer';
+import { WebGLPathTracer, GradientEquirectTexture } from 'three-gpu-pathtracer';
 import { useStore } from '../store/useStore';
 import { X, Download, Play, Pause, RefreshCw, Sparkles, Settings, Camera } from 'lucide-react';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -45,6 +45,41 @@ function getInterpolatedTransform(obj: any, time: number) {
     rotation: [0,1,2].map(i => lerp(prev.transform.rotation[i], next.transform.rotation[i], t)) as [number,number,number],
     scale:    [0,1,2].map(i => lerp(prev.transform.scale[i],    next.transform.scale[i],    t)) as [number,number,number],
   };
+}
+
+/** Convierte cualquier textura de imagen/canvas a una DataTexture de flotantes compatible con three-gpu-pathtracer */
+function ensureEquirectDataTexture(tex: THREE.Texture): THREE.DataTexture {
+  if ((tex as any).isDataTexture && (tex as any).image && (tex as any).image.data) {
+    return tex as THREE.DataTexture;
+  }
+  const img = tex.image as any;
+  if (!img) return tex as any;
+  const w = img.width || (img.videoWidth ? img.videoWidth : 512);
+  const h = img.height || (img.videoHeight ? img.videoHeight : 256);
+  if (!w || !h) return tex as any;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return tex as any;
+
+  ctx.drawImage(img, 0, 0, w, h);
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const u8 = imgData.data;
+  const floatData = new Float32Array(w * h * 4);
+  for (let i = 0; i < u8.length; i += 4) {
+    floatData[i]     = Math.pow(u8[i]     / 255.0, 2.2);
+    floatData[i + 1] = Math.pow(u8[i + 1] / 255.0, 2.2);
+    floatData[i + 2] = Math.pow(u8[i + 2] / 255.0, 2.2);
+    floatData[i + 3] = u8[i + 3] / 255.0;
+  }
+
+  const dataTex = new THREE.DataTexture(floatData, w, h, THREE.RGBAFormat, THREE.FloatType);
+  dataTex.mapping = THREE.EquirectangularReflectionMapping;
+  dataTex.colorSpace = THREE.LinearSRGBColorSpace;
+  dataTex.needsUpdate = true;
+  return dataTex;
 }
 
 /** Carga una textura y devuelve la promesa resuelta */
@@ -173,8 +208,8 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     pt.renderDelay           = 0;     // Iniciar Path Tracing inmediatamente sin delay
     pt.fadeDuration          = 0;
     pt.minSamples            = 1;
-    pt.dynamicLowRes         = true;  // preview de baja resolución durante compilación
-    pt.rasterizeScene        = true;
+    pt.dynamicLowRes         = false; // Evita parpadeos o pantallas negras iniciales
+    pt.rasterizeScene        = false; // Path tracing puro directo desde la primera muestra
     pathTracerRef.current = pt;
 
     // ── Escena ────────────────────────────────────────────────────────────
@@ -186,14 +221,11 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     if (project.environment.hdriUrl) {
       try {
         setStatus('Cargando HDRI / EXR...');
-        const tex = await loadOptimizedEnvironmentTexture(project.environment.hdriUrl, { maxDimension: 2048 });
-        // Configurar la textura como equirrect para que three-gpu-pathtracer pueda leerla
-        tex.mapping    = THREE.EquirectangularReflectionMapping;
-        tex.colorSpace = THREE.LinearSRGBColorSpace;
-        tex.needsUpdate = true;
-        scene.environment = tex;           // raw equirect — el path tracer lo requiere así
+        const rawTex = await loadOptimizedEnvironmentTexture(project.environment.hdriUrl, { maxDimension: 2048 });
+        const dataTex = ensureEquirectDataTexture(rawTex);
+        scene.environment = dataTex;
         if (project.environment.backgroundVisible) {
-          scene.background = tex;
+          scene.background = dataTex;
           scene.backgroundBlurriness = 0.02;
         } else {
           scene.background = new THREE.Color('#0d0d10');
@@ -201,10 +233,10 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         scene.environmentIntensity = envIntensity;
       } catch (e) {
         console.warn('HDRI/EXR load failed, using synthetic sky:', e);
-        setupSyntheticSky(scene, renderer, envIntensity);
+        setupSyntheticSky(scene, envIntensity);
       }
     } else {
-      setupSyntheticSky(scene, renderer, envIntensity);
+      setupSyntheticSky(scene, envIntensity);
     }
 
     // ── Luces del proyecto ────────────────────────────────────────────────
@@ -431,9 +463,6 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     setStatus('Inicializando fotones en GPU...');
     try {
-      pt.updateMaterials();
-      pt.updateEnvironment();
-      pt.updateLights();
       pt.setScene(scene, camera);
       pt.reset();
     } catch (err: any) {
@@ -712,40 +741,14 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   );
 };
 
-/** Crea un cielo sintético con PMREMGenerator cuando no hay HDRI */
-function setupSyntheticSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, intensity: number) {
-
-  // ── Generar envmap equirrectangular para WebGLPathTracer ──────────────────
-  // CRÍTICO: three-gpu-pathtracer necesita una DataTexture Float32 con mapping
-  // EquirectangularReflectionMapping en scene.environment.
-  // fromScene(RoomEnvironment) devuelve un CubeRenderTarget → crash en setScene.
-  // Solución: generar DataTexture de gradiente cielo → asignar directamente.
-  const W = 512, H = 256;
-  const pixels = new Float32Array(W * H * 4);
-  const cTop = new THREE.Color('#1e4080');
-  const cHor = new THREE.Color('#b8cce0');
-  const cSun = new THREE.Color('#fff4cc');
-  for (let y = 0; y < H; y++) {
-    const v = y / (H - 1);
-    const t = Math.pow(1 - v, 0.45);
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      const sunX = Math.abs(x / W - 0.25) * W;
-      const sunY = Math.abs(v - 0.42) * H;
-      const sunF = Math.exp(-(sunX * sunX + sunY * sunY) / 60) * 12;
-      pixels[i    ] = cTop.r * t + cHor.r * (1-t) + cSun.r * sunF;
-      pixels[i + 1] = cTop.g * t + cHor.g * (1-t) + cSun.g * sunF;
-      pixels[i + 2] = cTop.b * t + cHor.b * (1-t) + cSun.b * sunF;
-      pixels[i + 3] = 1.0;
-    }
-  }
-  // Asignar el DataTexture equirrect directamente — path tracer lo consume así
-  const envTex = new THREE.DataTexture(pixels, W, H, THREE.RGBAFormat, THREE.FloatType);
-  envTex.mapping    = THREE.EquirectangularReflectionMapping;
-  envTex.colorSpace = THREE.LinearSRGBColorSpace;
-  envTex.needsUpdate = true;
-  scene.environment = envTex;
-  scene.background = envTex;
-  scene.backgroundBlurriness = 0.02;
+/** Crea un cielo sintético equirrectangular optimizado para three-gpu-pathtracer cuando no hay HDRI */
+function setupSyntheticSky(scene: THREE.Scene, intensity: number) {
+  const gradTex = new GradientEquirectTexture(256);
+  gradTex.topColor.set('#1e4080');
+  gradTex.bottomColor.set('#b8cce0');
+  gradTex.exponent = 1.2;
+  gradTex.update();
+  scene.environment = gradTex;
+  scene.background = gradTex;
   scene.environmentIntensity = intensity;
 }
