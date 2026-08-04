@@ -10,17 +10,17 @@ import { CSG } from 'three-csg-ts';
 import { MarchingCubes } from 'three/examples/jsm/objects/MarchingCubes.js';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 import type { CSGObject, MeshFace, V3, CSGOperation } from '../types';
 import { generatePrimitive } from './geometry';
+import { createBaseGeometry } from './csg';
 import { repairMesh, fillHoles, capSelectedFaces } from './meshUtils';
 
-// Register BVH extensions on THREE prototypes
-if (!(THREE.BufferGeometry.prototype as any).computeBoundsTree) {
-  (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
-  (THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
-  (THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
-}
+// 2. Registrar las funciones aceleradoras en el motor
+(THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
+(THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
+(THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -103,7 +103,9 @@ export function fromThreeGeometry(geo: THREE.BufferGeometry): { vertices: V3[]; 
   }
 
   // Make sure it's indexed
-  if (!geo.index) geo = geo.toNonIndexed();
+  if (!geo.index) {
+    geo = BufferGeometryUtils.mergeVertices(geo, 1e-6);
+  }
   const pos = geo.getAttribute('position') as THREE.BufferAttribute;
   const uv = geo.getAttribute('uv') as THREE.BufferAttribute;
   const vertices: V3[] = [];
@@ -144,44 +146,212 @@ export function fromThreeGeometry(geo: THREE.BufferGeometry): { vertices: V3[]; 
 // ─── Smooth ───────────────────────────────────────────────────────────────────
 
 /**
- * Laplacian smoothing: move each vertex toward the average position of its neighbors.
- * @param factor  0–1: how much to move toward neighbor average (0 = no change, 1 = full average)
+ * Fast spatial clustering using Disjoint Set Union (DSU) to group coincident vertices.
+ * Ensures un-welded or duplicated face boundary vertices remain topologically locked together.
+ */
+function getCoincidentClusters(
+  vertices: V3[],
+  tol: number = 0.0005,
+): { vertToCluster: number[]; clusters: number[][] } {
+  const n = vertices.length;
+  if (n === 0) return { vertToCluster: [], clusters: [] };
+
+  const parent = new Int32Array(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+
+  function find(i: number): number {
+    let root = i;
+    while (root !== parent[root]) root = parent[root];
+    let curr = i;
+    while (curr !== root) {
+      const nxt = parent[curr];
+      parent[curr] = root;
+      curr = nxt;
+    }
+    return root;
+  }
+
+  function union(i: number, j: number) {
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI !== rootJ) parent[rootI] = rootJ;
+  }
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const v = vertices[i];
+    if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  const effectiveTol = Math.max(tol, 0.0001);
+  const cellSize = effectiveTol;
+
+  const grid = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    const v = vertices[i];
+    const gx = Math.floor(v[0] / cellSize);
+    const gy = Math.floor(v[1] / cellSize);
+    const gz = Math.floor(v[2] / cellSize);
+    const key = `${gx}_${gy}_${gz}`;
+    let list = grid.get(key);
+    if (!list) {
+      list = [];
+      grid.set(key, list);
+    }
+    list.push(i);
+  }
+
+  const tolSq = effectiveTol * effectiveTol;
+
+  for (let i = 0; i < n; i++) {
+    const v = vertices[i];
+    const gx = Math.floor(v[0] / cellSize);
+    const gy = Math.floor(v[1] / cellSize);
+    const gz = Math.floor(v[2] / cellSize);
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const key = `${gx + dx}_${gy + dy}_${gz + dz}`;
+          const candidates = grid.get(key);
+          if (candidates) {
+            for (const j of candidates) {
+              if (j > i) {
+                const vj = vertices[j];
+                const d0 = v[0] - vj[0];
+                const d1 = v[1] - vj[1];
+                const d2 = v[2] - vj[2];
+                if (d0 * d0 + d1 * d1 + d2 * d2 <= tolSq) {
+                  union(i, j);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const rootToClusterIdx = new Map<number, number>();
+  const clusters: number[][] = [];
+  const vertToCluster = new Array<number>(n);
+
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    let cIdx = rootToClusterIdx.get(r);
+    if (cIdx === undefined) {
+      cIdx = clusters.length;
+      rootToClusterIdx.set(r, cIdx);
+      clusters.push([]);
+    }
+    clusters[cIdx].push(i);
+    vertToCluster[i] = cIdx;
+  }
+
+  return { vertToCluster, clusters };
+}
+
+/**
+ * Cluster-Synchronized Laplacian smoothing:
+ * Groups coincident/un-welded vertices so adjacent polygons remain attached without tearing.
+ * @param factor  0–1: how much to move toward neighbor average
  * @param iterations  number of smoothing passes
  */
 export function smoothMesh(
-  obj: CSGObject,
+  obj: { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
   factor: number,
   iterations: number = 1,
 ): { vertices: V3[]; faces: MeshFace[] } {
-  let vertices = obj.vertices.map(v => [...v] as V3);
+  if (!obj.vertices || obj.vertices.length === 0) {
+    return { vertices: [], faces: obj.faces || [] };
+  }
+
+  // Bake vertex offsets if any
+  const currentVerts = obj.vertices.map((v, i) => {
+    const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+    return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+  });
   const faces = obj.faces;
   const f = Math.max(0, Math.min(1, factor));
 
-  const adj = buildAdjacency(vertices, faces);
+  // Find coincident vertex clusters
+  const { vertToCluster, clusters } = getCoincidentClusters(currentVerts);
+  const numClusters = clusters.length;
 
-  for (let iter = 0; iter < iterations; iter++) {
-    const next = vertices.map((v, i) => {
-      const neighbours = [...(adj.get(i) ?? [])];
-      if (neighbours.length === 0) return v;
-      const avg: V3 = [0, 0, 0];
-      for (const j of neighbours) {
-        avg[0] += vertices[j][0];
-        avg[1] += vertices[j][1];
-        avg[2] += vertices[j][2];
+  // Build cluster-level adjacency
+  const clusterAdj = new Array<Set<number>>(numClusters);
+  for (let c = 0; c < numClusters; c++) clusterAdj[c] = new Set<number>();
+
+  for (const face of faces) {
+    const n = face.indices.length;
+    for (let i = 0; i < n; i++) {
+      const idxA = face.indices[i];
+      const idxB = face.indices[(i + 1) % n];
+      const cA = vertToCluster[idxA];
+      const cB = vertToCluster[idxB];
+      if (cA !== undefined && cB !== undefined && cA !== cB) {
+        clusterAdj[cA].add(cB);
+        clusterAdj[cB].add(cA);
       }
-      avg[0] /= neighbours.length;
-      avg[1] /= neighbours.length;
-      avg[2] /= neighbours.length;
-      return [
-        v[0] + (avg[0] - v[0]) * f,
-        v[1] + (avg[1] - v[1]) * f,
-        v[2] + (avg[2] - v[2]) * f,
-      ] as V3;
-    });
-    vertices = next;
+    }
   }
 
-  return { vertices, faces };
+  // Initial average position of each cluster
+  const clusterPos: V3[] = new Array(numClusters);
+  for (let c = 0; c < numClusters; c++) {
+    const vertIndices = clusters[c];
+    let sx = 0, sy = 0, sz = 0;
+    for (const idx of vertIndices) {
+      const v = currentVerts[idx];
+      sx += v[0]; sy += v[1]; sz += v[2];
+    }
+    const len = vertIndices.length;
+    clusterPos[c] = [sx / len, sy / len, sz / len];
+  }
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const nextClusterPos: V3[] = new Array(numClusters);
+
+    for (let c = 0; c < numClusters; c++) {
+      const neighbors = Array.from(clusterAdj[c]);
+      if (neighbors.length === 0) {
+        nextClusterPos[c] = [...clusterPos[c]];
+      } else {
+        let avgX = 0, avgY = 0, avgZ = 0;
+        for (const nIdx of neighbors) {
+          const np = clusterPos[nIdx];
+          avgX += np[0]; avgY += np[1]; avgZ += np[2];
+        }
+        const nLen = neighbors.length;
+        avgX /= nLen; avgY /= nLen; avgZ /= nLen;
+
+        const cp = clusterPos[c];
+        nextClusterPos[c] = [
+          cp[0] + (avgX - cp[0]) * f,
+          cp[1] + (avgY - cp[1]) * f,
+          cp[2] + (avgZ - cp[2]) * f,
+        ];
+      }
+    }
+
+    for (let c = 0; c < numClusters; c++) {
+      clusterPos[c] = nextClusterPos[c];
+    }
+  }
+
+  // Assign updated cluster positions back to all vertices
+  const nextVertices: V3[] = new Array(currentVerts.length);
+  for (let c = 0; c < numClusters; c++) {
+    const pos = clusterPos[c];
+    for (const idx of clusters[c]) {
+      nextVertices[idx] = [...pos];
+    }
+  }
+
+  return { vertices: nextVertices, faces };
 }
 
 // ─── Subdivide ─────────────────────────────────────────────────────────────────
@@ -414,246 +584,6 @@ function distSqToTriangle(
 }
 
 /**
- * Voxel Remeshing
- * Reconstructs the object as a uniform smooth volumetric envelope using Marching Cubes SDF.
- * @param resolution Number of grid divisions along the spatial bounding box
- */
-export function voxelRemesh(
-  obj: CSGObject,
-  resolution: number = 45
-): { vertices: V3[]; faces: MeshFace[] } {
-  if (!obj.vertices || obj.vertices.length === 0 || !obj.faces || obj.faces.length === 0) {
-    return { vertices: [], faces: [] };
-  }
-
-  // 1. Calculate Bounding Box of World Vertices
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-  const worldVerts: [number, number, number][] = new Array(obj.vertices.length);
-  for (let i = 0; i < obj.vertices.length; i++) {
-    const v = obj.vertices[i];
-    const off = obj.vertexOffsets?.[i] || [0, 0, 0];
-    const x = v[0] + off[0];
-    const y = v[1] + off[1];
-    const z = v[2] + off[2];
-    worldVerts[i] = [x, y, z];
-
-    if (x < minX) minX = x; if (y < minY) minY = y; if (z < minZ) minZ = z;
-    if (x > maxX) maxX = x; if (y > maxY) maxY = y; if (z > maxZ) maxZ = z;
-  }
-
-  const sizeX = maxX - minX || 0.001;
-  const sizeY = maxY - minY || 0.001;
-  const sizeZ = maxZ - minZ || 0.001;
-  const maxDim = Math.max(sizeX, sizeY, sizeZ);
-
-  // Resolution clamped between 16 and 64 for high speed and smooth surface quality
-  const gridRes = Math.max(16, Math.min(64, Math.round(resolution)));
-  const pad = (maxDim / gridRes) * 1.5;
-
-  const boundMinX = minX - pad, boundMaxX = maxX + pad;
-  const boundMinY = minY - pad, boundMaxY = maxY + pad;
-  const boundMinZ = minZ - pad, boundMaxZ = maxZ + pad;
-
-  const centerX = (boundMinX + boundMaxX) / 2;
-  const centerY = (boundMinY + boundMaxY) / 2;
-  const centerZ = (boundMinZ + boundMaxZ) / 2;
-
-  const halfSizeX = (boundMaxX - boundMinX) / 2;
-  const halfSizeY = (boundMaxY - boundMinY) / 2;
-  const halfSizeZ = (boundMaxZ - boundMinZ) / 2;
-
-  // 2. Extract Triangles and Build Spatial Bucket Grid for O(1) Distance Queries
-  const bucketSize = Math.max(halfSizeX, halfSizeY, halfSizeZ) * 2 / Math.max(2, gridRes / 4);
-  const buckets = new Map<string, Array<{ ax: number; ay: number; az: number; bx: number; by: number; bz: number; cx: number; cy: number; cz: number }>>();
-  const getBucketKey = (bx: number, by: number, bz: number) => `${bx + 1000}_${by + 1000}_${bz + 1000}`;
-
-  type Tri = { ax: number; ay: number; az: number; bx: number; by: number; bz: number; cx: number; cy: number; cz: number };
-  const tris: Tri[] = [];
-
-  obj.faces.forEach((face) => {
-    const idxs = face.indices;
-    if (idxs.length < 3) return;
-
-    for (let t = 1; t < idxs.length - 1; t++) {
-      const p0 = worldVerts[idxs[0]];
-      const p1 = worldVerts[idxs[t]];
-      const p2 = worldVerts[idxs[t + 1]];
-      if (!p0 || !p1 || !p2) continue;
-
-      const ax = p0[0], ay = p0[1], az = p0[2];
-      const bx = p1[0], by = p1[1], bz = p1[2];
-      const cx = p2[0], cy = p2[1], cz = p2[2];
-
-      const triObj: Tri = { ax, ay, az, bx, by, bz, cx, cy, cz };
-      tris.push(triObj);
-
-      const tMinX = Math.min(ax, bx, cx), tMaxX = Math.max(ax, bx, cx);
-      const tMinY = Math.min(ay, by, cy), tMaxY = Math.max(ay, by, cy);
-      const tMinZ = Math.min(az, bz, cz), tMaxZ = Math.max(az, bz, cz);
-
-      const minBx = Math.floor(tMinX / bucketSize), maxBx = Math.floor(tMaxX / bucketSize);
-      const minBy = Math.floor(tMinY / bucketSize), maxBy = Math.floor(tMaxY / bucketSize);
-      const minBz = Math.floor(tMinZ / bucketSize), maxBz = Math.floor(tMaxZ / bucketSize);
-
-      for (let x = minBx; x <= maxBx; x++) {
-        for (let y = minBy; y <= maxBy; y++) {
-          for (let z = minBz; z <= maxBz; z++) {
-            const k = getBucketKey(x, y, z);
-            let arr = buckets.get(k);
-            if (!arr) { arr = []; buckets.set(k, arr); }
-            arr.push(triObj);
-          }
-        }
-      }
-    }
-  });
-
-  if (tris.length === 0) return { vertices: obj.vertices, faces: obj.faces };
-
-  // Fast spatial distance to nearest triangle
-  function getMinDistSq(px: number, py: number, pz: number): number {
-    const bx = Math.floor(px / bucketSize);
-    const by = Math.floor(py / bucketSize);
-    const bz = Math.floor(pz / bucketSize);
-
-    let minDistSq = Infinity;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const arr = buckets.get(getBucketKey(bx + dx, by + dy, bz + dz));
-          if (arr) {
-            for (let i = 0; i < arr.length; i++) {
-              const t = arr[i];
-              const dSq = distSqToTriangle(px, py, pz, t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz);
-              if (dSq < minDistSq) minDistSq = dSq;
-            }
-          }
-        }
-      }
-    }
-
-    if (minDistSq === Infinity) {
-      for (let i = 0; i < tris.length; i++) {
-        const t = tris[i];
-        const dSq = distSqToTriangle(px, py, pz, t.ax, t.ay, t.az, t.bx, t.by, t.bz, t.cx, t.cy, t.cz);
-        if (dSq < minDistSq) minDistSq = dSq;
-      }
-    }
-
-    return minDistSq;
-  }
-
-  // Temporary Mesh for Raycast Winding Number Inside/Outside classification
-  const tempGeo = new THREE.BufferGeometry();
-  const flatPos = new Float32Array(tris.length * 9);
-  for (let i = 0; i < tris.length; i++) {
-    const t = tris[i];
-    flatPos[i * 9]     = t.ax; flatPos[i * 9 + 1] = t.ay; flatPos[i * 9 + 2] = t.az;
-    flatPos[i * 9 + 3] = t.bx; flatPos[i * 9 + 4] = t.by; flatPos[i * 9 + 5] = t.bz;
-    flatPos[i * 9 + 6] = t.cx; flatPos[i * 9 + 7] = t.cy; flatPos[i * 9 + 8] = t.cz;
-  }
-  tempGeo.setAttribute('position', new THREE.BufferAttribute(flatPos, 3));
-  const tempMesh = new THREE.Mesh(tempGeo, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
-  tempMesh.updateMatrixWorld(true);
-
-  const raycaster = new THREE.Raycaster();
-  const dirZ = new THREE.Vector3(0, 0, 1);
-  const dirX = new THREE.Vector3(1, 0, 0);
-  const pt = new THREE.Vector3();
-
-  // 3. Compute Marching Cubes Signed Distance Field
-  const mc = new MarchingCubes(gridRes, new THREE.MeshBasicMaterial(), false, false, 150000);
-  mc.init(gridRes);
-  mc.reset();
-
-  const field = mc.field;
-
-  for (let x = 0; x < gridRes; x++) {
-    const lx = x * (2.0 / gridRes) - 1.0;
-    const px = centerX + lx * halfSizeX;
-
-    for (let y = 0; y < gridRes; y++) {
-      const ly = y * (2.0 / gridRes) - 1.0;
-      const py = centerY + ly * halfSizeY;
-
-      for (let z = 0; z < gridRes; z++) {
-        const lz = z * (2.0 / gridRes) - 1.0;
-        const pz = centerZ + lz * halfSizeZ;
-
-        let inside = false;
-        if (px >= minX - 1e-4 && px <= maxX + 1e-4 && py >= minY - 1e-4 && py <= maxY + 1e-4 && pz >= minZ - 1e-4 && pz <= maxZ + 1e-4) {
-          pt.set(px, py, pz);
-          raycaster.set(pt, dirZ);
-          const hitsZ = raycaster.intersectObject(tempMesh).length;
-          if (hitsZ % 2 === 1) {
-            inside = true;
-          } else {
-            raycaster.set(pt, dirX);
-            const hitsX = raycaster.intersectObject(tempMesh).length;
-            if (hitsX % 2 === 1) inside = true;
-          }
-        }
-
-        const dist = Math.sqrt(getMinDistSq(px, py, pz));
-        const sdf = inside ? dist : -dist;
-
-        const idx = x + y * gridRes + z * gridRes * gridRes;
-        field[idx] = sdf;
-      }
-    }
-  }
-
-  mc.isolation = 0;
-  mc.update();
-
-  tempGeo.dispose();
-
-  if (mc.count === 0) return { vertices: obj.vertices, faces: obj.faces };
-
-  // 4. Transform Marching Cubes Geometry back to World Space & Weld Vertices
-  const activeVertCount = mc.count;
-  const mcPositions = mc.geometry.attributes.position.array;
-
-  const rawGeo = new THREE.BufferGeometry();
-  const worldPositions = new Float32Array(activeVertCount * 3);
-
-  for (let i = 0; i < activeVertCount; i++) {
-    const lx = mcPositions[i * 3];
-    const ly = mcPositions[i * 3 + 1];
-    const lz = mcPositions[i * 3 + 2];
-
-    worldPositions[i * 3]     = centerX + lx * halfSizeX;
-    worldPositions[i * 3 + 1] = centerY + ly * halfSizeY;
-    worldPositions[i * 3 + 2] = centerZ + lz * halfSizeZ;
-  }
-
-  rawGeo.setAttribute('position', new THREE.BufferAttribute(worldPositions, 3));
-  const indexedGeo = BufferGeometryUtils.mergeVertices(rawGeo, 1e-4);
-
-  const finalPos = indexedGeo.attributes.position;
-  const finalIdx = indexedGeo.index;
-
-  const resVertices: V3[] = [];
-  for (let i = 0; i < finalPos.count; i++) {
-    resVertices.push([finalPos.getX(i), finalPos.getY(i), finalPos.getZ(i)]);
-  }
-
-  const resFaces: MeshFace[] = [];
-  if (finalIdx) {
-    for (let i = 0; i < finalIdx.count; i += 3) {
-      resFaces.push({ indices: [finalIdx.getX(i), finalIdx.getX(i + 1), finalIdx.getX(i + 2)] });
-    }
-  }
-
-  rawGeo.dispose();
-  indexedGeo.dispose();
-
-  return { vertices: resVertices, faces: resFaces };
-}
-
-/**
  * ShrinkWrap Remesher (Pipeline de Voxelización + Marching Cubes + Proyección Shrinkwrap + Transferencia de Datos BVH)
  * Genera una piel uniforme sobre el volumen del objeto y proyecta matemáticamente los vértices
  * sobre la superficie original usando aceleración por BVH (three-mesh-bvh).
@@ -688,9 +618,9 @@ export async function shrinkWrapMesh(
     return res;
   }
 
-  // 2. Mapear resolución de control (1..12) a densidad de voxelización (16..56)
+  // 2. Mapear resolución de control (1..12) a densidad de voxelización (28..80)
   const clampedRes = Math.max(1, Math.min(12, resolution));
-  const gridRes = Math.max(16, Math.min(56, Math.round(16 + clampedRes * 3.2)));
+  const gridRes = Math.max(28, Math.min(80, Math.round(28 + clampedRes * 4.4)));
 
   if (onProgress) await onProgress(25, `Voxelizando objeto a resolución ${gridRes}x${gridRes}x${gridRes}...`);
 
@@ -706,31 +636,75 @@ export async function shrinkWrapMesh(
 
   // Crear Isosuperficie con MarchingCubes
   const dummyMat = new THREE.MeshBasicMaterial();
-  const mc = new MarchingCubes(gridRes, dummyMat, true, true, 200000);
+  const mc = new MarchingCubes(gridRes, dummyMat, true, true, 300000);
   mc.scale.copy(size);
   mc.position.copy(center);
   mc.init(gridRes);
 
   const posOrig = origGeo.attributes.position;
-  const ballRadius = Math.max(size.x, size.y, size.z) / (gridRes * 1.15);
-  const vTemp = new THREE.Vector3();
+  const indexOrig = origGeo.index;
+  const ballRadius = Math.max(size.x, size.y, size.z) / (gridRes * 0.95);
+  const sampledKeys = new Set<string>();
 
-  // Muestrear vértices en la cuadrícula 3D
-  for (let i = 0; i < posOrig.count; i++) {
-    vTemp.fromBufferAttribute(posOrig, i);
-    const xLocal = (vTemp.x - bbox.min.x) / size.x;
-    const yLocal = (vTemp.y - bbox.min.y) / size.y;
-    const zLocal = (vTemp.z - bbox.min.z) / size.z;
+  const addMetaballAt = (vx: number, vy: number, vz: number) => {
+    const xLocal = (vx - bbox.min.x) / size.x;
+    const yLocal = (vy - bbox.min.y) / size.y;
+    const zLocal = (vz - bbox.min.z) / size.z;
     if (xLocal >= 0 && xLocal <= 1 && yLocal >= 0 && yLocal <= 1 && zLocal >= 0 && zLocal <= 1) {
-      mc.addBall(xLocal, yLocal, zLocal, ballRadius, 0.5);
+      const key = `${Math.floor(xLocal * gridRes * 2)}_${Math.floor(yLocal * gridRes * 2)}_${Math.floor(zLocal * gridRes * 2)}`;
+      if (!sampledKeys.has(key)) {
+        sampledKeys.add(key);
+        mc.addBall(xLocal, yLocal, zLocal, ballRadius, 0.5);
+      }
     }
+  };
+
+  // Muestrear vértices
+  for (let i = 0; i < posOrig.count; i++) {
+    addMetaballAt(posOrig.getX(i), posOrig.getY(i), posOrig.getZ(i));
+  }
+
+  // Muestrear aristas y centroides de caras para preservar tubos finos, cañones y detalles delgados
+  const numTris = indexOrig ? indexOrig.count / 3 : posOrig.count / 3;
+  const p0 = new THREE.Vector3(), p1 = new THREE.Vector3(), p2 = new THREE.Vector3();
+  const edgeStep = Math.max(size.x, size.y, size.z) / (gridRes * 1.5);
+
+  for (let t = 0; t < numTris; t++) {
+    let i0 = t * 3, i1 = t * 3 + 1, i2 = t * 3 + 2;
+    if (indexOrig) {
+      i0 = indexOrig.getX(i0);
+      i1 = indexOrig.getX(i1);
+      i2 = indexOrig.getX(i2);
+    }
+    p0.fromBufferAttribute(posOrig, i0);
+    p1.fromBufferAttribute(posOrig, i1);
+    p2.fromBufferAttribute(posOrig, i2);
+
+    // Centroide de la cara
+    addMetaballAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3, (p0.z + p1.z + p2.z) / 3);
+
+    // Muestreo de aristas
+    const sampleEdge = (pa: THREE.Vector3, pb: THREE.Vector3) => {
+      const d = pa.distanceTo(pb);
+      if (d > edgeStep) {
+        const steps = Math.min(8, Math.ceil(d / edgeStep));
+        for (let s = 1; s < steps; s++) {
+          const factor = s / steps;
+          addMetaballAt(pa.x + (pb.x - pa.x) * factor, pa.y + (pb.y - pa.y) * factor, pa.z + (pb.z - pa.z) * factor);
+        }
+      }
+    };
+
+    sampleEdge(p0, p1);
+    sampleEdge(p1, p2);
+    sampleEdge(p2, p0);
   }
 
   mc.update();
 
   const drawCount = mc.geometry.drawRange.count;
   if (!drawCount || drawCount === 0) {
-    // Si la voxelización no generó vértices (objeto extremadamente pequeño), fallback seguro
+    // Si la voxelización no generó vértices, fallback seguro
     const res = fromThreeGeometry(origGeo);
     origGeo.dispose();
     if (onProgress) await onProgress(100, 'Remallado preservado.');
@@ -750,41 +724,63 @@ export async function shrinkWrapMesh(
   let skinGeo = BufferGeometryUtils.mergeVertices(rawSkinGeo, 1e-4);
   rawSkinGeo.dispose();
 
-  // 3. Proyección Shrinkwrap acelerada con BVH y transferencia de atributos
-  if (onProgress) await onProgress(50, 'Acelerando raycasting BVH y proyectando vértices...');
+  // 3. Proyección Shrinkwrap de alta precisión con BVH (closestPointToPoint)
+  if (onProgress) await onProgress(50, 'Acelerando proyecciones BVH sobre contornos finos...');
 
   (origGeo as any).computeBoundsTree();
-  const origMesh = new THREE.Mesh(origGeo, dummyMat);
+  const origBvh = (origGeo as any).boundsTree;
 
   const posSkin = skinGeo.attributes.position;
   const skinCount = posSkin.count;
-
-  const raycaster = new THREE.Raycaster();
-  (raycaster as any).firstHitOnly = true;
-
   const pointSkin = new THREE.Vector3();
-  const dir = new THREE.Vector3();
 
   // Matriz de UVs proyectadas si aplica
-  const hasUVs = !!origGeo.attributes.uv;
+  const uvOrig = origGeo.attributes.uv;
+  const hasUVs = !!uvOrig;
   const newUVs = hasUVs ? new Float32Array(skinCount * 2) : null;
 
-  const batchSize = 120;
+  const hitTarget = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 };
+  const triangle = new THREE.Triangle();
+  const tp0 = new THREE.Vector3(), tp1 = new THREE.Vector3(), tp2 = new THREE.Vector3();
+  const uv0 = new THREE.Vector2(), uv1 = new THREE.Vector2(), uv2 = new THREE.Vector2();
+  const bary = new THREE.Vector3();
+
+  const batchSize = 150;
   for (let i = 0; i < skinCount; i++) {
     pointSkin.fromBufferAttribute(posSkin, i);
 
-    // Dirección del rayo hacia el centro del volumen
-    dir.copy(pointSkin).sub(center).negate().normalize();
-    raycaster.set(pointSkin, dir);
+    if (origBvh) {
+      hitTarget.distance = Infinity;
+      hitTarget.faceIndex = -1;
+      origBvh.closestPointToPoint(pointSkin, hitTarget);
 
-    const hits = raycaster.intersectObject(origMesh);
-    if (hits.length > 0) {
-      const hit = hits[0];
-      posSkin.setXYZ(i, hit.point.x, hit.point.y, hit.point.z);
+      if (hitTarget.faceIndex >= 0 && hitTarget.distance !== Infinity) {
+        posSkin.setXYZ(i, hitTarget.point.x, hitTarget.point.y, hitTarget.point.z);
 
-      if (newUVs && hit.uv) {
-        newUVs[i * 2 + 0] = hit.uv.x;
-        newUVs[i * 2 + 1] = hit.uv.y;
+        if (newUVs && uvOrig) {
+          const fIdx = hitTarget.faceIndex;
+          let i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
+          if (indexOrig) {
+            i0 = indexOrig.getX(i0);
+            i1 = indexOrig.getX(i1);
+            i2 = indexOrig.getX(i2);
+          }
+          tp0.fromBufferAttribute(posOrig, i0);
+          tp1.fromBufferAttribute(posOrig, i1);
+          tp2.fromBufferAttribute(posOrig, i2);
+          triangle.set(tp0, tp1, tp2);
+          triangle.getBarycoord(hitTarget.point, bary);
+
+          uv0.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i0);
+          uv1.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i1);
+          uv2.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i2);
+
+          const u = bary.x * uv0.x + bary.y * uv1.x + bary.z * uv2.x;
+          const v = bary.x * uv0.y + bary.y * uv1.y + bary.z * uv2.y;
+
+          newUVs[i * 2 + 0] = u;
+          newUVs[i * 2 + 1] = v;
+        }
       }
     }
 
@@ -819,6 +815,141 @@ export async function shrinkWrapMesh(
   if (onProgress) await onProgress(100, '¡Remallado Envolvente Shrink-Wrap completado!');
 
   return result;
+}
+
+/**
+ * Transfiere pesos de animación y coordenadas UV a la velocidad máxima admitida por la CPU.
+ * Utiliza fraccionamiento de tareas (Time-Slicing) para mantener el editor a 60 FPS.
+ */
+export async function optimizarYTransferirDatos(
+  meshOriginal: THREE.SkinnedMesh | THREE.Mesh,
+  meshSkinNueva: THREE.Mesh,
+  onProgreso?: (porcentaje: number) => void
+): Promise<THREE.SkinnedMesh | THREE.Mesh> {
+  const geomOriginal = meshOriginal.geometry;
+  const geomSkin = meshSkinNueva.geometry;
+
+  // Generar la aceleración espacial indexada por BVH
+  if (geomOriginal.computeBoundsTree) {
+    geomOriginal.computeBoundsTree();
+  } else {
+    computeBoundsTree.call(geomOriginal);
+  }
+
+  const posOriginal = geomOriginal.attributes.position;
+  const indexOriginal = geomOriginal.attributes.skinIndex as THREE.BufferAttribute | undefined;
+  const weightOriginal = geomOriginal.attributes.skinWeight as THREE.BufferAttribute | undefined;
+  const uvOriginal = geomOriginal.attributes.uv as THREE.BufferAttribute | undefined;
+
+  const posSkin = geomSkin.attributes.position;
+
+  // Inicializar contenedores de datos tipados
+  const nuevosSkinIndices = indexOriginal ? new Float32Array(posSkin.count * 4) : null;
+  const nuevosSkinWeights = weightOriginal ? new Float32Array(posSkin.count * 4) : null;
+  const nuevasUVs = uvOriginal ? new Float32Array(posSkin.count * 2) : null;
+
+  const raycaster = new THREE.Raycaster();
+  (raycaster as any).firstHitOnly = true; // Configuración crítica de rendimiento para el árbol BVH
+
+  const puntoSkin = new THREE.Vector3();
+  const direccion = new THREE.Vector3();
+
+  // Calcular el centro geométrico para proyectar de afuera hacia adentro
+  const boundingBox = new THREE.Box3().setFromObject(meshOriginal);
+  const centroObjeto = new THREE.Vector3();
+  boundingBox.getCenter(centroObjeto);
+
+  // Rendimiento: Fragmentación del bucle pesado para proteger los FPS de tu UI
+  const tamanoBloque = 400;
+  let iteracionesUltimoFrame = 0;
+
+  for (let i = 0; i < posSkin.count; i++) {
+    // Si alcanzamos el límite del bloque, cedemos el control al navegador para refrescar la pantalla
+    if (iteracionesUltimoFrame >= tamanoBloque) {
+      iteracionesUltimoFrame = 0;
+      if (onProgreso) onProgreso(Math.round((i / posSkin.count) * 100));
+      await new Promise((resolve) => {
+        if (typeof requestAnimationFrame !== 'undefined') {
+          requestAnimationFrame(() => resolve(null));
+        } else {
+          setTimeout(resolve, 0);
+        }
+      });
+    }
+    iteracionesUltimoFrame++;
+
+    puntoSkin.fromBufferAttribute(posSkin, i);
+
+    // Calcular dirección del rayo hacia el núcleo del modelo
+    direccion.copy(puntoSkin).sub(centroObjeto).negate().normalize();
+    raycaster.set(puntoSkin, direccion);
+
+    // Búsqueda instantánea en el árbol BVH
+    const colisiones = raycaster.intersectObject(meshOriginal);
+
+    if (colisiones.length > 0) {
+      const golpe = colisiones[0];
+
+      // A. Mapeo de Texturas (UV) instantáneo interpolado
+      if (golpe.uv && nuevasUVs) {
+        nuevasUVs[i * 2 + 0] = golpe.uv.x;
+        nuevasUVs[i * 2 + 1] = golpe.uv.y;
+      }
+
+      // B. Mapeo de Animación (Huesos) localizado al triángulo impactado
+      const cara = golpe.face;
+      if (cara && indexOriginal && weightOriginal && nuevosSkinIndices && nuevosSkinWeights) {
+        const indicesTriangulo = [cara.a, cara.b, cara.c];
+
+        let distMin = Infinity;
+        let idxVerticeMasCercano = indicesTriangulo[0];
+        const vTemp = new THREE.Vector3();
+
+        // Buscamos cuál de los 3 vértices de esa cara específica está más cerca de nuestra piel
+        for (const idx of indicesTriangulo) {
+          vTemp.fromBufferAttribute(posOriginal, idx);
+          const dist = puntoSkin.distanceToSquared(vTemp);
+          if (dist < distMin) {
+            distMin = dist;
+            idxVerticeMasCercano = idx;
+          }
+        }
+
+        // Transferir los índices y pesos del esqueleto original
+        for (let k = 0; k < 4; k++) {
+          nuevosSkinIndices[i * 4 + k] = indexOriginal.array[idxVerticeMasCercano * 4 + k];
+          nuevosSkinWeights[i * 4 + k] = weightOriginal.array[idxVerticeMasCercano * 4 + k];
+        }
+      }
+    }
+  }
+
+  // Asignar los atributos calculados a la nueva malla de bajo poligonaje
+  if (nuevosSkinIndices && nuevosSkinWeights) {
+    geomSkin.setAttribute('skinIndex', new THREE.BufferAttribute(nuevosSkinIndices, 4));
+    geomSkin.setAttribute('skinWeight', new THREE.BufferAttribute(nuevosSkinWeights, 4));
+  }
+  if (nuevasUVs) {
+    geomSkin.setAttribute('uv', new THREE.BufferAttribute(nuevasUVs, 2));
+  }
+
+  let finalMesh: THREE.Mesh | THREE.SkinnedMesh;
+  if ((meshOriginal as any).isSkinnedMesh && (meshOriginal as THREE.SkinnedMesh).skeleton) {
+    const skinnedOriginal = meshOriginal as THREE.SkinnedMesh;
+    const skinnedMeshFinal = new THREE.SkinnedMesh(geomSkin, meshOriginal.material);
+    skinnedMeshFinal.bind(skinnedOriginal.skeleton, skinnedOriginal.bindMatrix);
+    finalMesh = skinnedMeshFinal;
+  } else {
+    finalMesh = new THREE.Mesh(geomSkin, meshOriginal.material);
+  }
+
+  // Notificar fin de proceso y limpiar RAM del árbol
+  if (onProgreso) onProgreso(100);
+  if (geomOriginal.disposeBoundsTree) {
+    geomOriginal.disposeBoundsTree();
+  }
+
+  return finalMesh;
 }
 
 export { repairMesh, fillHoles, capSelectedFaces };
@@ -1526,6 +1657,496 @@ export function starSection(
  * @param amount Cantidad de bisel (0 = sin cambio, 1 = colapsa al centro)
  * @param offset Desplazamiento Y opcional de la cara interior (para efecto chamfer)
  */
+export function roundAnglesMesh(
+  obj: CSGObject | { type?: string; vertices?: V3[]; faces?: MeshFace[]; vertexOffsets?: Record<number, V3>; parameters?: any },
+  radius: number = 0.08,
+  segments: number = 3,
+  angleThresholdDeg: number = 20,
+): { vertices: V3[]; faces: MeshFace[] } {
+  // 1. Hornear los desplazamientos del gizmo (vertexOffsets)
+  let inputVerts: V3[] = [];
+  if (obj.vertices && obj.vertices.length > 0) {
+    inputVerts = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+  }
+  let inputFaces = obj.faces || [];
+
+  // Si no tiene vértices explícitos aún (p. ej. cualquier primitiva recién creada),
+  // obtenemos la geometría base desde createBaseGeometry
+  if (!inputVerts || inputVerts.length === 0) {
+    try {
+      const baseGeo = createBaseGeometry(obj as any);
+      const res = fromThreeGeometry(baseGeo);
+      baseGeo.dispose();
+      inputVerts = res.vertices;
+      inputFaces = res.faces;
+    } catch (e) {
+      console.error('[roundAnglesMesh] Failed to generate base geometry:', e);
+    }
+  }
+
+  // 2. Si es una primitiva CUBE / BOX pura sin desplazamientos de vértices
+  const hasOffsets = obj.vertexOffsets && Object.keys(obj.vertexOffsets).length > 0;
+  const isCubeType = obj.type === 'CUBE' || obj.type === 'BOX' || obj.parameters?.genType === 'box';
+  if (!hasOffsets && isCubeType) {
+    const baseGeo = createBaseGeometry(obj as any);
+    const box = new THREE.Box3().setFromBufferAttribute(baseGeo.attributes.position as THREE.BufferAttribute);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    
+    let roundedGeo: THREE.BufferGeometry = new RoundedBoxGeometry(size.x, size.y, size.z, segments, radius);
+    roundedGeo.translate(center.x, center.y, center.z);
+    roundedGeo = BufferGeometryUtils.mergeVertices(roundedGeo, 1e-6);
+
+    const result = fromThreeGeometry(roundedGeo);
+    roundedGeo.dispose();
+    baseGeo.dispose();
+    return result;
+  }
+
+  if (!inputVerts || inputVerts.length === 0 || radius <= 0) {
+    return { vertices: inputVerts || [], faces: inputFaces || [] };
+  }
+
+  const segs = Math.max(1, Math.round(segments));
+  const minAngleRad = (angleThresholdDeg * Math.PI) / 180;
+
+  // Deduplicate vertices
+  const uniqueVerts: THREE.Vector3[] = [];
+  const vertRemap: number[] = new Array(inputVerts.length);
+
+  for (let i = 0; i < inputVerts.length; i++) {
+    const v = new THREE.Vector3(...inputVerts[i]);
+    let found = -1;
+    for (let j = 0; j < uniqueVerts.length; j++) {
+      if (uniqueVerts[j].distanceToSquared(v) < 1e-12) {
+        found = j;
+        break;
+      }
+    }
+    if (found !== -1) {
+      vertRemap[i] = found;
+    } else {
+      vertRemap[i] = uniqueVerts.length;
+      uniqueVerts.push(v);
+    }
+  }
+
+  // Build clean faces with remapped indices
+  const origFaces: number[][] = [];
+  inputFaces.forEach(f => {
+    const remapped = f.indices.map(idx => vertRemap[idx]);
+    const clean: number[] = [];
+    for (let i = 0; i < remapped.length; i++) {
+      if (i === 0 || remapped[i] !== remapped[i - 1]) {
+        clean.push(remapped[i]);
+      }
+    }
+    if (clean.length > 1 && clean[0] === clean[clean.length - 1]) clean.pop();
+    if (clean.length >= 3) origFaces.push(clean);
+  });
+
+  if (origFaces.length === 0) {
+    return { vertices: inputVerts, faces: inputFaces };
+  }
+
+  // Calculate minimum edge length across all faces to clamp radius safely
+  let minEdgeLen = Infinity;
+  origFaces.forEach(f => {
+    const len = f.length;
+    for (let i = 0; i < len; i++) {
+      const p1 = uniqueVerts[f[i]];
+      const p2 = uniqueVerts[f[(i + 1) % len]];
+      const d = p1.distanceTo(p2);
+      if (d > 1e-6 && d < minEdgeLen) minEdgeLen = d;
+    }
+  });
+
+  const maxAllowedRad = isFinite(minEdgeLen) ? minEdgeLen * 0.45 : radius;
+  const rad = Math.min(Math.max(0.0005, radius), Math.max(0.0005, maxAllowedRad));
+
+  // Compute face normals and face centroids
+  const faceNormals: THREE.Vector3[] = [];
+  const faceCentroids: THREE.Vector3[] = [];
+  origFaces.forEach(f => {
+    const v0 = uniqueVerts[f[0]];
+    const v1 = uniqueVerts[f[1]];
+    const v2 = uniqueVerts[f[2]];
+    const norm = new THREE.Vector3().crossVectors(
+      v1.clone().sub(v0),
+      v2.clone().sub(v0)
+    ).normalize();
+    if (isNaN(norm.x) || norm.lengthSq() < 1e-6) norm.set(0, 1, 0);
+    faceNormals.push(norm);
+
+    const centroid = new THREE.Vector3();
+    f.forEach(idx => centroid.add(uniqueVerts[idx]));
+    centroid.divideScalar(f.length);
+    faceCentroids.push(centroid);
+  });
+
+  // Build edge adjacency map
+  const getEdgeKey = (a: number, b: number) => Math.min(a, b) + '_' + Math.max(a, b);
+  interface EdgeRef {
+    v1: number;
+    v2: number;
+    faces: { fIdx: number; edgeIdx: number }[];
+  }
+  const edgeMap = new Map<string, EdgeRef>();
+
+  origFaces.forEach((f, fIdx) => {
+    const len = f.length;
+    for (let i = 0; i < len; i++) {
+      const v1 = f[i];
+      const v2 = f[(i + 1) % len];
+      const key = getEdgeKey(v1, v2);
+      let entry = edgeMap.get(key);
+      if (!entry) {
+        entry = { v1: Math.min(v1, v2), v2: Math.max(v1, v2), faces: [] };
+        edgeMap.set(key, entry);
+      }
+      entry.faces.push({ fIdx, edgeIdx: i });
+    }
+  });
+
+  // Identify sharp edges
+  interface SharpEdge {
+    key: string;
+    v1: number;
+    v2: number;
+    f1: number;
+    f2: number;
+    angle: number;
+  }
+  const sharpEdges = new Map<string, SharpEdge>();
+
+  edgeMap.forEach((entry, key) => {
+    if (entry.faces.length === 2) {
+      const f1 = entry.faces[0].fIdx;
+      const f2 = entry.faces[1].fIdx;
+      const n1 = faceNormals[f1];
+      const n2 = faceNormals[f2];
+      const dot = Math.max(-1, Math.min(1, n1.dot(n2)));
+      const angle = Math.acos(dot);
+      if (angle >= minAngleRad) {
+        sharpEdges.set(key, { key, v1: entry.v1, v2: entry.v2, f1, f2, angle });
+      }
+    } else if (entry.faces.length === 1) {
+      const f1 = entry.faces[0].fIdx;
+      sharpEdges.set(key, { key, v1: entry.v1, v2: entry.v2, f1, f2: f1, angle: Math.PI / 2 });
+    }
+  });
+
+  if (sharpEdges.size === 0) {
+    return { vertices: inputVerts, faces: inputFaces };
+  }
+
+  // Output structures
+  const outVerts: V3[] = [];
+  const outFaces: MeshFace[] = [];
+
+  const addVertex = (v: THREE.Vector3): number => {
+    const idx = outVerts.length;
+    outVerts.push([v.x, v.y, v.z]);
+    return idx;
+  };
+
+  const fixWinding = (indices: number[], targetNormal: THREE.Vector3) => {
+    if (indices.length < 3) return indices;
+    const v0 = new THREE.Vector3(...outVerts[indices[0]]);
+    const v1 = new THREE.Vector3(...outVerts[indices[1]]);
+    const v2 = new THREE.Vector3(...outVerts[indices[2]]);
+    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    if (norm.dot(targetNormal) < 0) {
+      indices.reverse();
+    }
+    return indices;
+  };
+
+  // Inset each face away from its sharp edges
+  const faceInsetVerts: number[][] = origFaces.map(() => []);
+
+  origFaces.forEach((f, fIdx) => {
+    const len = f.length;
+    const n = faceNormals[fIdx];
+    const centroid = faceCentroids[fIdx];
+
+    for (let i = 0; i < len; i++) {
+      const vPrev = f[(i - 1 + len) % len];
+      const vCurr = f[i];
+      const vNext = f[(i + 1) % len];
+
+      const kPrev = getEdgeKey(vPrev, vCurr);
+      const kNext = getEdgeKey(vNext, vCurr); // Key match helper
+
+      const isPrevSharp = sharpEdges.has(getEdgeKey(vPrev, vCurr));
+      const isNextSharp = sharpEdges.has(getEdgeKey(vCurr, vNext));
+
+      const P = uniqueVerts[vCurr].clone();
+
+      if (!isPrevSharp && !isNextSharp) {
+        faceInsetVerts[fIdx].push(addVertex(P));
+      } else {
+        const Pprev = uniqueVerts[vPrev];
+        const Pnext = uniqueVerts[vNext];
+
+        const ePrevDir = P.clone().sub(Pprev);
+        if (ePrevDir.lengthSq() > 1e-12) ePrevDir.normalize();
+        const eNextDir = Pnext.clone().sub(P);
+        if (eNextDir.lengthSq() > 1e-12) eNextDir.normalize();
+
+        const inPrev = isPrevSharp ? new THREE.Vector3().crossVectors(n, ePrevDir).normalize() : new THREE.Vector3(0, 0, 0);
+        const inNext = isNextSharp ? new THREE.Vector3().crossVectors(n, eNextDir).normalize() : new THREE.Vector3(0, 0, 0);
+
+        let disp = new THREE.Vector3();
+        if (isPrevSharp && isNextSharp) {
+          disp.addVectors(inPrev, inNext);
+          if (disp.lengthSq() > 1e-6) disp.normalize();
+          const cosHalfAngle = Math.max(0.1, inPrev.dot(disp));
+          const dist = Math.min(rad * 2.0, rad / cosHalfAngle);
+          disp.multiplyScalar(dist);
+        } else if (isPrevSharp) {
+          disp = inPrev.clone().multiplyScalar(rad);
+        } else {
+          disp = inNext.clone().multiplyScalar(rad);
+        }
+
+        // Clamp shift so inset never exceeds 40% distance to centroid
+        const distToCentroid = P.distanceTo(centroid);
+        const maxShift = Math.max(1e-4, distToCentroid * 0.4);
+        if (disp.length() > maxShift) {
+          disp.setLength(maxShift);
+        }
+
+        const insetP = P.clone().add(disp);
+        faceInsetVerts[fIdx].push(addVertex(insetP));
+      }
+    }
+
+    const faceIndices = fixWinding([...faceInsetVerts[fIdx]], n);
+    outFaces.push({ indices: faceIndices });
+  });
+
+  // Connect sharp edges with 'segs' arc strips
+  const edgeCornerArcs = new Map<string, number[]>();
+
+  sharpEdges.forEach(({ key, f1, f2, v1, v2, angle }) => {
+    const f1Indices = origFaces[f1];
+    const f2Indices = origFaces[f2];
+
+    const i1_f1 = f1Indices.indexOf(v1);
+    const i2_f1 = f1Indices.indexOf(v2);
+
+    const i1_f2 = f2Indices.indexOf(v1);
+    const i2_f2 = f2Indices.indexOf(v2);
+
+    if (i1_f1 === -1 || i2_f1 === -1 || i1_f2 === -1 || i2_f2 === -1) return;
+
+    const p1_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i1_f1]]);
+    const p2_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i2_f1]]);
+
+    const p1_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i1_f2]]);
+    const p2_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i2_f2]]);
+
+    const n1 = faceNormals[f1];
+    const n2 = f1 !== f2 ? faceNormals[f2] : n1;
+    const midNormal = new THREE.Vector3().addVectors(n1, n2);
+    if (midNormal.lengthSq() > 1e-6) midNormal.normalize(); else midNormal.copy(n1);
+
+    const arcRows: [number, number][] = [];
+    arcRows.push([faceInsetVerts[f1][i1_f1], faceInsetVerts[f1][i2_f1]]);
+
+    for (let k = 1; k < segs; k++) {
+      const t = k / segs;
+      const nT = new THREE.Vector3().lerpVectors(n1, n2, t);
+      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(midNormal);
+
+      const v1_k = p1_f1.clone().lerp(p1_f2, t);
+      const v2_k = p2_f1.clone().lerp(p2_f2, t);
+
+      if (segs > 1 && angle > 0.01) {
+        const bulge = Math.sin(t * Math.PI) * rad * Math.tan(angle / 4);
+        v1_k.addScaledVector(nT, bulge);
+        v2_k.addScaledVector(nT, bulge);
+      }
+
+      const idx1 = addVertex(v1_k);
+      const idx2 = addVertex(v2_k);
+      arcRows.push([idx1, idx2]);
+    }
+
+    arcRows.push([faceInsetVerts[f2][i1_f2], faceInsetVerts[f2][i2_f2]]);
+
+    // Save arc points at v1 and v2
+    const v1Arc = arcRows.map(row => row[0]);
+    const v2Arc = arcRows.map(row => row[1]);
+
+    edgeCornerArcs.set(`${v1}_${key}`, v1Arc);
+    edgeCornerArcs.set(`${v2}_${key}`, v2Arc);
+
+    // Create quad strips
+    for (let k = 0; k < segs; k++) {
+      const [a1, a2] = arcRows[k];
+      const [b1, b2] = arcRows[k + 1];
+      const quad = fixWinding([a1, a2, b2, b1], midNormal);
+      outFaces.push({ indices: quad });
+    }
+  });
+
+  // Construct Corner Cap Patches at vertices where >= 3 sharp edges meet
+  const vertToFaces = new Map<number, number[]>();
+  origFaces.forEach((f, fIdx) => {
+    f.forEach(v => {
+      let list = vertToFaces.get(v);
+      if (!list) {
+        list = [];
+        vertToFaces.set(v, list);
+      }
+      list.push(fIdx);
+    });
+  });
+
+  vertToFaces.forEach((fList, vIdx) => {
+    const vSharpEdges: SharpEdge[] = [];
+    sharpEdges.forEach(se => {
+      if (se.v1 === vIdx || se.v2 === vIdx) {
+        vSharpEdges.push(se);
+      }
+    });
+
+    if (vSharpEdges.length < 3) return;
+
+    // Build topological loop around vIdx
+    const loop: number[] = [];
+    const visitedEdges = new Set<string>();
+
+    const edgeToFaces = new Map<string, number[]>();
+    vSharpEdges.forEach(se => {
+      const facesForEdge: number[] = [];
+      fList.forEach(fIdx => {
+        const f = origFaces[fIdx];
+        if (f.includes(se.v1) && f.includes(se.v2)) {
+          facesForEdge.push(fIdx);
+        }
+      });
+      edgeToFaces.set(se.key, facesForEdge);
+    });
+
+    let currEdge = vSharpEdges[0];
+    let currFace = edgeToFaces.get(currEdge.key)?.[0] ?? fList[0];
+
+    for (let step = 0; step < vSharpEdges.length + 2; step++) {
+      if (visitedEdges.has(currEdge.key)) break;
+      visitedEdges.add(currEdge.key);
+
+      const arcKey = `${vIdx}_${currEdge.key}`;
+      const arcPts = edgeCornerArcs.get(arcKey);
+
+      const f = origFaces[currFace];
+      const loc = f.indexOf(vIdx);
+      const insetAtCurrFace = loc !== -1 ? faceInsetVerts[currFace][loc] : undefined;
+
+      if (arcPts && arcPts.length > 0) {
+        const d0 = insetAtCurrFace !== undefined && arcPts[0] === insetAtCurrFace;
+        const ptsToAdd = d0 ? arcPts.slice(0, -1) : [...arcPts].reverse().slice(0, -1);
+        ptsToAdd.forEach(p => {
+          if (loop.length === 0 || loop[loop.length - 1] !== p) {
+            loop.push(p);
+          }
+        });
+      } else if (insetAtCurrFace !== undefined) {
+        if (loop.length === 0 || loop[loop.length - 1] !== insetAtCurrFace) {
+          loop.push(insetAtCurrFace);
+        }
+      }
+
+      if (loc === -1) break;
+      const prevV = f[(loc - 1 + f.length) % f.length];
+      const nextV = f[(loc + 1) % f.length];
+
+      const kPrev = getEdgeKey(vIdx, prevV);
+      const kNext = getEdgeKey(vIdx, nextV);
+
+      const nextEdgeKey = kPrev === currEdge.key ? kNext : kPrev;
+      let nextEdge = vSharpEdges.find(se => se.key === nextEdgeKey);
+      if (!nextEdge) {
+        nextEdge = vSharpEdges.find(se => !visitedEdges.has(se.key));
+      }
+      if (!nextEdge) break;
+
+      const facesOfNext = edgeToFaces.get(nextEdge.key) || [];
+      const otherFace = facesOfNext.find(fIdx => fIdx !== currFace);
+      currFace = otherFace !== undefined ? otherFace : currFace;
+      currEdge = nextEdge;
+    }
+
+    if (loop.length < 3) {
+      // Fallback: collect face inset points
+      fList.forEach(fIdx => {
+        const f = origFaces[fIdx];
+        const loc = f.indexOf(vIdx);
+        if (loc !== -1) {
+          const idx = faceInsetVerts[fIdx][loc];
+          if (!loop.includes(idx)) loop.push(idx);
+        }
+      });
+    }
+
+    if (loop.length < 3) return;
+
+    // Calculate average position & normal
+    const avgP = new THREE.Vector3();
+    const avgNorm = new THREE.Vector3();
+    fList.forEach(fIdx => avgNorm.add(faceNormals[fIdx]));
+    if (avgNorm.lengthSq() > 1e-6) avgNorm.normalize(); else avgNorm.set(0, 1, 0);
+
+    loop.forEach(idx => {
+      avgP.add(new THREE.Vector3(...outVerts[idx]));
+    });
+    avgP.divideScalar(loop.length);
+
+    const cornerCenterP = avgP.clone().addScaledVector(avgNorm, rad * 0.3);
+    const centerIdx = addVertex(cornerCenterP);
+
+    const numPts = loop.length;
+    for (let i = 0; i < numPts; i++) {
+      const p1 = loop[i];
+      const p2 = loop[(i + 1) % numPts];
+      if (p1 === p2) continue;
+      const tri = fixWinding([centerIdx, p1, p2], avgNorm);
+      outFaces.push({ indices: tri });
+    }
+  });
+
+  // Re-index / build final geometry
+  const temporalGeo = new THREE.BufferGeometry();
+  const posicionesFlotantes: number[] = [];
+  const indicesTriangulados: number[] = [];
+
+  outVerts.forEach(v => posicionesFlotantes.push(v[0], v[1], v[2]));
+  outFaces.forEach(f => {
+    for (let i = 1; i < f.indices.length - 1; i++) {
+      indicesTriangulados.push(f.indices[0], f.indices[i], f.indices[i + 1]);
+    }
+  });
+
+  temporalGeo.setAttribute('position', new THREE.Float32BufferAttribute(posicionesFlotantes, 3));
+  temporalGeo.setIndex(indicesTriangulados);
+  temporalGeo.computeVertexNormals();
+
+  const geometriaFinalizada = fromThreeGeometry(temporalGeo);
+  temporalGeo.dispose();
+
+  return {
+    vertices: geometriaFinalizada.vertices,
+    faces: geometriaFinalizada.faces
+  };
+}
+
 export function bevelMesh(
   obj: CSGObject,
   amount: number = 0.15,

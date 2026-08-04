@@ -1,10 +1,10 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import { createORMMap } from '../utils/materialUtils';
-import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType, ReferenceImage, MeshFace, V3, BezierHandle, SilhouetteState, ViewMode, MaterialData, CameraState, LightType, LightObject, CameraObject } from '../types';
+import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType, ReferenceImage, MeshFace, V3, BezierHandle, SilhouetteState, ViewMode, MaterialData, CameraState, LightType, LightObject, CameraObject, TransformMode } from '../types';
 import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
-import { applyBooleanOperation, smoothMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
+import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
 import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
 
@@ -204,6 +204,7 @@ interface Store extends AppState {
   updateVertexOffsets: (id: string, updates: { index: number; offset: V3 }[]) => void;
   updateBezierHandle: (id: string, index: number, side: 'in' | 'out', offset: V3, broken?: boolean) => void;
   removeObject: (id: string) => void;
+  removeObjects: (ids: string[]) => void;
   duplicateObject: (id: string) => void;
   moveObjectUp: (id: string) => void;
   moveObjectDown: (id: string) => void;
@@ -218,7 +219,7 @@ interface Store extends AppState {
   setGridSnapEnabled: (enabled: boolean) => void;
   setMoveReferenceMode: (enabled: boolean) => void;
   setEditMode: (mode: 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE') => Promise<void>;
-  setTransformMode: (mode: 'translate' | 'rotate' | 'scale') => void;
+  setTransformMode: (mode: TransformMode) => void;
   setTransformSpace: (space: 'world' | 'local') => void;
   setDrawMode: (mode: 'line' | 'rect' | 'bezier' | null) => void;
   setDrawColor: (color: string) => void;
@@ -269,14 +270,15 @@ interface Store extends AppState {
   extrudeShape: (id: string, depth: number, axis?: 'x' | 'y' | 'z') => void;
 
   applyBoolean: (op?: CSGOperation) => Promise<void>;
-  smoothObject: (id: string, factor: number) => Promise<void>;
+  smoothObject: (id: string, factor: number, iterations?: number) => Promise<void>;
+  roundAnglesObject: (id: string, radius?: number, segments?: number, angleThresholdDeg?: number) => Promise<void>;
   subdivideObject: (id: string) => Promise<void>;
   optimizeObject: (id: string, ratio: number, selectedMeshes?: string[]) => Promise<void>;
   offsetObject: (id: string, distance: number) => Promise<void>;
-  repairObject: (id: string) => Promise<void>;
+  repairObject: (id: string, tolerance?: number) => Promise<void>;
+  weldObject: (id: string, tolerance?: number) => Promise<void>;
   healObject: (id: string) => Promise<void>;
   fillHolesObject: (id: string) => Promise<void>;
-  voxelRemeshObject: (id: string, resolution?: number, smoothIterations?: number) => Promise<void>;
   shrinkWrapObject: (id: string, resolution?: number) => Promise<void>;
   separateLoosePartsObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   ungroupSelectedObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
@@ -359,6 +361,7 @@ function solidExtrudeMesh(
 export const useStore = create<Store>()((set, get) => ({
   project: DEFAULT_PROJECT,
   meshProcessing: null,
+  closeMeshProcessing: () => set({ meshProcessing: null }),
   selectedObjectId: null,
   selectedObjectIds: [] as string[],
   currentTime: 0,
@@ -368,7 +371,7 @@ export const useStore = create<Store>()((set, get) => ({
   showCSG: false,
   gridSnapEnabled: false,
   editMode: 'OBJECT',
-  transformMode: 'translate',
+  transformMode: 'universal',
   transformSpace: 'world',
   drawMode: null,
   moveReferenceMode: false,
@@ -713,6 +716,15 @@ export const useStore = create<Store>()((set, get) => ({
       case 'TORUS':        p.radialSegments = 16; p.tubularSegments = 100; p.radius = 0.5; p.tube = 0.2; break;
       case 'ICOSAHEDRON':  p.detail = 0; break;
       case 'DODECAHEDRON': p.detail = 0; break;
+      case 'TETRAHEDRON':  p.detail = 0; break;
+      case 'OCTAHEDRON':   p.detail = 0; break;
+      case 'PYRAMID':      p.segments = 4; p.heightSegments = 1; break;
+      case 'PRISM':        p.segments = 3; p.heightSegments = 1; break;
+      case 'CAPSULE':      p.segments = 16; break;
+      case 'TUBE':         p.innerRadius = 0.25; p.outerRadius = 0.5; p.segments = 32; break;
+      case 'ARC':          p.innerRadius = 0.25; p.outerRadius = 0.5; p.arcAngle = 180; p.height = 0.5; p.segments = 32; break;
+      case 'STAR':         p.starPoints = 5; p.innerRadius = 0.25; p.outerRadius = 0.5; p.height = 0.5; break;
+      case 'HEMISPHERE':   p.segments = 32; break;
       case 'CIRCLE':       p.segments = 32; break;
       case 'RING':         p.innerRadius = 0.25; p.outerRadius = 0.5; p.thetaSegments = 32; break;
       default:             p.segments = 1;
@@ -720,7 +732,10 @@ export const useStore = create<Store>()((set, get) => ({
     const geom = generatePrimitive(type, p);
     const names: Record<string,string> = {
       CUBE:'Cubo',SPHERE:'Esfera',CYLINDER:'Cilindro',CONE:'Cono',TORUS:'Toroide',
-      ICOSAHEDRON:'Icosaedro',DODECAHEDRON:'Dodecaedro',PLANE:'Plano',CIRCLE:'Círculo',RING:'Anillo',SHAPE:'Forma',
+      ICOSAHEDRON:'Icosaedro',DODECAHEDRON:'Dodecaedro',PYRAMID:'Pirámide',PRISM:'Prisma',
+      CAPSULE:'Cápsula',TETRAHEDRON:'Tetraedro',OCTAHEDRON:'Octaedro',TUBE:'Tubo',
+      ARC:'Arco 3D',STAR:'Estrella 3D',
+      WEDGE:'Cuña',HEMISPHERE:'Hemisferio',PLANE:'Plano',CIRCLE:'Círculo',RING:'Anillo',SHAPE:'Forma',
     };
     const newObj: CSGObject = {
       id: genId(),
@@ -730,7 +745,7 @@ export const useStore = create<Store>()((set, get) => ({
       parameters: p,
       vertices: geom.vertices, faces: geom.faces,
       color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
-      smoothShading: type === 'SPHERE' || type === 'CYLINDER' || type === 'CONE' || type === 'TORUS',
+      smoothShading: ['SPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE'].includes(type),
       opacity: 1, visible: true, keyframes: [],
     };
     set({ project: { ...state.project, objects: [...state.project.objects, newObj] }, selectedObjectId: newObj.id, selectedObjectIds: [newObj.id] });
@@ -984,11 +999,30 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
+  removeObjects: (ids) => {
+    if (!ids || ids.length === 0) return;
+    const { project, selectedObjectId, selectedObjectIds } = get();
+    const idSet = new Set(ids);
+    const safeIds = selectedObjectIds || [];
+    const newIds = safeIds.filter(i => !idSet.has(i));
+    const newSel = idSet.has(selectedObjectId || '') ? (newIds[newIds.length - 1] ?? null) : selectedObjectId;
+    set({
+      project: { ...project, objects: project.objects.filter(o => !idSet.has(o.id)) },
+      selectedObjectId: newSel,
+      selectedObjectIds: newIds
+    });
+    get().saveHistory();
+  },
+
   duplicateObject: (id) => {
     const { project } = get();
     const obj = project.objects.find(o => o.id === id);
     if (!obj) return;
     const newObj = { ...JSON.parse(JSON.stringify(obj)), id: genId(), name: `${obj.name} (Copia)` };
+    if (newObj.transform && newObj.transform.position) {
+      newObj.transform.position[0] += 0.5;
+      newObj.transform.position[2] += 0.5;
+    }
     set({ project: { ...project, objects: [...project.objects, newObj] }, selectedObjectId: newObj.id, selectedObjectIds: [newObj.id] });
     get().saveHistory();
   },
@@ -1625,14 +1659,14 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
-  smoothObject: async (id, factor) => {
+  smoothObject: async (id, factor, iterations = 1) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
     
     if (obj.meshData && obj.meshData.type === 'gltf') {
       const { smoothGLB } = await import('../utils/glb_processor');
-      const smoothedObj = await smoothGLB(obj, factor);
+      const smoothedObj = await smoothGLB(obj, factor, iterations);
       if (smoothedObj === obj) {
         console.warn('Smoothing did not produce a new object.');
         return;
@@ -1643,8 +1677,38 @@ export const useStore = create<Store>()((set, get) => ({
     }
 
     if (obj.meshData) obj = await convertImportedToCSG(obj);
-    const result = smoothMesh(obj, factor, 1);
+    const result = smoothMesh(obj, factor, iterations);
     set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+    get().saveHistory();
+  },
+
+  roundAnglesObject: async (id, radius = 0.08, segments = 3, angleThresholdDeg = 20) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.meshData) obj = await convertImportedToCSG(obj);
+    const result = roundAnglesMesh(obj, radius, segments, angleThresholdDeg);
+    set({
+      project: {
+        ...get().project,
+        objects: get().project.objects.map(o =>
+          o.id === id
+            ? {
+                ...o,
+                type: 'MESH',
+                parameters: {},
+                meshData: undefined,
+                vertices: result.vertices,
+                faces: result.faces,
+                vertexOffsets: {},
+                smoothShading: true,
+                stats: { vertices: result.vertices.length, faces: result.faces.length }
+              }
+            : o
+        )
+      }
+    });
     get().saveHistory();
   },
 
@@ -1676,6 +1740,9 @@ export const useStore = create<Store>()((set, get) => ({
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
 
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
     set({
       meshProcessing: {
         active: true,
@@ -1683,37 +1750,51 @@ export const useStore = create<Store>()((set, get) => ({
         subtitle: 'Calculando colapso de aristas...',
         progress: 15,
         objectName: obj.name,
-        vertCount: obj.vertices?.length,
-        faceCount: obj.faces?.length,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
       }
     });
     await new Promise(r => setTimeout(r, 40));
     
     try {
+      let updatedObj = obj;
       if (obj.meshData) {
         if (obj.meshData.type === 'gltf') {
           const { optimizeGLBModel } = await import('../utils/glb_processor');
           const resLevel = Math.max(1, Math.min(12, Math.round(ratio * 12)));
-          const optimizedObj = await optimizeGLBModel(obj, resLevel, (prog, step) => {
+          updatedObj = await optimizeGLBModel(obj, resLevel, (prog, step) => {
             set(s => ({
               meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
             }));
-          });
-          set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? optimizedObj : o)}});
-          get().saveHistory();
-          return;
+          }, selectedMeshes);
         } else {
-          obj = await convertImportedToCSG(obj);
+          updatedObj = await convertImportedToCSG(obj);
+          const result = await simplifyMesh(updatedObj, ratio);
+          updatedObj = { ...updatedObj, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } };
         }
+      } else {
+        const result = await simplifyMesh(obj, ratio);
+        updatedObj = { ...obj, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } };
       }
-      
-      const result = await simplifyMesh(obj, ratio);
-      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
       get().saveHistory();
+
+      const finalVerts = updatedObj.stats?.vertices ?? updatedObj.vertices?.length ?? 0;
+      const finalFaces = updatedObj.stats?.faces ?? updatedObj.faces?.length ?? 0;
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: '¡Optimización completada con éxito!',
+          completed: true,
+          finalVertCount: finalVerts,
+          finalFaceCount: finalFaces,
+        } : null
+      }));
     } catch (error) {
       console.error('Error optimizando objeto:', error);
-    } finally {
-      await new Promise(r => setTimeout(r, 250));
       set({ meshProcessing: null });
     }
   },
@@ -1739,39 +1820,60 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
-  repairObject: async (id) => {
+  repairObject: async (id, tolerance = 0.001) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
 
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
     set({
       meshProcessing: {
         active: true,
-        title: 'Reparación de Malla',
-        subtitle: 'Corrigiendo normales y desarticulaciones...',
+        title: 'Soldado y Reparación de Malla',
+        subtitle: `Fusionando vértices a distancia <= ${tolerance}...`,
         progress: 20,
         objectName: obj.name,
-        vertCount: obj.vertices?.length,
-        faceCount: obj.faces?.length,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
       }
     });
     await new Promise(r => setTimeout(r, 40));
 
     try {
       if (obj.meshData) obj = await convertImportedToCSG(obj);
-      const result = repairMesh(obj);
-      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+      const result = repairMesh(obj, tolerance);
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
       get().saveHistory();
-    } finally {
-      await new Promise(r => setTimeout(r, 250));
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Soldado de vértices completado! (${result.report.join(', ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error("Error en reparación/soldado:", e);
       set({ meshProcessing: null });
     }
+  },
+
+  weldObject: async (id, tolerance = 0.001) => {
+    return get().repairObject(id, tolerance);
   },
 
   healObject: async (id) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
 
     set({
       meshProcessing: {
@@ -1780,8 +1882,8 @@ export const useStore = create<Store>()((set, get) => ({
         subtitle: 'Cerrando vacíos y consolidando sólido...',
         progress: 25,
         objectName: obj.name,
-        vertCount: obj.vertices?.length,
-        faceCount: obj.faces?.length,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
       }
     });
     await new Promise(r => setTimeout(r, 40));
@@ -1790,12 +1892,21 @@ export const useStore = create<Store>()((set, get) => ({
       if (obj.meshData) obj = await convertImportedToCSG(obj);
       const { healMesh } = await import('../utils/manifoldUtils');
       const result = await healMesh(obj.vertices, obj.faces);
-      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
       get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: '¡Curado topológico completado!',
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
     } catch (e) {
       console.error('Manifold heal failed', e);
-    } finally {
-      await new Promise(r => setTimeout(r, 250));
       set({ meshProcessing: null });
     }
   },
@@ -1805,6 +1916,9 @@ export const useStore = create<Store>()((set, get) => ({
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
 
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
     set({
       meshProcessing: {
         active: true,
@@ -1812,8 +1926,8 @@ export const useStore = create<Store>()((set, get) => ({
         subtitle: 'Buscando bordes abiertos y triangulando huecos...',
         progress: 30,
         objectName: obj.name,
-        vertCount: obj.vertices?.length,
-        faceCount: obj.faces?.length,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
       }
     });
     await new Promise(r => setTimeout(r, 40));
@@ -1821,86 +1935,21 @@ export const useStore = create<Store>()((set, get) => ({
     try {
       if (obj.meshData) obj = await convertImportedToCSG(obj);
       const result = fillHoles(obj);
-      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
       get().saveHistory();
-    } finally {
-      await new Promise(r => setTimeout(r, 250));
-      set({ meshProcessing: null });
-    }
-  },
-
-  voxelRemeshObject: async (id, resolution = 40, smoothIterations = 0) => {
-    const { project } = get();
-    let obj = project.objects.find(o => o.id === id);
-    if (!obj) return;
-
-    set({
-      meshProcessing: {
-        active: true,
-        title: 'Remallado Voxel (Marching Cubes)',
-        subtitle: 'Generando espacio Voxel e isosuperficie...',
-        progress: 15,
-        objectName: obj.name,
-        vertCount: obj.vertices?.length,
-        faceCount: obj.faces?.length,
-      }
-    });
-    await new Promise(r => setTimeout(r, 40));
-
-    try {
-      if (obj.meshData) {
-        set(s => ({
-          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 30 } : null
-        }));
-        await new Promise(r => setTimeout(r, 20));
-        obj = await convertImportedToCSG(obj);
-      }
 
       set(s => ({
-        meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Extrayendo volumen poligonal...', progress: 60 } : null
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: '¡Agujeros sellados con éxito!',
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
       }));
-      await new Promise(r => setTimeout(r, 20));
-
-      const { voxelRemesh, smoothMesh } = await import('../utils/modifiers');
-      const voxelized = voxelRemesh(obj, resolution);
-
-      let finalResult = voxelized;
-      if (smoothIterations > 0) {
-        set(s => ({
-          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, subtitle: 'Aplicando suavizado de superficie...', progress: 85 } : null
-        }));
-        await new Promise(r => setTimeout(r, 20));
-        finalResult = smoothMesh(
-          { ...obj, vertices: voxelized.vertices, faces: voxelized.faces },
-          0.3,
-          smoothIterations
-        );
-      }
-
-      set({
-        project: {
-          ...get().project,
-          objects: get().project.objects.map(o =>
-            o.id === id
-              ? {
-                  ...o,
-                  type: 'MESH',
-                  parameters: {},
-                  meshData: undefined,
-                  vertices: finalResult.vertices,
-                  faces: finalResult.faces,
-                  vertexOffsets: {},
-                  stats: { vertices: finalResult.vertices.length, faces: finalResult.faces.length }
-                }
-              : o
-          )
-        }
-      });
-      get().saveHistory();
     } catch (e) {
-      console.error("Error en Voxel Remesh:", e);
-    } finally {
-      await new Promise(r => setTimeout(r, 300));
+      console.error("Error en Tapar Huecos:", e);
       set({ meshProcessing: null });
     }
   },
@@ -1910,6 +1959,9 @@ export const useStore = create<Store>()((set, get) => ({
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;
 
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
     set({
       meshProcessing: {
         active: true,
@@ -1917,68 +1969,78 @@ export const useStore = create<Store>()((set, get) => ({
         subtitle: 'Inicializando estructura y leyendo polígonos...',
         progress: 5,
         objectName: obj.name,
-        vertCount: obj.vertices?.length || obj.stats?.vertices,
-        faceCount: obj.faces?.length || obj.stats?.faces,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
       }
     });
     await new Promise(r => setTimeout(r, 40));
 
     try {
+      let updatedObj = obj;
       if (obj.meshData && obj.meshData.type === 'gltf') {
         const { optimizeGLBModel } = await import('../utils/glb_processor');
-        const optimizedObj = await optimizeGLBModel(obj, resolution, async (prog, step) => {
+        updatedObj = await optimizeGLBModel(obj, resolution, async (prog, step) => {
           set(s => ({
             meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
           }));
           await new Promise(r => setTimeout(r, 5));
         });
-        set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? optimizedObj : o)}});
+        set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
         get().saveHistory();
-        return;
-      }
-
-      if (obj.meshData) {
-        set(s => ({
-          meshProcessing: s.meshProcessing
-            ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 12 }
-            : null
-        }));
-        await new Promise(r => setTimeout(r, 20));
-        obj = await convertImportedToCSG(obj);
-      }
-
-      const { shrinkWrapMesh } = await import('../utils/modifiers');
-      const shrinkWrapped = await shrinkWrapMesh(obj, resolution, async (prog, step) => {
-        set(s => ({
-          meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
-        }));
-        await new Promise(r => setTimeout(r, 5));
-      });
-
-      set({
-        project: {
-          ...get().project,
-          objects: get().project.objects.map(o =>
-            o.id === id
-              ? {
-                  ...o,
-                  type: 'MESH',
-                  parameters: {},
-                  meshData: undefined,
-                  vertices: shrinkWrapped.vertices,
-                  faces: shrinkWrapped.faces,
-                  vertexOffsets: {},
-                  stats: { vertices: shrinkWrapped.vertices.length, faces: shrinkWrapped.faces.length }
-                }
-              : o
-          )
+      } else {
+        if (obj.meshData) {
+          set(s => ({
+            meshProcessing: s.meshProcessing
+              ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 12 }
+              : null
+          }));
+          await new Promise(r => setTimeout(r, 20));
+          obj = await convertImportedToCSG(obj);
         }
-      });
-      get().saveHistory();
+
+        const { shrinkWrapMesh } = await import('../utils/modifiers');
+        const shrinkWrapped = await shrinkWrapMesh(obj, resolution, async (prog, step) => {
+          set(s => ({
+            meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
+          }));
+          await new Promise(r => setTimeout(r, 5));
+        });
+
+        updatedObj = {
+          ...obj,
+          type: 'MESH',
+          parameters: {},
+          meshData: undefined,
+          vertices: shrinkWrapped.vertices,
+          faces: shrinkWrapped.faces,
+          vertexOffsets: {},
+          stats: { vertices: shrinkWrapped.vertices.length, faces: shrinkWrapped.faces.length }
+        };
+
+        set({
+          project: {
+            ...get().project,
+            objects: get().project.objects.map(o => o.id === id ? updatedObj : o)
+          }
+        });
+        get().saveHistory();
+      }
+
+      const finalVerts = updatedObj.stats?.vertices ?? updatedObj.vertices?.length ?? 0;
+      const finalFaces = updatedObj.stats?.faces ?? updatedObj.faces?.length ?? 0;
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: '¡Remallado Envolvente completado con éxito!',
+          completed: true,
+          finalVertCount: finalVerts,
+          finalFaceCount: finalFaces,
+        } : null
+      }));
     } catch (e) {
       console.error("Error en Shrink-Wrap:", e);
-    } finally {
-      await new Promise(r => setTimeout(r, 350));
       set({ meshProcessing: null });
     }
   },

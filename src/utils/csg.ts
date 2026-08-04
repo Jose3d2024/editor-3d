@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CSG } from 'three-csg-ts';
 import { CSGObject, Transform, Keyframe } from '../types';
 import { generateUVs } from './modifiers';
+import { computeSmoothNormalsByPosition } from './meshUtils';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interpolation helpers
@@ -55,13 +56,14 @@ export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
       const faceIndices: number[] = [];
       face.indices.forEach((posIdx, i) => {
         const uv = face.uvs?.[i] || [0, 0];
-        const key = `${posIdx}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`;
+        const key = `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`;
         if (vertMap.has(key)) {
           faceIndices.push(vertMap.get(key)!);
         } else {
           const newIdx = finalPositions.length / 3;
           const v = meshData.vertices[posIdx];
-          finalPositions.push(...v);
+          const off = obj.vertexOffsets?.[posIdx] || [0, 0, 0];
+          finalPositions.push(v[0] + off[0], v[1] + off[1], v[2] + off[2]);
           finalUvs.push(...uv);
           vertMap.set(key, newIdx);
           faceIndices.push(newIdx);
@@ -75,7 +77,7 @@ export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUvs, 2));
     geometry.setIndex(indices);
-    geometry.computeVertexNormals();
+    computeSmoothNormalsByPosition(geometry, Math.PI / 3);
     return geometry;
   }
 
@@ -98,8 +100,17 @@ export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
     case 'CYLINDER':
       geo = new THREE.CylinderGeometry(0.5, 0.5, 1, Math.max(3, Math.round(p.segments ?? 16)));
       break;
+    case 'PRISM':
+      geo = new THREE.CylinderGeometry(0.5, 0.5, 1, 3);
+      break;
     case 'CONE':
       geo = new THREE.ConeGeometry(0.5, 1, Math.max(3, Math.round(p.segments ?? 16)));
+      break;
+    case 'PYRAMID':
+      geo = new THREE.ConeGeometry(0.5, 1, 4);
+      break;
+    case 'CAPSULE':
+      geo = new THREE.CapsuleGeometry(0.25, 0.5, 8, Math.max(4, Math.round(p.segments ?? 16)));
       break;
     case 'TORUS':
       geo = new THREE.TorusGeometry(
@@ -112,6 +123,12 @@ export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
       break;
     case 'DODECAHEDRON':
       geo = new THREE.DodecahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0)));
+      break;
+    case 'TETRAHEDRON':
+      geo = new THREE.TetrahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0)));
+      break;
+    case 'OCTAHEDRON':
+      geo = new THREE.OctahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0)));
       break;
     case 'PLANE':
       geo = new THREE.PlaneGeometry(1, 1,

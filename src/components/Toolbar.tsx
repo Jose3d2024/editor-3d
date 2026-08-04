@@ -74,7 +74,7 @@ const bufferGeomToCSGObject = (
   const uniqueVerts: V3[] = [];
   const vertMap = new Map<string, number>();
   const getIdx = (x: number, y: number, z: number) => {
-    const key = `${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
+    const key = `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`;
     if (vertMap.has(key)) return vertMap.get(key)!;
     const idx = uniqueVerts.length;
     uniqueVerts.push([x, y, z]);
@@ -311,7 +311,7 @@ const MeshTab: React.FC<{
           onClick={async () => {
             setIsSmoothing(true);
             try {
-              await useStore.getState().smoothObject(selectedObject.id, smoothFactor);
+              await useStore.getState().smoothObject(selectedObject.id, smoothFactor, smoothIters);
             } finally {
               setIsSmoothing(false);
             }
@@ -1124,22 +1124,34 @@ export const Toolbar: React.FC = () => {
                     {/* ════ FIGURAS (PRIMITIVOS) ════ */}
                     {createTab==='primitivo'&&(
                       <>
-                        <PTitle icon="⬛" title="Figuras Básicas" desc="Añade formas geométricas estándar."/>
-                        <div className="grid grid-cols-4 gap-1.5">
+                        <PTitle icon="⬛" title="Figuras 3D y 2D" desc="Selecciona una figura geométrica para añadir al escenario."/>
+                        <div className="max-h-64 overflow-y-auto pr-1 grid grid-cols-4 gap-1.5 custom-scrollbar">
                           {[
-                            {label:'Cubo',      icon:'⬛', fn:()=>addObject('CUBE')},
-                            {label:'Esfera',    icon:'⬤', fn:()=>addObject('SPHERE')},
-                            {label:'Cilindro',  icon:'⬡', fn:()=>addObject('CYLINDER')},
-                            {label:'Cono',      icon:'△', fn:()=>addObject('CONE')},
-                            {label:'Toro',      icon:'◎', fn:()=>addObject('TORUS')},
-                            {label:'Icosaedro', icon:'⬢', fn:()=>addObject('ICOSAHEDRON')},
-                            {label:'Plano',     icon:'▭', fn:()=>addObject('PLANE')},
-                            {label:'Anillo',    icon:'○', fn:()=>addObject('RING')},
+                            {label:'Cubo',       icon:'⬛', fn:()=>addObject('CUBE')},
+                            {label:'Esfera',     icon:'⬤', fn:()=>addObject('SPHERE')},
+                            {label:'Cilindro',   icon:'⬡', fn:()=>addObject('CYLINDER')},
+                            {label:'Cono',       icon:'△', fn:()=>addObject('CONE')},
+                            {label:'Pirámide',   icon:'🔺', fn:()=>addObject('PYRAMID')},
+                            {label:'Prisma',     icon:'📐', fn:()=>addObject('PRISM')},
+                            {label:'Cápsula',    icon:'💊', fn:()=>addObject('CAPSULE')},
+                            {label:'Toro',       icon:'◎', fn:()=>addObject('TORUS')},
+                            {label:'Icosaedro',  icon:'⬢', fn:()=>addObject('ICOSAHEDRON')},
+                            {label:'Dodecaedro', icon:'💎', fn:()=>addObject('DODECAHEDRON')},
+                            {label:'Tetraedro',  icon:'🔻', fn:()=>addObject('TETRAHEDRON')},
+                            {label:'Octaedro',   icon:'💠', fn:()=>addObject('OCTAHEDRON')},
+                            {label:'Tubo 3D',    icon:'⭕', fn:()=>addObject('TUBE')},
+                            {label:'Arco 3D',    icon:'🌙', fn:()=>addObject('ARC')},
+                            {label:'Estrella 3D',icon:'⭐', fn:()=>addObject('STAR')},
+                            {label:'Cuña',       icon:'⬕', fn:()=>addObject('WEDGE')},
+                            {label:'Hemisferio', icon:'🌓', fn:()=>addObject('HEMISPHERE')},
+                            {label:'Plano',      icon:'▭', fn:()=>addObject('PLANE')},
+                            {label:'Anillo',     icon:'○', fn:()=>addObject('RING')},
+                            {label:'Círculo',    icon:'⚪', fn:()=>addObject('CIRCLE')},
                           ].map(p=>(
                             <button key={p.label} onClick={()=>{p.fn();setShowMainCreate(false);}}
                               className="flex flex-col items-center gap-1 p-2 bg-zinc-800/50 hover:bg-violet-600 rounded-lg transition-all group">
                               <span className="text-xl group-hover:scale-110 transition-transform">{p.icon}</span>
-                              <span className="text-[9px] font-bold">{p.label}</span>
+                              <span className="text-[9px] font-bold text-center leading-tight">{p.label}</span>
                             </button>
                           ))}
                         </div>
@@ -1438,30 +1450,38 @@ export const Toolbar: React.FC = () => {
                     {editTab==='transformar'&&(
                       <>
                         <PTitle icon="📐" title="Transformación" desc="Ajusta posición, rotación y escala."/>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-4 gap-1.5">
                           <button 
                             onMouseEnter={e=>setT?.('Mover', e.currentTarget.getBoundingClientRect(), 'W')}
                             onMouseLeave={()=>setT?.(null)}
                             onClick={()=>{setTransformMode('translate');setShowMainEdit(false);}} 
-                            className={`flex flex-col items-center gap-2 p-2 rounded border transition-all ${transformMode==='translate'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
+                            className={`flex flex-col items-center gap-1.5 p-2 rounded border transition-all ${transformMode==='translate'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
                           >
-                            <Move size={18}/><span className="text-[9px] font-bold">Mover</span>
+                            <Move size={16}/><span className="text-[9px] font-bold">Mover</span>
                           </button>
                           <button 
                             onMouseEnter={e=>setT?.('Rotar', e.currentTarget.getBoundingClientRect(), 'E')}
                             onMouseLeave={()=>setT?.(null)}
                             onClick={()=>{setTransformMode('rotate');setShowMainEdit(false);}} 
-                            className={`flex flex-col items-center gap-2 p-2 rounded border transition-all ${transformMode==='rotate'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
+                            className={`flex flex-col items-center gap-1.5 p-2 rounded border transition-all ${transformMode==='rotate'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
                           >
-                            <RotateCw size={18}/><span className="text-[9px] font-bold">Rotar</span>
+                            <RotateCw size={16}/><span className="text-[9px] font-bold">Rotar</span>
                           </button>
                           <button 
                             onMouseEnter={e=>setT?.('Escalar', e.currentTarget.getBoundingClientRect(), 'R')}
                             onMouseLeave={()=>setT?.(null)}
                             onClick={()=>{setTransformMode('scale');setShowMainEdit(false);}} 
-                            className={`flex flex-col items-center gap-2 p-2 rounded border transition-all ${transformMode==='scale'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
+                            className={`flex flex-col items-center gap-1.5 p-2 rounded border transition-all ${transformMode==='scale'?'bg-emerald-600 border-emerald-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
                           >
-                            <Maximize size={18}/><span className="text-[9px] font-bold">Escalar</span>
+                            <Maximize size={16}/><span className="text-[9px] font-bold">Escalar</span>
+                          </button>
+                          <button 
+                            onMouseEnter={e=>setT?.('Combinado', e.currentTarget.getBoundingClientRect(), 'U')}
+                            onMouseLeave={()=>setT?.(null)}
+                            onClick={()=>{setTransformMode('universal');setShowMainEdit(false);}} 
+                            className={`flex flex-col items-center gap-1.5 p-2 rounded border transition-all ${transformMode==='universal'?'bg-amber-600 border-amber-400 text-white':'bg-zinc-800 border-zinc-700 text-zinc-400'}`}
+                          >
+                            <Sparkles size={16}/><span className="text-[9px] font-bold">Combinado</span>
                           </button>
                         </div>
                       </>
@@ -1605,6 +1625,7 @@ export const Toolbar: React.FC = () => {
                     <QuickButton active={transformMode==='translate'} onClick={()=>setTransformMode('translate')} icon={<Move size={14}/>} label="Mover" shortcut="W" />
                     <QuickButton active={transformMode==='rotate'}    onClick={()=>setTransformMode('rotate')}    icon={<RotateCw size={14}/>} label="Rotar" shortcut="E" />
                     <QuickButton active={transformMode==='scale'}     onClick={()=>setTransformMode('scale')}     icon={<Maximize size={14}/>} label="Escalar" shortcut="R" />
+                    <QuickButton active={transformMode==='universal'} onClick={()=>setTransformMode('universal')} icon={<Sparkles size={14}/>} label="Combinado" shortcut="U" />
                   </motion.div>
                 ) : showMainCreate ? (
                   <motion.div 

@@ -284,27 +284,27 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
       const mData: any = {
-        color: obj.color || '#ffffff',
-        metalness: 0, roughness: 0.5,
-        transmission: 0, ior: 1.5, thickness: 0,
-        emissive: '#000000', emissiveIntensity: 0,
-        opacity: obj.opacity ?? 1,
-        ...refMat,
+        ...(refMat || {}),
         ...(obj.material || {}),
       };
 
+      const rawColor = mData.colorBase || mData.color || (obj.color && obj.color !== '#000000' ? obj.color : null) || '#ffffff';
+      const finalColorHex = (typeof rawColor === 'string' && rawColor.trim() !== '' && rawColor !== '#000000' && rawColor !== '#000')
+        ? rawColor
+        : (obj.color && obj.color !== '#000000' ? obj.color : '#ffffff');
+
       const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(mData.color),
+        color: new THREE.Color(finalColorHex),
         metalness: mData.metalness ?? 0,
         roughness: mData.roughness ?? 0.5,
         transmission: mData.transmission ?? 0,
         ior: mData.ior ?? 1.5,
         thickness: mData.thickness ?? 0,
-        opacity: mData.opacity ?? 1,
-        transparent: (mData.opacity ?? 1) < 1 || (mData.transmission ?? 0) > 0,
-        emissive: new THREE.Color(mData.emissive || '#000000'),
+        opacity: mData.opacity ?? obj.opacity ?? 1,
+        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1 || (mData.transmission ?? 0) > 0,
+        emissive: new THREE.Color(mData.emissive && mData.emissive !== '#000000' ? mData.emissive : '#000000'),
         emissiveIntensity: mData.emissiveIntensity ?? 0,
-        side: THREE.FrontSide,
+        side: THREE.DoubleSide,
         envMapIntensity: 1.0,
       });
 
@@ -317,12 +317,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const metalUrl   = mData.mapMetalness || mData.metalnessMap;
       const aoUrl      = mData.mapAO        || mData.aoMap;
       const emissUrl   = mData.mapEmissive  || mData.emissiveMap;
-      if (albedoUrl) loads.push(loadTex(texLoader, albedoUrl, true).then(t => { mat.map = t; mat.needsUpdate = true; }).catch(() => {}));
-      if (normalUrl) loads.push(loadTex(texLoader, normalUrl).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); mat.needsUpdate = true; }).catch(() => {}));
-      if (roughUrl)  loads.push(loadTex(texLoader, roughUrl).then(t => { mat.roughnessMap = t; mat.needsUpdate = true; }).catch(() => {}));
-      if (metalUrl)  loads.push(loadTex(texLoader, metalUrl).then(t => { mat.metalnessMap = t; mat.needsUpdate = true; }).catch(() => {}));
-      if (aoUrl)     loads.push(loadTex(texLoader, aoUrl).then(t => { mat.aoMap = t; mat.needsUpdate = true; }).catch(() => {}));
-      if (emissUrl)  loads.push(loadTex(texLoader, emissUrl, true).then(t => { mat.emissiveMap = t; mat.needsUpdate = true; }).catch(() => {}));
+      if (albedoUrl) loads.push(loadTex(texLoader, albedoUrl, true).then(t => { mat.map = t; mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar albedo:', err)));
+      if (normalUrl) loads.push(loadTex(texLoader, normalUrl).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar normal:', err)));
+      if (roughUrl)  loads.push(loadTex(texLoader, roughUrl).then(t => { mat.roughnessMap = t; mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar roughness:', err)));
+      if (metalUrl)  loads.push(loadTex(texLoader, metalUrl).then(t => { mat.metalnessMap = t; mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar metalness:', err)));
+      if (aoUrl)     loads.push(loadTex(texLoader, aoUrl).then(t => { mat.aoMap = t; mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar AO:', err)));
+      if (emissUrl)  loads.push(loadTex(texLoader, emissUrl, true).then(t => { mat.emissiveMap = t; mat.needsUpdate = true; }).catch(err => console.error('[RenderModal] Error al cargar emissive:', err)));
       await Promise.all(loads);
       mat.needsUpdate = true;
       return mat;
@@ -347,30 +347,40 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
             // Aplicar material del proyecto si está definido explícitamente
             if (obj.materialId || (obj.material && Object.keys(obj.material).length > 0)) {
               const mat = await loadMaterial(obj);
-              mesh.traverse((child: any) => { if (child.isMesh) { child.material = mat; child.castShadow = true; child.receiveShadow = true; } });
+              mesh.traverse((child: any) => {
+                if (child.isMesh) {
+                  child.material = mat;
+                  child.material.side = THREE.DoubleSide;
+                  child.castShadow = true;
+                  child.receiveShadow = true;
+                }
+              });
             } else {
-              // Sin material de proyecto: conservar materiales originales del GLTF
+              // Sin material de proyecto: conservar materiales originales del GLTF y forzar DoubleSide
               mesh.traverse((child: any) => {
                 if (!child.isMesh) return;
                 child.castShadow = true;
                 child.receiveShadow = true;
                 const mats = Array.isArray(child.material) ? child.material : [child.material];
                 const upgraded = mats.map((m: THREE.Material) => {
-                  if (m instanceof THREE.MeshPhysicalMaterial) return m;
-                  if (m instanceof THREE.MeshStandardMaterial) {
-                    const phys = new THREE.MeshPhysicalMaterial();
+                  let phys: THREE.MeshPhysicalMaterial;
+                  if (m instanceof THREE.MeshPhysicalMaterial) {
+                    phys = m;
+                  } else if (m instanceof THREE.MeshStandardMaterial) {
+                    phys = new THREE.MeshPhysicalMaterial();
                     phys.copy(m as any);
-                    // Copiar mapas explícitamente para no perder texturas del GLTF
                     phys.map           = m.map;
                     phys.normalMap     = m.normalMap;
                     phys.roughnessMap  = m.roughnessMap;
                     phys.metalnessMap  = m.metalnessMap;
                     phys.aoMap         = m.aoMap;
                     phys.emissiveMap   = m.emissiveMap;
-                    phys.needsUpdate   = true;
-                    return phys;
+                  } else {
+                    phys = new THREE.MeshPhysicalMaterial({ color: (m as any).color || '#ffffff' });
                   }
-                  return m;
+                  phys.side = THREE.DoubleSide;
+                  phys.needsUpdate = true;
+                  return phys;
                 });
                 child.material = upgraded.length === 1 ? upgraded[0] : upgraded;
               });

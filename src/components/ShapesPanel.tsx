@@ -58,16 +58,27 @@ export const ShapesPanel: React.FC = () => {
         <span className="text-xs font-bold uppercase tracking-widest text-zinc-500">Formas Básicas</span>
       </div>
       
-      <div className="p-3">
+      <div className="p-3 max-h-60 overflow-y-auto custom-scrollbar">
         <div className="grid grid-cols-2 gap-2">
           <ShapeItem type="CUBE" label="Cubo" color="#ef4444" icon={<Box size={24} />} />
-          <ShapeItem type="CYLINDER" label="Cilindro" color="#f97316" icon={<Cylinder size={24} />} />
           <ShapeItem type="SPHERE" label="Esfera" color="#3b82f6" icon={<Circle size={24} />} />
+          <ShapeItem type="CYLINDER" label="Cilindro" color="#f97316" icon={<Cylinder size={24} />} />
           <ShapeItem type="CONE" label="Cono" color="#a855f7" icon={<Triangle size={24} />} />
+          <ShapeItem type="PYRAMID" label="Pirámide" color="#eab308" icon={<Triangle size={24} />} />
+          <ShapeItem type="PRISM" label="Prisma" color="#10b981" icon={<Triangle size={24} className="rotate-90" />} />
+          <ShapeItem type="CAPSULE" label="Cápsula" color="#14b8a6" icon={<Cylinder size={24} className="rounded-full" />} />
           <ShapeItem type="TORUS" label="Toroide" color="#ec4899" icon={<Circle size={20} strokeWidth={4} />} />
-          <ShapeItem type="PLANE" label="Plano" color="#10b981" icon={<Box size={24} className="scale-y-25" />} />
           <ShapeItem type="ICOSAHEDRON" label="Icosaedro" color="#06b6d4" icon={<Hexagon size={24} />} />
-          <ShapeItem type="RING" label="Tubo" color="#8b5cf6" icon={<Circle size={24} strokeWidth={8} />} />
+          <ShapeItem type="DODECAHEDRON" label="Dodecaedro" color="#6366f1" icon={<Hexagon size={24} className="rotate-45" />} />
+          <ShapeItem type="TETRAHEDRON" label="Tetraedro" color="#f43f5e" icon={<Triangle size={24} />} />
+          <ShapeItem type="OCTAHEDRON" label="Octaedro" color="#8b5cf6" icon={<Hexagon size={24} />} />
+          <ShapeItem type="TUBE" label="Tubo 3D" color="#8b5cf6" icon={<Circle size={24} strokeWidth={8} />} />
+          <ShapeItem type="ARC" label="Arco 3D" color="#14b8a6" icon={<Circle size={24} strokeWidth={6} />} />
+          <ShapeItem type="STAR" label="Estrella 3D" color="#eab308" icon={<Hexagon size={24} />} />
+          <ShapeItem type="WEDGE" label="Cuña" color="#64748b" icon={<Triangle size={24} className="rotate-180" />} />
+          <ShapeItem type="HEMISPHERE" label="Hemisferio" color="#0284c7" icon={<Circle size={24} className="clip-half" />} />
+          <ShapeItem type="PLANE" label="Plano" color="#10b981" icon={<Box size={24} className="scale-y-25" />} />
+          <ShapeItem type="RING" label="Anillo" color="#d946ef" icon={<Circle size={24} strokeWidth={4} />} />
         </div>
       </div>
 

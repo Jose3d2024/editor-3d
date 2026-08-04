@@ -10,6 +10,7 @@
  */
 
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { V3, MeshFace, BezierHandle } from '../types';
 
 // PrimitiveType is a union string – we avoid importing the enum to keep this file lightweight.
@@ -140,6 +141,129 @@ function buildCircle(radius: number, N: number): PrimitiveGeom {
   for (let i = 0; i < N; i++) {
     faces.push({ indices: [0, i + 1, i + 2] });
   }
+  return weldVertices(verts, faces);
+}
+
+/** TUBE: 3D hollow pipe with inner/outer walls and ring caps */
+function buildTube(inner: number, outer: number, height: number, N: number): PrimitiveGeom {
+  N = Math.max(3, N);
+  const halfH = height / 2;
+  const verts: V3[] = [];
+  for (let i = 0; i <= N; i++) {
+    const theta = (i / N) * Math.PI * 2;
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    verts.push([cos * outer, halfH, sin * outer]); // top outer
+    verts.push([cos * inner, halfH, sin * inner]); // top inner
+    verts.push([cos * outer, -halfH, sin * outer]); // bottom outer
+    verts.push([cos * inner, -halfH, sin * inner]); // bottom inner
+  }
+  const faces: MeshFace[] = [];
+  for (let i = 0; i < N; i++) {
+    const oT0 = i * 4,     iT0 = i * 4 + 1;
+    const oB0 = i * 4 + 2, iB0 = i * 4 + 3;
+    const oT1 = (i + 1) * 4,     iT1 = (i + 1) * 4 + 1;
+    const oB1 = (i + 1) * 4 + 2, iB1 = (i + 1) * 4 + 3;
+
+    faces.push({ indices: [oT0, oT1, iT1, iT0] }); // top cap
+    faces.push({ indices: [oB0, iB0, iB1, oB1] }); // bottom cap
+    faces.push({ indices: [oT0, oB0, oB1, oT1] }); // outer wall
+    faces.push({ indices: [iT0, iT1, iB1, iB0] }); // inner wall
+  }
+  return weldVertices(verts, faces);
+}
+
+/** WEDGE: 3D ramp / triangular prism */
+function buildWedge(): PrimitiveGeom {
+  const verts: V3[] = [
+    [-0.5, -0.5,  0.5], // 0: bottom-left-front
+    [ 0.5, -0.5,  0.5], // 1: bottom-right-front
+    [-0.5,  0.5,  0.5], // 2: top-left-front
+    [-0.5, -0.5, -0.5], // 3: bottom-left-back
+    [ 0.5, -0.5, -0.5], // 4: bottom-right-back
+    [-0.5,  0.5, -0.5], // 5: top-left-back
+  ];
+  const faces: MeshFace[] = [
+    { indices: [0, 1, 4, 3] }, // Bottom
+    { indices: [0, 3, 5, 2] }, // Back
+    { indices: [1, 2, 5, 4] }, // Ramp
+    { indices: [0, 2, 1] },    // Front
+    { indices: [3, 4, 5] },    // Back triangle
+  ];
+  return weldVertices(verts, faces);
+}
+
+/** ARC: 3D hollow pipe segment spanning specified degrees (0° - 360°) */
+function buildArc(inner: number, outer: number, arcAngleDeg: number, height: number, N: number): PrimitiveGeom {
+  N = Math.max(3, N);
+  const angleRad = (Math.max(1, Math.min(360, arcAngleDeg)) * Math.PI) / 180;
+  const isClosedLoop = Math.abs(arcAngleDeg - 360) < 0.1;
+  const halfH = height / 2;
+
+  const verts: V3[] = [];
+  for (let i = 0; i <= N; i++) {
+    const theta = (i / N) * angleRad;
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    verts.push([cos * outer, halfH, sin * outer]);  // top outer
+    verts.push([cos * inner, halfH, sin * inner]);  // top inner
+    verts.push([cos * outer, -halfH, sin * outer]); // bottom outer
+    verts.push([cos * inner, -halfH, sin * inner]); // bottom inner
+  }
+
+  const faces: MeshFace[] = [];
+  for (let i = 0; i < N; i++) {
+    const oT0 = i * 4,     iT0 = i * 4 + 1;
+    const oB0 = i * 4 + 2, iB0 = i * 4 + 3;
+    const oT1 = (i + 1) * 4,     iT1 = (i + 1) * 4 + 1;
+    const oB1 = (i + 1) * 4 + 2, iB1 = (i + 1) * 4 + 3;
+
+    faces.push({ indices: [oT0, oT1, iT1, iT0] }); // top cap
+    faces.push({ indices: [oB0, iB0, iB1, oB1] }); // bottom cap
+    faces.push({ indices: [oT0, oB0, oB1, oT1] }); // outer wall
+    faces.push({ indices: [iT0, iT1, iB1, iB0] }); // inner wall
+  }
+
+  if (!isClosedLoop) {
+    faces.push({ indices: [0, 1, 3, 2] });
+    const n4 = N * 4;
+    faces.push({ indices: [n4, n4 + 2, n4 + 3, n4 + 1] });
+  }
+
+  return weldVertices(verts, faces);
+}
+
+/** STAR: 3D extruded star with customizable number of points (puntas) */
+function buildStar(points: number, inner: number, outer: number, height: number): PrimitiveGeom {
+  points = Math.max(3, Math.round(points));
+  const numVerts = points * 2;
+  const halfH = height / 2;
+  const verts: V3[] = [];
+
+  const topCenterIdx = 0;
+  const bottomCenterIdx = 1;
+  verts.push([0, halfH, 0]);  // 0: top center
+  verts.push([0, -halfH, 0]); // 1: bottom center
+
+  for (let i = 0; i < numVerts; i++) {
+    const theta = (i / numVerts) * Math.PI * 2;
+    const r = (i % 2 === 0) ? outer : inner;
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    verts.push([cos * r, halfH, sin * r]);  // top ring vertex
+    verts.push([cos * r, -halfH, sin * r]); // bottom ring vertex
+  }
+
+  const faces: MeshFace[] = [];
+  for (let i = 0; i < numVerts; i++) {
+    const nextI = (i + 1) % numVerts;
+    const topCurr = 2 + i * 2;
+    const botCurr = 2 + i * 2 + 1;
+    const topNext = 2 + nextI * 2;
+    const botNext = 2 + nextI * 2 + 1;
+
+    faces.push({ indices: [topCenterIdx, topCurr, topNext] });
+    faces.push({ indices: [bottomCenterIdx, botNext, botCurr] });
+    faces.push({ indices: [topCurr, botCurr, botNext, topNext] });
+  }
+
   return weldVertices(verts, faces);
 }
 
@@ -286,6 +410,61 @@ export function generatePrimitive(type: PT, params: Record<string, any>): Primit
       return extractAndMergeQuads(new THREE.IcosahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0))));
     case 'DODECAHEDRON':
       return extractAndMergeQuads(new THREE.DodecahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0))));
+    case 'PYRAMID': {
+      const H = Math.max(1, Math.round(p.heightSegments ?? 1));
+      return extractAndMergeQuads(new THREE.ConeGeometry(0.5, 1, 4, H));
+    }
+    case 'PRISM': {
+      const H = Math.max(1, Math.round(p.heightSegments ?? 1));
+      return extractAndMergeQuads(new THREE.CylinderGeometry(0.5, 0.5, 1, 3, H));
+    }
+    case 'CAPSULE': {
+      const S = Math.max(4, Math.round(p.segments ?? 16));
+      return extractAndMergeQuads(new THREE.CapsuleGeometry(0.25, 0.5, 8, S));
+    }
+    case 'TETRAHEDRON':
+      return extractAndMergeQuads(new THREE.TetrahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0))));
+    case 'OCTAHEDRON':
+      return extractAndMergeQuads(new THREE.OctahedronGeometry(0.5, Math.max(0, Math.round(p.detail ?? 0))));
+    case 'TUBE': {
+      return buildTube(
+        p.innerRadius ?? 0.25,
+        p.outerRadius ?? 0.5,
+        1.0,
+        Math.max(3, Math.round(p.segments ?? 16))
+      );
+    }
+    case 'WEDGE':
+      return buildWedge();
+    case 'ARC': {
+      return buildArc(
+        p.innerRadius ?? 0.25,
+        p.outerRadius ?? 0.5,
+        p.arcAngle ?? 180,
+        p.height ?? 0.5,
+        Math.max(4, Math.round(p.segments ?? 32))
+      );
+    }
+    case 'STAR': {
+      return buildStar(
+        Math.max(3, Math.round(p.starPoints ?? p.points ?? 5)),
+        p.innerRadius ?? 0.25,
+        p.outerRadius ?? 0.5,
+        p.height ?? 0.5
+      );
+    }
+    case 'HEMISPHERE': {
+      const S = Math.max(4, Math.round(p.segments ?? 16));
+      const sphereGeo = new THREE.SphereGeometry(0.5, S, Math.max(2, Math.round(S / 2)), 0, Math.PI * 2, 0, Math.PI / 2);
+      const circleGeo = new THREE.CircleGeometry(0.5, S);
+      circleGeo.rotateX(Math.PI / 2);
+      try {
+        const merged = BufferGeometryUtils.mergeGeometries([sphereGeo, circleGeo]);
+        return extractAndMergeQuads(merged);
+      } catch {
+        return extractAndMergeQuads(sphereGeo);
+      }
+    }
 
     // ── SHAPE / custom — return empty (will be populated by drawing) ─────────
     case 'SHAPE':

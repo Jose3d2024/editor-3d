@@ -2,16 +2,17 @@ import * as THREE from 'three';
 import type { V3, MeshFace, CSGObject } from '../types';
 
 /**
- * Repair mesh issues:
- * 1. Merge duplicate vertices (exact)
+ * Repair mesh issues and weld duplicate/coincident vertices across gaps:
+ * 1. Merge duplicate/coincident vertices within spatial tolerance (using 3x3x3 grid search)
  * 2. Remove degenerate faces (< 3 unique verts)
  * 3. Remove duplicate faces
  */
 export function repairMesh(
   obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
+  tolerance: number = 0.001
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
   const report: string[] = [];
-  if (obj.vertices.length === 0) return { vertices: [], faces: [], report: ['Sin vértices'] };
+  if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [], report: ['Sin vértices'] };
 
   // 0. Bake vertex offsets if they exist
   const baseVertices = obj.vertices.map((v, i) => {
@@ -19,34 +20,65 @@ export function repairMesh(
     return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
   });
 
-  // 1. Weld duplicates with tolerance
-  const tolerance = 0.0001;
+  // 1. Weld duplicates with spatial grid search across 3x3x3 neighborhood
+  const n = baseVertices.length;
+  const tol = Math.max(0.00001, tolerance);
+  const tolSq = tol * tol;
+  const cellSize = tol;
+
+  const gridMap = new Map<string, number[]>();
   const weldedVerts: V3[] = [];
-  const remap: number[] = new Array(baseVertices.length);
+  const remap: number[] = new Array(n);
   let mergedCount = 0;
 
-  for (let i = 0; i < baseVertices.length; i++) {
+  for (let i = 0; i < n; i++) {
     const v = baseVertices[i];
-    let found = -1;
-    // Búsqueda espacial simple (podría optimizarse con octree si la malla es enorme)
-    for (let j = 0; j < weldedVerts.length; j++) {
-      const wv = weldedVerts[j];
-      const dist = Math.sqrt((v[0]-wv[0])**2 + (v[1]-wv[1])**2 + (v[2]-wv[2])**2);
-      if (dist < tolerance) {
-        found = j;
-        break;
+    const gx = Math.floor(v[0] / cellSize);
+    const gy = Math.floor(v[1] / cellSize);
+    const gz = Math.floor(v[2] / cellSize);
+
+    let foundIdx = -1;
+
+    for (let dx = -1; dx <= 1 && foundIdx === -1; dx++) {
+      for (let dy = -1; dy <= 1 && foundIdx === -1; dy++) {
+        for (let dz = -1; dz <= 1 && foundIdx === -1; dz++) {
+          const key = `${gx + dx}_${gy + dy}_${gz + dz}`;
+          const candidates = gridMap.get(key);
+          if (candidates) {
+            for (const candIdx of candidates) {
+              const cv = weldedVerts[candIdx];
+              const d0 = v[0] - cv[0];
+              const d1 = v[1] - cv[1];
+              const d2 = v[2] - cv[2];
+              if (d0 * d0 + d1 * d1 + d2 * d2 <= tolSq) {
+                foundIdx = candIdx;
+                break;
+              }
+            }
+          }
+        }
       }
     }
 
-    if (found !== -1) {
-      remap[i] = found;
+    if (foundIdx !== -1) {
+      remap[i] = foundIdx;
       mergedCount++;
     } else {
-      remap[i] = weldedVerts.length;
+      const newIdx = weldedVerts.length;
+      remap[i] = newIdx;
       weldedVerts.push([...v] as V3);
+
+      const key = `${gx}_${gy}_${gz}`;
+      let list = gridMap.get(key);
+      if (!list) {
+        list = [];
+        gridMap.set(key, list);
+      }
+      list.push(newIdx);
     }
   }
-  if (mergedCount > 0) report.push(`${mergedCount} vértices duplicados fusionados`);
+
+  if (mergedCount > 0) report.push(`${mergedCount} vértices fusionados/soldados (distancia <= ${tol})`);
 
   // 2. Remap + remove degenerate faces
   let degenerateCount = 0, dupFaceCount = 0;
@@ -55,10 +87,8 @@ export function repairMesh(
 
   for (const face of obj.faces) {
     const remapped = face.indices.map(i => remap[i]);
-    // Check degenerate
     const unique = new Set(remapped);
     if (unique.size < 3) { degenerateCount++; continue; }
-    // Check duplicate face (sorted key)
     const key = [...remapped].sort((a,b)=>a-b).join(',');
     if (faceSet.has(key)) { dupFaceCount++; continue; }
     faceSet.add(key);
@@ -86,6 +116,8 @@ export function repairMesh(
 
   return { vertices: finalVerts, faces: finalFaces, report };
 }
+
+export const weldMesh = repairMesh;
 
 /**
  * Fills holes based on a selection of faces.
@@ -270,4 +302,124 @@ export function fillHoles(obj: CSGObject | { vertices: V3[]; faces: MeshFace[] }
   });
 
   return fillHolesFromAdj(vertices, faces, adj, report);
+}
+
+/**
+ * Computes smooth vertex normals across split vertices sharing the same 3D spatial position.
+ * Prevents shading seams and artifacts on bevels, rounded boxes, and smooth primitives
+ * where vertices were split for distinct UVs or seams.
+ */
+export function computeSmoothNormalsByPosition(
+  geometry: THREE.BufferGeometry,
+  creaseAngleRad: number = Math.PI / 3 // Default 60 degrees threshold
+): void {
+  const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+  const indexAttr = geometry.getIndex();
+  if (!posAttr) return;
+
+  const count = posAttr.count;
+  const normals = new Float32Array(count * 3);
+
+  // Group vertex indices by spatial position
+  const posMap = new Map<string, number[]>();
+  for (let i = 0; i < count; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const z = posAttr.getZ(i);
+    const key = `${Math.round(x * 100000)}_${Math.round(y * 100000)}_${Math.round(z * 100000)}`;
+    let list = posMap.get(key);
+    if (!list) {
+      list = [];
+      posMap.set(key, list);
+    }
+    list.push(i);
+  }
+
+  // Compute face normals and face vertex connections
+  const faceNormals: THREE.Vector3[] = [];
+  const faceIndices: [number, number, number][] = [];
+
+  const pA = new THREE.Vector3();
+  const pB = new THREE.Vector3();
+  const pC = new THREE.Vector3();
+  const cb = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+
+  const numTriangles = indexAttr ? indexAttr.count / 3 : count / 3;
+
+  for (let f = 0; f < numTriangles; f++) {
+    let iA = f * 3;
+    let iB = f * 3 + 1;
+    let iC = f * 3 + 2;
+    if (indexAttr) {
+      iA = indexAttr.getX(f * 3);
+      iB = indexAttr.getX(f * 3 + 1);
+      iC = indexAttr.getX(f * 3 + 2);
+    }
+
+    pA.fromBufferAttribute(posAttr, iA);
+    pB.fromBufferAttribute(posAttr, iB);
+    pC.fromBufferAttribute(posAttr, iC);
+
+    cb.subVectors(pC, pB);
+    ab.subVectors(pA, pB);
+    const norm = new THREE.Vector3().crossVectors(cb, ab);
+    if (norm.lengthSq() > 1e-12) {
+      faceNormals.push(norm); // Area weighted
+    } else {
+      faceNormals.push(new THREE.Vector3(0, 1, 0));
+    }
+    faceIndices.push([iA, iB, iC]);
+  }
+
+  // Map each vertex index to the face indices using it
+  const vertToFaces: number[][] = Array.from({ length: count }, () => []);
+  for (let f = 0; f < faceIndices.length; f++) {
+    const [iA, iB, iC] = faceIndices[f];
+    vertToFaces[iA].push(f);
+    vertToFaces[iB].push(f);
+    vertToFaces[iC].push(f);
+  }
+
+  const cosMaxAngle = Math.cos(creaseAngleRad);
+  const tempNormal = new THREE.Vector3();
+  const normA = new THREE.Vector3();
+  const normB = new THREE.Vector3();
+
+  posMap.forEach((vertIndices) => {
+    // Gather all faces touching any vertex at this spatial location
+    const touchingFaces: number[] = [];
+    vertIndices.forEach((vi) => {
+      vertToFaces[vi].forEach((fi) => {
+        if (!touchingFaces.includes(fi)) touchingFaces.push(fi);
+      });
+    });
+
+    vertIndices.forEach((vi) => {
+      const myFaces = vertToFaces[vi];
+      if (myFaces.length === 0) return;
+
+      normA.copy(faceNormals[myFaces[0]]).normalize();
+      tempNormal.set(0, 0, 0);
+
+      touchingFaces.forEach((fi) => {
+        normB.copy(faceNormals[fi]).normalize();
+        if (normA.dot(normB) >= cosMaxAngle) {
+          tempNormal.add(faceNormals[fi]);
+        }
+      });
+
+      if (tempNormal.lengthSq() > 1e-12) {
+        tempNormal.normalize();
+      } else {
+        tempNormal.copy(normA);
+      }
+
+      normals[vi * 3] = tempNormal.x;
+      normals[vi * 3 + 1] = tempNormal.y;
+      normals[vi * 3 + 2] = tempNormal.z;
+    });
+  });
+
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
 }

@@ -130,6 +130,21 @@ export const CodeExporterModal: React.FC<Props> = ({ isOpen, onClose }) => {
         case 'DODECAHEDRON':
           geoCode = `new THREE.DodecahedronGeometry(${p.radius || 1}, ${p.detail || 0})`;
           break;
+        case 'TETRAHEDRON':
+          geoCode = `new THREE.TetrahedronGeometry(${p.radius || 1}, ${p.detail || 0})`;
+          break;
+        case 'OCTAHEDRON':
+          geoCode = `new THREE.OctahedronGeometry(${p.radius || 1}, ${p.detail || 0})`;
+          break;
+        case 'PYRAMID':
+          geoCode = `new THREE.ConeGeometry(0.5, 1, 4)`;
+          break;
+        case 'PRISM':
+          geoCode = `new THREE.CylinderGeometry(0.5, 0.5, 1, 3)`;
+          break;
+        case 'CAPSULE':
+          geoCode = `new THREE.CapsuleGeometry(0.25, 0.5, 8, 16)`;
+          break;
         case 'CUBE':
         default:
           geoCode = `new THREE.BoxGeometry(1, 1, 1)`;
@@ -261,6 +276,21 @@ export const CodeExporterModal: React.FC<Props> = ({ isOpen, onClose }) => {
           break;
         case 'DODECAHEDRON':
           geomJsx = `<dodecahedronGeometry args={[${p.radius || 1}, ${p.detail || 0}]} />`;
+          break;
+        case 'TETRAHEDRON':
+          geomJsx = `<tetrahedronGeometry args={[${p.radius || 1}, ${p.detail || 0}]} />`;
+          break;
+        case 'OCTAHEDRON':
+          geomJsx = `<octahedronGeometry args={[${p.radius || 1}, ${p.detail || 0}]} />`;
+          break;
+        case 'PYRAMID':
+          geomJsx = `<coneGeometry args={[0.5, 1, 4]} />`;
+          break;
+        case 'PRISM':
+          geomJsx = `<cylinderGeometry args={[0.5, 0.5, 1, 3]} />`;
+          break;
+        case 'CAPSULE':
+          geomJsx = `<capsuleGeometry args={[0.25, 0.5, 8, 16]} />`;
           break;
       }
 

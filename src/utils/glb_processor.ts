@@ -31,7 +31,16 @@ export async function processGLBMeshes(
         const mesh = child as THREE.Mesh;
         let geometry = mesh.geometry;
         
-        // Extract vertices and faces
+        // Merge un-welded vertices first so faces share vertices correctly
+        if (geometry.attributes.position) {
+          try {
+            geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
+            mesh.geometry = geometry;
+          } catch (e) {
+            // keep original geometry if merge fails
+          }
+        }
+
         const posAttr = geometry.getAttribute('position');
         const indexAttr = geometry.index;
         
@@ -148,8 +157,8 @@ export async function processGLBMeshes(
   }
 }
 
-export async function smoothGLB(obj: CSGObject, factor: number): Promise<CSGObject> {
-  return processGLBMeshes(obj, (vertices, faces) => smoothMesh({ ...obj, vertices, faces }, factor, 1));
+export async function smoothGLB(obj: CSGObject, factor: number, iterations: number = 1): Promise<CSGObject> {
+  return processGLBMeshes(obj, (vertices, faces) => smoothMesh({ ...obj, vertices, faces }, factor, iterations));
 }
 
 export async function subdivideGLB(obj: CSGObject): Promise<CSGObject> {
@@ -163,7 +172,8 @@ export async function subdivideGLB(obj: CSGObject): Promise<CSGObject> {
 export async function optimizeGLBModel(
   obj: CSGObject,
   resolutionLevel: number = 3,
-  onProgress?: (progress: number, stepText: string) => Promise<void> | void
+  onProgress?: (progress: number, stepText: string) => Promise<void> | void,
+  targetMeshIds?: string[]
 ): Promise<CSGObject> {
   if (!obj.meshData || obj.meshData.type !== 'gltf') return obj;
 
@@ -191,13 +201,18 @@ export async function optimizeGLBModel(
     if (onProgress) await onProgress(20, `Optimizando ${totalMeshes} sub-mallas conservando texturas y movimiento...`);
 
     const clampedRes = Math.max(1, Math.min(12, resolutionLevel));
-    const targetRatio = Math.min(0.90, Math.max(0.12, 0.12 + (clampedRes / 12) * 0.78));
-    const targetError = Math.max(0.05, 0.85 - (clampedRes / 12) * 0.80);
+    // Escalar nivel de resolución 1..12 a ratio objetivo 0.02 (98% reducción) a 0.85 (15% reducción)
+    const targetRatio = Math.min(0.85, Math.max(0.02, Math.pow((clampedRes - 0.5) / 11.5, 1.4) * 0.83 + 0.02));
+    const targetError = Math.max(0.01, 0.95 - (clampedRes / 12) * 0.90);
 
-    let processedCount = 0;
+    let meshIdxCounter = 0;
     scene.traverse((child: THREE.Object3D) => {
       if ((child as THREE.Mesh).isMesh || (child as THREE.SkinnedMesh).isSkinnedMesh) {
-        processedCount++;
+        const meshId = `mesh-${meshIdxCounter++}`;
+        if (targetMeshIds && targetMeshIds.length > 0 && !targetMeshIds.includes(meshId)) {
+          return; // Omitir sub-malla no seleccionada
+        }
+
         const mesh = child as THREE.Mesh;
         let geometry = mesh.geometry;
         if (!geometry || !geometry.attributes.position) return;

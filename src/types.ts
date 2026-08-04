@@ -15,6 +15,8 @@ export type CSGOperation  = 'ADD' | 'SUBTRACT' | 'INTERSECT';
 export type PrimitiveType =
   | 'CUBE' | 'SPHERE' | 'CYLINDER' | 'CONE'
   | 'TORUS' | 'ICOSAHEDRON' | 'DODECAHEDRON'
+  | 'PYRAMID' | 'PRISM' | 'CAPSULE' | 'TETRAHEDRON' | 'OCTAHEDRON'
+  | 'TUBE' | 'WEDGE' | 'HEMISPHERE' | 'ARC' | 'STAR'
   | 'PLANE' | 'CIRCLE' | 'RING'
   | 'SHAPE' | 'MESH';
 
@@ -27,6 +29,9 @@ export interface ShapeParameters {
   detail?:          number;
   innerRadius?:     number;
   outerRadius?:     number;
+  arcAngle?:        number; // Degrees (1 to 360)
+  starPoints?:      number; // Number of points (puntas)
+  height?:          number;
   thetaSegments?:   number;
   sphereType?:      'UV' | 'ICO';
   shapeType?:       'line' | 'rect' | 'bezier' | 'custom';
@@ -250,7 +255,7 @@ export interface EnvironmentSettings {
 
 export type ViewportType   = 'PERSPECTIVE' | 'TOP' | 'BOTTOM' | 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT';
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
-export type TransformMode  = 'translate' | 'rotate' | 'scale';
+export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
 export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED';
 
@@ -288,11 +293,15 @@ export interface MeshProcessingState {
   objectName?: string;
   vertCount?: number;
   faceCount?: number;
+  completed?: boolean;
+  finalVertCount?: number;
+  finalFaceCount?: number;
 }
 
 export interface AppState {
   project:           Project;
   meshProcessing?:   MeshProcessingState | null;
+  closeMeshProcessing: () => void;
   selectedObjectId:  string | null;
   selectedLightId?:  string | null;
   selectedCameraId?: string | null;

@@ -121,6 +121,31 @@ const PARAM_DEFS: Record<PrimitiveType, {
   ],
   ICOSAHEDRON:  [{ key: 'detail', label: 'Detalle', min: 0, max: 8, step: 1, integer: true }],
   DODECAHEDRON: [{ key: 'detail', label: 'Detalle', min: 0, max: 8, step: 1, integer: true }],
+  TETRAHEDRON:  [{ key: 'detail', label: 'Detalle', min: 0, max: 8, step: 1, integer: true }],
+  OCTAHEDRON:   [{ key: 'detail', label: 'Detalle', min: 0, max: 8, step: 1, integer: true }],
+  PYRAMID:      [{ key: 'heightSegments', label: 'Seg. altura', min: 1, max: 128, step: 1, integer: true }],
+  PRISM:        [{ key: 'heightSegments', label: 'Seg. altura', min: 1, max: 128, step: 1, integer: true }],
+  CAPSULE:      [{ key: 'segments',       label: 'Segmentos',   min: 4, max: 128, step: 1, integer: true }],
+  HEMISPHERE:   [{ key: 'segments',       label: 'Segmentos',   min: 4, max: 256, step: 1, integer: true }],
+  WEDGE:        [],
+  TUBE: [
+    { key: 'innerRadius', label: 'Radio interior', min: 0.01, max: 10, step: 0.05 },
+    { key: 'outerRadius', label: 'Radio exterior', min: 0.05, max: 12, step: 0.05 },
+    { key: 'segments',    label: 'Segmentos',      min: 3,    max: 256, step: 1, integer: true },
+  ],
+  ARC: [
+    { key: 'arcAngle',    label: 'Ángulo (°)',      min: 1,    max: 360, step: 1, integer: true },
+    { key: 'innerRadius', label: 'Radio interior', min: 0.01, max: 10,  step: 0.05 },
+    { key: 'outerRadius', label: 'Radio exterior', min: 0.05, max: 12,  step: 0.05 },
+    { key: 'height',      label: 'Altura',         min: 0.05, max: 10,  step: 0.05 },
+    { key: 'segments',    label: 'Segmentos',      min: 3,    max: 256, step: 1, integer: true },
+  ],
+  STAR: [
+    { key: 'starPoints',  label: 'Puntas',          min: 3,    max: 32,  step: 1, integer: true },
+    { key: 'innerRadius', label: 'Radio interior', min: 0.01, max: 10,  step: 0.05 },
+    { key: 'outerRadius', label: 'Radio exterior', min: 0.05, max: 12,  step: 0.05 },
+    { key: 'height',      label: 'Altura',         min: 0.05, max: 10,  step: 0.05 },
+  ],
   PLANE:        [{ key: 'segments',       label: 'Subdivisión',     min: 1,    max: 256, step: 1,    integer: true }],
   CIRCLE:       [{ key: 'segments',       label: 'Segmentos',       min: 3,    max: 256, step: 1,    integer: true }],
   RING: [
@@ -142,7 +167,7 @@ type AlignMode = 'min' | 'center' | 'max';
 // ─── Main Sidebar ─────────────────────────────────────────────────────────────
 export const Sidebar: React.FC = () => {
   const {
-    project, selectedObjectId, selectedObjectIds, selectObject, removeObject, duplicateObject,
+    project, selectedObjectId, selectedObjectIds, selectObject, removeObject, removeObjects, duplicateObject,
     updateObject, updateParameters, saveHistory, toggleObjectSelection,
     smoothObject, subdivideObject, optimizeObject, repairObject,
   } = useStore();
@@ -244,35 +269,51 @@ export const Sidebar: React.FC = () => {
 
       {/* Hierarchy */}
       <Section title="Jerarquía" icon={Layers}>
-        <div className="p-2 space-y-1 max-h-[180px] overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
-          {project.objects.map(obj => (
-            <div
-              key={obj.id}
-              onClick={(e) => {
-                if (e.shiftKey || e.ctrlKey || e.metaKey) toggleObjectSelection?.(obj.id, true);
-                else selectObject(obj.id);
-              }}
-              className={`group flex items-center gap-2 p-1.5 rounded cursor-pointer transition-all ${
-                (selectedObjectIds ?? [selectedObjectId]).includes(obj.id)
-                  ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20'
-                  : 'hover:bg-zinc-800'
-              }`}
-            >
-              <div className="w-2 h-2 rounded-full ring-1 ring-white/10 flex-shrink-0" style={{ backgroundColor: obj.color }} />
-              <span className="text-[11px] truncate flex-1 font-medium">{obj.name}</span>
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={e => { e.stopPropagation(); updateObject(obj.id, { visible: !obj.visible }); }} className="p-1 hover:bg-white/10 rounded">
-                  {obj.visible ? <Eye size={10} /> : <EyeOff size={10} />}
-                </button>
-                <button onClick={e => { e.stopPropagation(); duplicateObject(obj.id); }} className="p-1 hover:bg-white/10 rounded">
-                  <Copy size={10} />
-                </button>
-                <button onClick={e => { e.stopPropagation(); removeObject(obj.id); }} className="p-1 hover:bg-red-500/20 text-red-400 rounded">
-                  <Trash2 size={10} />
-                </button>
-              </div>
+        <div className="p-2 space-y-1">
+          {selectedObjectIds && selectedObjectIds.length > 0 && (
+            <div className="flex items-center justify-between gap-2 p-1.5 bg-indigo-950/40 border border-indigo-500/30 rounded text-[10px]">
+              <span className="text-indigo-200 font-medium">
+                {selectedObjectIds.length} sel.
+              </span>
+              <button
+                onClick={() => removeObjects(selectedObjectIds)}
+                className="flex items-center gap-1 px-2 py-0.5 bg-rose-600/30 hover:bg-rose-600 text-rose-200 hover:text-white rounded font-bold transition-all border border-rose-500/30"
+                title="Eliminar objetos seleccionados"
+              >
+                <Trash2 size={10} /> Eliminar ({selectedObjectIds.length})
+              </button>
             </div>
-          ))}
+          )}
+          <div className="space-y-1 max-h-[180px] overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-700">
+            {project.objects.map(obj => (
+              <div
+                key={obj.id}
+                onClick={(e) => {
+                  if (e.shiftKey || e.ctrlKey || e.metaKey) toggleObjectSelection?.(obj.id, true);
+                  else selectObject(obj.id);
+                }}
+                className={`group flex items-center gap-2 p-1.5 rounded cursor-pointer transition-all ${
+                  (selectedObjectIds ?? [selectedObjectId]).includes(obj.id)
+                    ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20'
+                    : 'hover:bg-zinc-800'
+                }`}
+              >
+                <div className="w-2 h-2 rounded-full ring-1 ring-white/10 flex-shrink-0" style={{ backgroundColor: obj.color }} />
+                <span className="text-[11px] truncate flex-1 font-medium">{obj.name}</span>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button onClick={e => { e.stopPropagation(); updateObject(obj.id, { visible: !obj.visible }); }} className="p-1 hover:bg-white/10 rounded" title="Visibilidad">
+                    {obj.visible ? <Eye size={10} /> : <EyeOff size={10} />}
+                  </button>
+                  <button onClick={e => { e.stopPropagation(); duplicateObject(obj.id); }} className="p-1 hover:bg-white/10 rounded" title="Duplicar">
+                    <Copy size={10} />
+                  </button>
+                  <button onClick={e => { e.stopPropagation(); removeObject(obj.id); }} className="p-1 hover:bg-red-500/20 text-red-400 rounded" title="Eliminar">
+                    <Trash2 size={10} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </Section>
 

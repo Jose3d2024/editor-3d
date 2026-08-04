@@ -16,6 +16,7 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { useStore } from '../store/useStore';
 import { performCSG, createPrimitiveMesh } from '../utils/csg';
 import { generateUVs, applyUVWMapping } from '../utils/modifiers';
+import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
@@ -29,6 +30,132 @@ interface ViewportProps {
 
 // Initialize RectAreaLightUniformsLib globally
 RectAreaLightUniformsLib.init();
+
+const SNAP_ANGLES_DEG = [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255, 270, 285, 300, 315, 330, 345, 360];
+
+const snapAngleToPresets = (angleRad: number): number => {
+  let deg = (angleRad * 180) / Math.PI;
+  const sign = Math.sign(deg) || 1;
+  let absDeg = Math.abs(deg);
+  const k = Math.floor(absDeg / 360);
+  const remDeg = absDeg - k * 360;
+
+  let closest = SNAP_ANGLES_DEG[0];
+  let minDiff = Math.abs(remDeg - closest);
+  for (let i = 1; i < SNAP_ANGLES_DEG.length; i++) {
+    const diff = Math.abs(remDeg - SNAP_ANGLES_DEG[i]);
+    if (diff < minDiff) {
+      minDiff = diff;
+      closest = SNAP_ANGLES_DEG[i];
+    }
+  }
+  const snappedAbs = k * 360 + closest;
+  return sign * snappedAbs * (Math.PI / 180);
+};
+
+const computeGizmoLayout = (
+  gizmoPos: THREE.Vector3,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  transformSpace: string = 'world',
+  selObj?: any
+) => {
+  const projected = gizmoPos.clone().project(camera);
+  if (projected.z > 1 || projected.z < -1) return null;
+  const cx = (projected.x * 0.5 + 0.5) * w;
+  const cy = (-projected.y * 0.5 + 0.5) * h;
+  const AXIS_LEN = Math.min(w, h) * 0.16;
+
+  const eyeDir = camera.position.clone().sub(gizmoPos).normalize();
+
+  let vX = new THREE.Vector3(1, 0, 0);
+  let vY = new THREE.Vector3(0, 1, 0);
+  let vZ = new THREE.Vector3(0, 0, 1);
+
+  if (transformSpace === 'local' && selObj && selObj.transform) {
+    const euler = new THREE.Euler(selObj.transform.rotation[0], selObj.transform.rotation[1], selObj.transform.rotation[2], 'XYZ');
+    const q = new THREE.Quaternion().setFromEuler(euler);
+    vX.applyQuaternion(q);
+    vY.applyQuaternion(q);
+    vZ.applyQuaternion(q);
+  }
+
+  const axes = [
+    { axis: 'X', vec: vX, color: '#ff3333' },
+    { axis: 'Y', vec: vY, color: '#33ff33' },
+    { axis: 'Z', vec: vZ, color: '#4488ff' }
+  ];
+
+  const dirs: Record<string, { nx: number; ny: number; color: string; sign: number; dot: number; worldDir: THREE.Vector3 }> = {};
+
+  for (const { axis, vec, color } of axes) {
+    const dot = eyeDir.dot(vec);
+    const sign = dot < -0.05 ? -1 : 1;
+    const visVec = vec.clone().multiplyScalar(sign);
+
+    const dist = camera.position.distanceTo(gizmoPos);
+    const worldScale = Math.max(0.1, dist * 0.12);
+    const projEnd = gizmoPos.clone().addScaledVector(visVec, worldScale).project(camera);
+    const ex = (projEnd.x * 0.5 + 0.5) * w;
+    const ey = (-projEnd.y * 0.5 + 0.5) * h;
+    const sdx = ex - cx;
+    const sdy = ey - cy;
+    const len = Math.sqrt(sdx * sdx + sdy * sdy);
+
+    const nx = len > 0 ? (sdx / len) * AXIS_LEN : 0;
+    const ny = len > 0 ? (sdy / len) * AXIS_LEN : 0;
+
+    dirs[axis] = { nx, ny, color, sign, dot, worldDir: vec.clone() };
+  }
+
+  const rotArcs: Record<string, { pts: { x: number; y: number }[]; handlePt: { x: number; y: number }; arcColor: string; sphereColor: string }> = {};
+
+  const arcConfigs = [
+    { rotAxis: 'Z', norm: vZ, color: '#44aaff', sphereColor: '#55ccff' },
+    { rotAxis: 'X', norm: vX, color: '#44ff77', sphereColor: '#66ff88' },
+    { rotAxis: 'Y', norm: vY, color: '#ff44aa', sphereColor: '#ff66bb' }
+  ];
+
+  const dist = camera.position.distanceTo(gizmoPos);
+  const radius3D = Math.max(0.1, dist * 0.12 * 0.85);
+
+  for (const { rotAxis, norm, color, sphereColor } of arcConfigs) {
+    let projEye = eyeDir.clone().sub(norm.clone().multiplyScalar(eyeDir.dot(norm)));
+    if (projEye.lengthSq() < 1e-6) {
+      projEye = Math.abs(norm.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      projEye.sub(norm.clone().multiplyScalar(projEye.dot(norm)));
+    }
+    projEye.normalize();
+
+    const tangent = new THREE.Vector3().crossVectors(norm, projEye).normalize();
+
+    const pts: { x: number; y: number }[] = [];
+    const numSteps = 24;
+    for (let i = 0; i <= numSteps; i++) {
+      const theta = -Math.PI / 2 + (Math.PI * i) / numSteps;
+      const pt3D = gizmoPos.clone()
+        .addScaledVector(projEye, Math.cos(theta) * radius3D)
+        .addScaledVector(tangent, Math.sin(theta) * radius3D);
+      const proj = pt3D.project(camera);
+      pts.push({
+        x: (proj.x * 0.5 + 0.5) * w,
+        y: (-proj.y * 0.5 + 0.5) * h
+      });
+    }
+
+    const frontPt3D = gizmoPos.clone().addScaledVector(projEye, radius3D);
+    const frontProj = frontPt3D.project(camera);
+    const handlePt = {
+      x: (frontProj.x * 0.5 + 0.5) * w,
+      y: (-frontProj.y * 0.5 + 0.5) * h
+    };
+
+    rotArcs[rotAxis] = { pts, handlePt, arcColor: color, sphereColor };
+  }
+
+  return { cx, cy, AXIS_LEN, dirs, rotArcs };
+};
 
 export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: initialTitle }) => {
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
@@ -71,8 +198,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const isDrawingHandleRef = useRef(false);
 
   const gizmoStateRef = useRef<{
-    hoveredAxis: 'X' | 'Y' | 'Z' | 'XY' | 'YZ' | 'XZ' | 'FREE' | null;
-    activeAxis: 'X' | 'Y' | 'Z' | 'XY' | 'YZ' | 'XZ' | 'FREE' | null;
+    hoveredAxis: string | null;
+    activeAxis: string | null;
     startMouseWorld: THREE.Vector3;
     startPos: [number,number,number];
     startRot: [number,number,number];
@@ -82,6 +209,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     dragHandleType?: 'anchor' | 'bezierOut' | 'bezierIn';
     dragAnchorIdx?: number;
     startTransforms: Record<string, { position: [number,number,number], rotation: [number,number,number], scale: [number,number,number] }>;
+    startWorldGizmoPos?: THREE.Vector3;
   }>({
     hoveredAxis: null,
     activeAxis: null,
@@ -1161,6 +1289,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
   // ── 2. Scene sync — builds geometry from vertices/faces (unified mesh) ───
   useEffect(() => {
+    let isEffectCancelled = false;
     const group = groupRef.current;
     const primitivesGroup = primitivesGroupRef.current;
     if (!group || !primitivesGroup) return;
@@ -1379,6 +1508,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           loader.setDRACOLoader(dracoLoader);
           loader.setMeshoptDecoder(MeshoptDecoder);
           loader.load(obj.meshData.data, (gltf) => {
+            if (isEffectCancelled) return;
+            const currentObj = useStore.getState().project.objects.find(o => o.id === obj.id);
+            if (!currentObj || currentObj.meshData?.data !== cacheKey) return;
+
             const scene = gltf.scene;
             
             // Cache the original loaded scene and animations
@@ -1438,6 +1571,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           return;
         } else if (obj.meshData.type === 'stl') {
           new STLLoader().load(obj.meshData.data, (geometry) => {
+            if (isEffectCancelled) return;
+            const currentObj = useStore.getState().project.objects.find(o => o.id === obj.id);
+            if (!currentObj || currentObj.meshData?.data !== cacheKey) return;
+
             const material = new THREE.MeshPhysicalMaterial({ color: obj.color || '#ffffff' });
             const mesh = new THREE.Mesh(geometry, material);
             
@@ -1457,6 +1594,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           return;
         } else if (obj.meshData.type === 'obj') {
           new OBJLoader().load(obj.meshData.data, (object) => {
+            if (isEffectCancelled) return;
+            const currentObj = useStore.getState().project.objects.find(o => o.id === obj.id);
+            if (!currentObj || currentObj.meshData?.data !== cacheKey) return;
+
             gltfCacheRef.current.set(cacheKey, { scene: object, animations: [] });
             
             const clonedObject = object.clone();
@@ -1702,7 +1843,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         face.indices.forEach((posIdx, i) => {
           const uv = face.uvs?.[i] || [0, 0];
           // Create a unique vertex for each position + UV combination to handle seams
-          const key = `${posIdx}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`;
+          const key = `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`;
           
           if (vertMap.has(key)) {
             faceIndices.push(vertMap.get(key)!);
@@ -1733,7 +1874,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         geometry.setAttribute('uv2', uvAttr);
       }
       geometry.setIndex(indices);
-      geometry.computeVertexNormals();
+      computeSmoothNormalsByPosition(geometry, Math.PI / 3);
       if (mData.useParallax) {
         geometry.computeTangents();
       }
@@ -1769,27 +1910,57 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
-      // We build edges from the logical faces to ensure every edge is visible,
-      // regardless of the angle between faces (unlike EdgesGeometry).
-      const edgeSet = new Set<string>();
-      const edgePositions: number[] = [];
-      
-      obj.faces.forEach(face => {
+      // We build edges from logical faces, suppressing internal diagonal triangulation
+      // edges on flat coplanar faces.
+      const faceNormals: THREE.Vector3[] = [];
+      const edgeToFaces = new Map<string, number[]>();
+
+      obj.faces.forEach((face, fIdx) => {
         const len = face.indices.length;
+        if (len >= 3) {
+          const p0 = new THREE.Vector3(posArr[face.indices[0]*3], posArr[face.indices[0]*3+1], posArr[face.indices[0]*3+2]);
+          const p1 = new THREE.Vector3(posArr[face.indices[1]*3], posArr[face.indices[1]*3+1], posArr[face.indices[1]*3+2]);
+          const p2 = new THREE.Vector3(posArr[face.indices[2]*3], posArr[face.indices[2]*3+1], posArr[face.indices[2]*3+2]);
+          const vA = p1.sub(p0);
+          const vB = p2.sub(p0);
+          const norm = new THREE.Vector3().crossVectors(vA, vB).normalize();
+          faceNormals.push(norm);
+        } else {
+          faceNormals.push(new THREE.Vector3(0, 1, 0));
+        }
+
         for (let i = 0; i < len; i++) {
           const a = face.indices[i];
           const b = face.indices[(i + 1) % len];
           const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-          if (!edgeSet.has(key)) {
-            edgeSet.add(key);
-            // Look up positions from the posArr we built earlier
-            // posArr is flat [x,y,z, x,y,z...], so index * 3
-            edgePositions.push(
-              posArr[a*3], posArr[a*3+1], posArr[a*3+2],
-              posArr[b*3], posArr[b*3+1], posArr[b*3+2]
-            );
+          let fList = edgeToFaces.get(key);
+          if (!fList) {
+            fList = [];
+            edgeToFaces.set(key, fList);
+          }
+          fList.push(fIdx);
+        }
+      });
+
+      const edgePositions: number[] = [];
+
+      edgeToFaces.forEach((facesSharingEdge, key) => {
+        // If edge is shared by 2 faces that are coplanar (flat), omit internal diagonal edge
+        if (facesSharingEdge.length === 2) {
+          const n1 = faceNormals[facesSharingEdge[0]];
+          const n2 = faceNormals[facesSharingEdge[1]];
+          if (n1.dot(n2) > 0.998) {
+            return;
           }
         }
+
+        const [aStr, bStr] = key.split(':');
+        const a = parseInt(aStr, 10);
+        const b = parseInt(bStr, 10);
+        edgePositions.push(
+          posArr[a*3], posArr[a*3+1], posArr[a*3+2],
+          posArr[b*3], posArr[b*3+1], posArr[b*3+2]
+        );
       });
 
       const edgeGeo = new THREE.BufferGeometry();
@@ -1799,8 +1970,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         edgeGeo,
         new THREE.LineBasicMaterial({
           color: viewMode==='WIREFRAME' ? (isSelected?0x4f8ef7:0x22dd44) : 0x444444,
-          opacity: viewMode==='WIREFRAME' ? 1 : (isSelected?0.3:0.05),
+          opacity: viewMode==='WIREFRAME' ? 1 : (editMode!=='OBJECT' ? (isSelected?0.5:0.05) : 0),
           transparent: true,
+          visible: viewMode==='WIREFRAME' || editMode!=='OBJECT',
           depthTest: viewMode !== 'WIREFRAME', 
           depthWrite: false
         })
@@ -1923,6 +2095,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       primitivesGroup.add(pickMesh);
     });
     return () => {
+      isEffectCancelled = true;
       // Dispose of materials and textures to prevent memory leaks
       const disposeObject = (obj: THREE.Object3D) => {
         if ((obj as THREE.Mesh).isMesh) {
@@ -2596,7 +2769,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       return out;
     };
 
-    const getAxisHit = (mx: number, my: number): 'X'|'Y'|'Z'|'XY'|'YZ'|'XZ'|'FREE'|null => {
+    const getAxisHit = (mx: number, my: number): string | null => {
       if (!selectedObjectId && !selectedLightId && !selectedCameraId) return null;
       const selObj = selectedObjectId ? projectRef.current.objects.find(o=>o.id===selectedObjectId) : null;
       const selLight = selectedLightId ? projectRef.current.lights.find(l=>l.id===selectedLightId) : null;
@@ -2625,18 +2798,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const isBezier = isShape && selObj.parameters.shapeType === 'bezier';
 
           if (isBezier && selectedVertexIndices.some(idx => idx >= 10000)) {
-            // Handle gizmo: position at the handle itself
             const idx = selectedVertexIndices[0];
             const anchorIdx = idx >= 20000 ? idx - 20000 : idx - 10000;
             const side = idx >= 20000 ? 'in' : 'out';
             const anchor = new THREE.Vector3(...selObj.vertices[anchorIdx]);
             const handleRel = new THREE.Vector3(...(selObj.bezierHandles?.[anchorIdx]?.[side] ?? [0,0,0]));
             objPos = anchor.add(handleRel).applyMatrix4(mesh.matrixWorld);
-          } else if (isShape) {
+          } else {
             const centroid = new THREE.Vector3();
             let count = 0;
             selectedVertexIndices.forEach(idx => {
-              if (idx < selObj.vertices.length) {
+              if (selObj.vertices && idx < selObj.vertices.length) {
                 const v = selObj.vertices[idx];
                 const off = selObj.vertexOffsets?.[idx] ?? [0,0,0];
                 centroid.add(new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]));
@@ -2649,68 +2821,74 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             } else {
               return null;
             }
-          } else {
-            const centroid=new THREE.Vector3();
-            let count = 0;
-            selectedVertexIndices.forEach(idx => {
-              if (selObj.vertices && idx < selObj.vertices.length) {
-                const v = selObj.vertices[idx];
-                const off = selObj.vertexOffsets?.[idx] ?? [0,0,0];
-                centroid.add(new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]));
-                count++;
-              }
-            });
-            if (count > 0) {
-              centroid.divideScalar(count).applyMatrix4(mesh.matrixWorld);
-              objPos=centroid;
-            } else {
-              return null;
+          }
+        }
+      }
+
+      const layout = computeGizmoLayout(objPos, camera, w, h, selObj);
+      if (!layout) return null;
+      const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
+      const distCenter = Math.sqrt((mx - cx)**2 + (my - cy)**2);
+
+      // 1. Center FREE handle
+      if (distCenter < 16) return 'FREE';
+
+      // 2. Check Scale Cubes
+      if (transformMode === 'scale' || transformMode === 'universal') {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const cubeX = cx + d.nx * 0.85;
+          const cubeY = cy + d.ny * 0.85;
+          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 14) {
+            return `SCALE_${axis}`;
+          }
+        }
+      }
+
+      // 3. Check Rotation Arcs & Spheres
+      if (transformMode === 'rotate' || transformMode === 'universal') {
+        for (const rotAxis of ['Z', 'X', 'Y']) {
+          const arc = rotArcs[rotAxis];
+          if (!arc) continue;
+          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 16) {
+            return `ROT_${rotAxis}`;
+          }
+          for (const p of arc.pts) {
+            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 12) {
+              return `ROT_${rotAxis}`;
             }
           }
         }
       }
 
-      const projected=objPos.clone().project(camera);
-      if (projected.z > 1 || projected.z < -1) return null; // Behind camera or past far plane
-      const cx=(projected.x*0.5+0.5)*w, cy=(-projected.y*0.5+0.5)*h;
-      const AXIS_LEN=Math.min(w,h)*0.12, HIT_RADIUS=25;
-
-      if (transformMode === 'translate' || transformMode === 'scale') {
-        if (Math.sqrt((mx-cx)**2+(my-cy)**2) < 15) return 'FREE';
-      }
-
-      const dirs: Record<string, {nx:number, ny:number}> = {};
-      for (const {axis,dir} of [{axis:'X' as const,dir:new THREE.Vector3(1,0,0)},{axis:'Y' as const,dir:new THREE.Vector3(0,1,0)},{axis:'Z' as const,dir:new THREE.Vector3(0,0,1)}]) {
-        const projEnd=objPos.clone().add(dir).project(camera);
-        const ex=(projEnd.x*0.5+0.5)*w, ey=(-projEnd.y*0.5+0.5)*h;
-        const sdx=ex-cx, sdy=ey-cy, len=Math.sqrt(sdx*sdx+sdy*sdy);
-        dirs[axis] = { nx: len>0?(sdx/len)*AXIS_LEN:0, ny: len>0?(sdy/len)*AXIS_LEN:0 };
-        
-        const nx=dirs[axis].nx, ny=dirs[axis].ny;
-        const tipX=cx+nx, tipY=cy+ny;
-        const bx=tipX-cx, by=tipY-cy, bLen=Math.sqrt(bx*bx+by*by);
+      // 4. Check Axis Translation Arrows / Shafts
+      for (const axis of ['X', 'Y', 'Z']) {
+        const d = dirs[axis];
+        if (!d) continue;
+        const tipX = cx + d.nx, tipY = cy + d.ny;
+        const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
         if (!bLen) continue;
-        const t=Math.max(0,Math.min(1,((mx-cx)*bx+(my-cy)*by)/(bLen*bLen)));
-        const dist=Math.sqrt((mx-cx-t*bx)**2+(my-cy-t*by)**2);
-        if (dist<HIT_RADIUS) return axis;
+        const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
+        const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
+        if (dist < 18) return axis;
       }
 
-      if (transformMode === 'translate' || transformMode === 'scale') {
-        // Check 2D planes
-        const checkPlane = (a1: string, a2: string, planeName: 'XY'|'YZ'|'XZ') => {
+      // 5. Check 2D Translation Planes
+      if (transformMode === 'translate' || transformMode === 'universal') {
+        const checkPlane = (a1: string, a2: string, planeName: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return false;
-          // Point in polygon check for the parallelogram
-          const p0 = {x: cx, y: cy};
-          const p1 = {x: cx + d1.nx*0.4, y: cy + d1.ny*0.4};
-          const p2 = {x: cx + (d1.nx + d2.nx)*0.4, y: cy + (d1.ny + d2.ny)*0.4};
-          const p3 = {x: cx + d2.nx*0.4, y: cy + d2.ny*0.4};
-          
-          const poly = [p0, p1, p2, p3];
+          const poly = [
+            {x: cx + d1.nx*0.15, y: cy + d1.ny*0.15},
+            {x: cx + d1.nx*0.4, y: cy + d1.ny*0.4},
+            {x: cx + (d1.nx + d2.nx)*0.4, y: cy + (d1.ny + d2.ny)*0.4},
+            {x: cx + d2.nx*0.4, y: cy + d2.ny*0.4},
+            {x: cx + d2.nx*0.15, y: cy + d2.ny*0.15}
+          ];
           let inside = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-            const xi = poly[i].x, yi = poly[i].y;
-            const xj = poly[j].x, yj = poly[j].y;
+            const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
             const intersect = ((yi > my) !== (yj > my)) && (mx < (xj - xi) * (my - yi) / (yj - yi) + xi);
             if (intersect) inside = !inside;
           }
@@ -2720,6 +2898,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (checkPlane('X', 'Y', 'XY')) return 'XY';
         if (checkPlane('Y', 'Z', 'YZ')) return 'YZ';
         if (checkPlane('X', 'Z', 'XZ')) return 'XZ';
+      }
+
+      // 6. Outer View Ring
+      const OUTER_R = AXIS_LEN * 1.15;
+      if (Math.abs(distCenter - OUTER_R) < 12) {
+        return transformMode === 'scale' ? 'SCALE_UNIFORM' : 'ROT_VIEW';
       }
 
       return null;
@@ -2847,6 +3031,44 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           gizmoStateRef.current.activeAxis=gizmoHit;
           // startScreenPos already set above
           
+          // Store start gizmo world position
+          let gizmoWorldPos = new THREE.Vector3();
+          if (selLight) {
+            gizmoWorldPos.fromArray(selLight.transform.position);
+          } else if (selCam) {
+            gizmoWorldPos.fromArray(selCam.transform.position);
+          } else if (selObj) {
+            if (editMode === 'OBJECT') {
+              const _interp = getInterpolatedTransform(selObj, currentTime);
+              gizmoWorldPos.fromArray(_interp.position);
+            } else {
+              const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+              if (mesh) {
+                const centroid = new THREE.Vector3();
+                let count = 0;
+                selectedVertexIndices.forEach(idx => {
+                  if (selObj.vertices && idx < selObj.vertices.length) {
+                    const v = selObj.vertices[idx];
+                    const off = selObj.vertexOffsets?.[idx] ?? [0,0,0];
+                    centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
+                    count++;
+                  }
+                });
+                if (count > 0) {
+                  centroid.divideScalar(count).applyMatrix4(mesh.matrixWorld);
+                  gizmoWorldPos.copy(centroid);
+                } else {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  gizmoWorldPos.fromArray(_interp.position);
+                }
+              } else {
+                const _interp = getInterpolatedTransform(selObj, currentTime);
+                gizmoWorldPos.fromArray(_interp.position);
+              }
+            }
+          }
+          gizmoStateRef.current.startWorldGizmoPos = gizmoWorldPos;
+
           if (selLight) {
             gizmoStateRef.current.startPos=[...selLight.transform.position];
             gizmoStateRef.current.startRot=[...selLight.transform.rotation];
@@ -2952,7 +3174,26 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             gizmoStateRef.current.dragHandleType = ht as any;
             gizmoStateRef.current.dragAnchorIdx = ai;
             gizmoStateRef.current.activeAxis = 'FREE';
+            gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
+            gizmoStateRef.current.startWorldGizmoPos = sh.point.clone();
             isDraggingRef.current = true;
+
+            if (selObj) {
+              const offsets: Record<number,[number,number,number]> = {};
+              if (ht === 'bezierOut' || ht === 'bezierIn') {
+                const h = selObj.bezierHandles?.[ai];
+                if (h) {
+                  const hKey = ht === 'bezierOut' ? ai + 10000 : ai + 20000;
+                  offsets[hKey] = ht === 'bezierOut' ? [...h.out] as [number,number,number] : [...h.in] as [number,number,number];
+                }
+              } else {
+                const selectedIdxs = (!event.shiftKey && !selectedVertexIndices.includes(ai)) ? [ai] : selectedVertexIndices.includes(ai) ? selectedVertexIndices : [...selectedVertexIndices, ai];
+                selectedIdxs.forEach(idx => {
+                  if (idx < 10000) offsets[idx] = [...(selObj.vertexOffsets?.[idx] ?? [0,0,0])] as [number,number,number];
+                });
+              }
+              gizmoStateRef.current.startVertexOffsets = offsets;
+            }
             
             if (ht === 'anchor') {
               if (!event.shiftKey && !selectedVertexIndices.includes(ai)) {
@@ -3137,21 +3378,77 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (!selObj && !selLight) return;
       const dx=event.clientX-gs.startScreenPos.x, dy=event.clientY-gs.startScreenPos.y;
 
-      if (gs.activeAxis==='FREE' && transformMode==='translate') {
-        const dist=camera.position.distanceTo(new THREE.Vector3(...gs.startPos));
-        const ms=0.0025*Math.max(dist,1);
-        const right=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,0);
-        const up=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,1);
-        const mov=new THREE.Vector3().addScaledVector(right,dx*ms).addScaledVector(up,-dy*ms);
-        
-        if (editMode === 'OBJECT') {
+      if (gs.activeAxis) {
+        const ax = gs.activeAxis;
+        const isRotateAction = ax.startsWith('ROT_') || (transformMode === 'rotate' && ['X','Y','Z'].includes(ax));
+        const isScaleAction = ax.startsWith('SCALE_') || (transformMode === 'scale' && ['X','Y','Z','XY','YZ','XZ'].includes(ax));
+
+        const rect = rendererRef.current!.domElement.getBoundingClientRect();
+        const startWorldPos = gs.startWorldGizmoPos || new THREE.Vector3(...gs.startPos);
+        const projPos = startWorldPos.clone().project(camera);
+        const cxScreen = (projPos.x * 0.5 + 0.5) * rect.width;
+        const cyScreen = (-projPos.y * 0.5 + 0.5) * rect.height;
+
+        if (isRotateAction) {
+          const rotAxis = ax.startsWith('ROT_') ? ax.replace('ROT_', '') : ax;
+          let dAngle = 0;
+
+          if (rotAxis === 'VIEW') {
+            const startAng = Math.atan2(gs.startScreenPos.y - (cyScreen + rect.top), gs.startScreenPos.x - (cxScreen + rect.left));
+            const curAng = Math.atan2(event.clientY - (cyScreen + rect.top), event.clientX - (cxScreen + rect.left));
+            dAngle = curAng - startAng;
+          } else {
+            const axisVec = rotAxis === 'X' ? new THREE.Vector3(1,0,0) : rotAxis === 'Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(axisVec, startWorldPos);
+            
+            const raycaster = new THREE.Raycaster();
+            const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
+            const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
+            const startHit = new THREE.Vector3();
+            const hasStartHit = raycaster.ray.intersectPlane(plane, startHit);
+
+            const cxNorm = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            const cyNorm = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(cxNorm, cyNorm), camera);
+            const curHit = new THREE.Vector3();
+            const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
+
+            if (hasStartHit && hasCurHit) {
+              const v0 = startHit.clone().sub(startWorldPos);
+              const v1 = curHit.clone().sub(startWorldPos);
+              if (v0.lengthSq() > 1e-6 && v1.lengthSq() > 1e-6) {
+                const cross = new THREE.Vector3().crossVectors(v0, v1).dot(axisVec);
+                const dot = v0.dot(v1);
+                dAngle = Math.atan2(cross, dot);
+              }
+            }
+            if (dAngle === 0) {
+              const startAng = Math.atan2(gs.startScreenPos.y - (cyScreen + rect.top), gs.startScreenPos.x - (cxScreen + rect.left));
+              const curAng = Math.atan2(event.clientY - (cyScreen + rect.top), event.clientX - (cxScreen + rect.left));
+              dAngle = curAng - startAng;
+            }
+          }
+
+          const isSnap = event.shiftKey || gridSnapEnabled;
+
+          const applyRotationAngle = (startAngle: number, delta: number, isApplied: boolean) => {
+            if (!isApplied) return startAngle;
+            const newAng = startAngle + delta;
+            return isSnap ? snapAngleToPresets(newAng) : newAng;
+          };
+
           if (selectedLightId) {
             const start = gs.startTransforms[selectedLightId];
             if (start) {
+              const r = [...start.rotation] as [number,number,number];
+              const rx = applyRotationAngle(r[0], dAngle, rotAxis === 'X');
+              const ry = applyRotationAngle(r[1], dAngle, rotAxis === 'Y');
+              const rz = applyRotationAngle(r[2], dAngle, rotAxis === 'Z' || rotAxis === 'VIEW');
               useStore.getState().updateLight(selectedLightId, {
                 transform: {
                   ...start,
-                  position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  rotation: [rx, ry, rz]
                 }
               });
             }
@@ -3159,10 +3456,14 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             const camId = selectedCameraId;
             const start = gs.startTransforms[camId];
             if (start) {
+              const r = [...start.rotation] as [number,number,number];
+              const rx = applyRotationAngle(r[0], dAngle, rotAxis === 'X');
+              const ry = applyRotationAngle(r[1], dAngle, rotAxis === 'Y');
+              const rz = applyRotationAngle(r[2], dAngle, rotAxis === 'Z' || rotAxis === 'VIEW');
               useStore.getState().updateCamera(camId, {
                 transform: {
                   ...start,
-                  position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  rotation: [rx, ry, rz]
                 }
               });
             }
@@ -3170,68 +3471,91 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             updateObjects(selectedObjectIds, (id) => {
               const start = gs.startTransforms[id];
               if (!start) return {};
+              const r = [...start.rotation] as [number,number,number];
+              const rx = applyRotationAngle(r[0], dAngle, rotAxis === 'X');
+              const ry = applyRotationAngle(r[1], dAngle, rotAxis === 'Y');
+              const rz = applyRotationAngle(r[2], dAngle, rotAxis === 'Z' || rotAxis === 'VIEW');
               return {
                 transform: {
                   ...start,
-                  position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  rotation: [rx, ry, rz]
                 }
               };
             });
           }
-        } else {
-          const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
-          const cht = gs.dragHandleType;
-          const cai = gs.dragAnchorIdx;
-          if (curSelObj?.type === 'SHAPE' && (cht === 'bezierOut' || cht === 'bezierIn') && cai !== undefined) {
-            const side = cht === 'bezierOut' ? 'out' : 'in';
-            const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? [0,0,0];
-            const newRel: V3 = [startRel[0]+mov.x, startRel[1]+mov.y, startRel[2]+mov.z];
-            const breakIt = event.altKey;
-            useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
+        } else if (isScaleAction) {
+          const scaleAxis = ax.startsWith('SCALE_') ? ax.replace('SCALE_', '') : ax;
+          let scaleX = 1, scaleY = 1, scaleZ = 1;
+
+          if (scaleAxis === 'UNIFORM' || scaleAxis === 'FREE') {
+            const startDist = Math.sqrt((gs.startScreenPos.x - (cxScreen + rect.left))**2 + (gs.startScreenPos.y - (cyScreen + rect.top))**2);
+            const curDist = Math.sqrt((event.clientX - (cxScreen + rect.left))**2 + (event.clientY - (cyScreen + rect.top))**2);
+            const factor = startDist > 0 ? curDist / startDist : 1;
+            scaleX = scaleY = scaleZ = Math.max(0.01, factor);
           } else {
-            updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
-              index:parseInt(idx), offset:[so[0]+mov.x,so[1]+mov.y,so[2]+mov.z] as [number,number,number]
-            })));
+            const axisVec = scaleAxis === 'X' ? new THREE.Vector3(1,0,0) : scaleAxis === 'Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+            const tipProj = startWorldPos.clone().add(axisVec).project(camera);
+            const tipX = (tipProj.x * 0.5 + 0.5) * rect.width;
+            const tipY = (-tipProj.y * 0.5 + 0.5) * rect.height;
+            const screenDir = new THREE.Vector2(tipX - cxScreen, tipY - cyScreen);
+            const screenLen = screenDir.length();
+            let factor = 1;
+            if (screenLen > 1) {
+              screenDir.normalize();
+              const projDrag = dx * screenDir.x + dy * screenDir.y;
+              factor = Math.max(0.01, 1 + projDrag * 0.01);
+            } else {
+              factor = Math.max(0.01, 1 + (dx - dy) * 0.005);
+            }
+            scaleX = (scaleAxis === 'X' || scaleAxis === 'XY' || scaleAxis === 'XZ') ? factor : 1;
+            scaleY = (scaleAxis === 'Y' || scaleAxis === 'XY' || scaleAxis === 'YZ') ? factor : 1;
+            scaleZ = (scaleAxis === 'Z' || scaleAxis === 'XZ' || scaleAxis === 'YZ') ? factor : 1;
           }
-        }
-      } else if (gs.activeAxis!=='FREE' && transformMode==='translate') {
-        let move = new THREE.Vector3();
-        if (['XY', 'YZ', 'XZ'].includes(gs.activeAxis)) {
-          const ax = gs.activeAxis;
-          const normal = ax === 'XY' ? new THREE.Vector3(0,0,1) : ax === 'YZ' ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
-          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, new THREE.Vector3(...gs.startPos));
-          const raycaster = new THREE.Raycaster();
-          const rect = rendererRef.current!.domElement.getBoundingClientRect();
-          const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
-          const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
-          raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
-          const startHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
-          const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-          const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-          raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
-          const curHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
-          if (startHit && curHit) move = curHit.sub(startHit);
-        } else {
-          const axisVec = gs.activeAxis==='X' ? new THREE.Vector3(1,0,0) : gs.activeAxis==='Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
-          const startPos = new THREE.Vector3(...gs.startPos);
-          
-          // Build a plane passing through startPos containing axisVec and facing camera as much as possible
-          const camDir = new THREE.Vector3();
-          camera.getWorldDirection(camDir);
-          
-          let planeNormal = new THREE.Vector3().crossVectors(camDir, axisVec).cross(axisVec);
-          if (planeNormal.lengthSq() < 1e-5) {
-            planeNormal = new THREE.Vector3().crossVectors(camera.up, axisVec);
-            if (planeNormal.lengthSq() < 1e-5) {
-              planeNormal = new THREE.Vector3(1,0,0);
+
+          if (editMode==='OBJECT') {
+            updateObjects(selectedObjectIds, (id) => {
+              const start = gs.startTransforms[id];
+              if (!start) return {};
+              const s = [...start.scale] as [number,number,number];
+              return {
+                transform: {
+                  ...start,
+                  scale: [
+                    Math.max(0.01, s[0] * scaleX),
+                    Math.max(0.01, s[1] * scaleY),
+                    Math.max(0.01, s[2] * scaleZ)
+                  ]
+                }
+              };
+            });
+          } else {
+            const mesh = primitivesGroupRef.current?.children.find((ch:any)=>ch.userData.id===selectedObjectId) as THREE.Mesh|undefined;
+            if (mesh) {
+              const pos = mesh.geometry.getAttribute('position');
+              const centroid = new THREE.Vector3();
+              const idxs = Object.keys(gs.startVertexOffsets).map(Number);
+              idxs.forEach(idx=>centroid.add(new THREE.Vector3(pos.getX(idx),pos.getY(idx),pos.getZ(idx))));
+              if (idxs.length) centroid.divideScalar(idxs.length);
+              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>{
+                const base = new THREE.Vector3(pos.getX(Number(idx)),pos.getY(Number(idx)),pos.getZ(Number(idx)));
+                const s = so as [number,number,number];
+                const fromCenter = new THREE.Vector3().subVectors(base.clone().add(new THREE.Vector3(...s)),centroid);
+                const scaledFromCenter = fromCenter.clone();
+                scaledFromCenter.x *= scaleX;
+                scaledFromCenter.y *= scaleY;
+                scaledFromCenter.z *= scaleZ;
+                const newWorld = centroid.clone().add(scaledFromCenter);
+                return {index:Number(idx), offset:[newWorld.x-base.x,newWorld.y-base.y,newWorld.z-base.z] as [number,number,number]};
+              }));
             }
           }
-          planeNormal.normalize();
+        } else if (gs.activeAxis==='FREE') {
+          // Raycast onto camera-facing plane for smooth screen-plane translation
+          const camDir = new THREE.Vector3();
+          camera.getWorldDirection(camDir);
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, startWorldPos);
           
-          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, startPos);
           const raycaster = new THREE.Raycaster();
-          const rect = rendererRef.current!.domElement.getBoundingClientRect();
-          
           const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
           const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
           raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
@@ -3244,163 +3568,186 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const curHit = new THREE.Vector3();
           const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
           
+          let mov = new THREE.Vector3();
           if (hasStartHit && hasCurHit) {
-            const rawDelta = curHit.sub(startHit);
-            const distOnAxis = rawDelta.dot(axisVec);
-            move.copy(axisVec).multiplyScalar(distOnAxis);
+            mov = curHit.sub(startHit);
+          } else {
+            const dist = camera.position.distanceTo(startWorldPos);
+            const ms = 0.0025 * Math.max(dist, 1);
+            const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+            const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+            mov.addScaledVector(right, dx * ms).addScaledVector(up, -dy * ms);
           }
-        }
-
-        if (editMode==='OBJECT') {
-          if (selectedLightId) {
-            const start = gs.startTransforms[selectedLightId];
-            if (start) {
-              useStore.getState().updateLight(selectedLightId, {
-                transform: {
-                  ...start,
-                  position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
-                }
-              });
-            }
-          } else if (selectedCameraId) {
-            const camId = selectedCameraId;
-            const start = gs.startTransforms[camId];
-            if (start) {
-              useStore.getState().updateCamera(camId, {
-                transform: {
-                  ...start,
-                  position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
-                }
+          
+          if (editMode === 'OBJECT') {
+            if (selectedLightId) {
+              const start = gs.startTransforms[selectedLightId];
+              if (start) {
+                useStore.getState().updateLight(selectedLightId, {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  }
+                });
+              }
+            } else if (selectedCameraId) {
+              const camId = selectedCameraId;
+              const start = gs.startTransforms[camId];
+              if (start) {
+                useStore.getState().updateCamera(camId, {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  }
+                });
+              }
+            } else {
+              updateObjects(selectedObjectIds, (id) => {
+                const start = gs.startTransforms[id];
+                if (!start) return {};
+                return {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + mov.x, start.position[1] + mov.y, start.position[2] + mov.z]
+                  }
+                };
               });
             }
           } else {
-            updateObjects(selectedObjectIds, (id) => {
-              const start = gs.startTransforms[id];
-              if (!start) return {};
-              return {
-                transform: {
-                  ...start,
-                  position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
-                }
-              };
-            });
-          }
-        } else {
-          const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
-          const cht = gs.dragHandleType;
-          const cai = gs.dragAnchorIdx;
-          if (curSelObj?.type === 'SHAPE' && (cht === 'bezierOut' || cht === 'bezierIn') && cai !== undefined) {
-            // Dragging a bezier handle (in/out tangent)
-            const anchor = curSelObj.vertices[cai];
-            const hCur = curSelObj.bezierHandles?.[cai];
-            if (hCur && anchor) {
+            const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+            const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+            let movLocal = mov.clone();
+            if (mesh) {
+              const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
+              movLocal.applyMatrix4(invMat);
+            }
+            const cht = gs.dragHandleType;
+            const cai = gs.dragAnchorIdx;
+            if (curSelObj?.type === 'SHAPE' && (cht === 'bezierOut' || cht === 'bezierIn') && cai !== undefined) {
               const side = cht === 'bezierOut' ? 'out' : 'in';
               const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? [0,0,0];
-              const newRel: V3 = [startRel[0]+move.x, startRel[1]+move.y, startRel[2]+move.z];
-              const breakIt = event.altKey; // Alt = break symmetry
+              const newRel: V3 = [startRel[0] + movLocal.x, startRel[1] + movLocal.y, startRel[2] + movLocal.z];
+              const breakIt = event.altKey;
               useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
+            } else {
+              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
+                index:parseInt(idx), offset:[so[0] + movLocal.x, so[1] + movLocal.y, so[2] + movLocal.z] as [number,number,number]
+              })));
+            }
+          }
+        } else {
+          let move = new THREE.Vector3();
+          if (['XY', 'YZ', 'XZ'].includes(gs.activeAxis)) {
+            const ax = gs.activeAxis;
+            const normal = ax === 'XY' ? new THREE.Vector3(0,0,1) : ax === 'YZ' ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, new THREE.Vector3(...gs.startPos));
+            const raycaster = new THREE.Raycaster();
+            const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
+            const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
+            const startHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+            const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
+            const curHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
+            if (startHit && curHit) move = curHit.sub(startHit);
+          } else {
+            const axisVec = gs.activeAxis==='X' ? new THREE.Vector3(1,0,0) : gs.activeAxis==='Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+            const startPos = new THREE.Vector3(...gs.startPos);
+            
+            const camDir = new THREE.Vector3();
+            camera.getWorldDirection(camDir);
+            
+            let planeNormal = new THREE.Vector3().crossVectors(camDir, axisVec).cross(axisVec);
+            if (planeNormal.lengthSq() < 1e-5) {
+              planeNormal = new THREE.Vector3().crossVectors(camera.up, axisVec);
+              if (planeNormal.lengthSq() < 1e-5) {
+                planeNormal = new THREE.Vector3(1,0,0);
+              }
+            }
+            planeNormal.normalize();
+            
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, startPos);
+            const raycaster = new THREE.Raycaster();
+            
+            const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
+            const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
+            const startHit = new THREE.Vector3();
+            const hasStartHit = raycaster.ray.intersectPlane(plane, startHit);
+            
+            const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
+            const curHit = new THREE.Vector3();
+            const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
+            
+            if (hasStartHit && hasCurHit) {
+              const rawDelta = curHit.sub(startHit);
+              const distOnAxis = rawDelta.dot(axisVec);
+              move.copy(axisVec).multiplyScalar(distOnAxis);
+            }
+          }
+
+          if (editMode==='OBJECT') {
+            if (selectedLightId) {
+              const start = gs.startTransforms[selectedLightId];
+              if (start) {
+                useStore.getState().updateLight(selectedLightId, {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
+                  }
+                });
+              }
+            } else if (selectedCameraId) {
+              const camId = selectedCameraId;
+              const start = gs.startTransforms[camId];
+              if (start) {
+                useStore.getState().updateCamera(camId, {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
+                  }
+                });
+              }
+            } else {
+              updateObjects(selectedObjectIds, (id) => {
+                const start = gs.startTransforms[id];
+                if (!start) return {};
+                return {
+                  transform: {
+                    ...start,
+                    position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
+                  }
+                };
+              });
             }
           } else {
-            updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
-              index:parseInt(idx), offset:[so[0]+move.x,so[1]+move.y,so[2]+move.z] as [number,number,number]
-            })));
-          }
-        }
-      } else if (gs.activeAxis!=='FREE' && transformMode==='rotate') {
-        const angle=(dx+dy)*0.01;
-        if (selectedLightId) {
-          const start = gs.startTransforms[selectedLightId];
-          if (start) {
-            const r = [...start.rotation] as [number,number,number];
-            useStore.getState().updateLight(selectedLightId, {
-              transform: {
-                ...start,
-                rotation: [
-                  r[0] + (gs.activeAxis === 'X' ? angle : 0),
-                  r[1] + (gs.activeAxis === 'Y' ? angle : 0),
-                  r[2] + (gs.activeAxis === 'Z' ? angle : 0)
-                ]
+            const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+            const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+            let moveLocal = move.clone();
+            if (mesh) {
+              const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
+              moveLocal.applyMatrix4(invMat);
+            }
+            const cht = gs.dragHandleType;
+            const cai = gs.dragAnchorIdx;
+            if (curSelObj?.type === 'SHAPE' && (cht === 'bezierOut' || cht === 'bezierIn') && cai !== undefined) {
+              const anchor = curSelObj.vertices[cai];
+              const hCur = curSelObj.bezierHandles?.[cai];
+              if (hCur && anchor) {
+                const side = cht === 'bezierOut' ? 'out' : 'in';
+                const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? [0,0,0];
+                const newRel: V3 = [startRel[0] + moveLocal.x, startRel[1] + moveLocal.y, startRel[2] + moveLocal.z];
+                const breakIt = event.altKey;
+                useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
               }
-            });
-          }
-        } else if (selectedCameraId) {
-          const camId = selectedCameraId;
-          const start = gs.startTransforms[camId];
-          if (start) {
-            const r = [...start.rotation] as [number,number,number];
-            useStore.getState().updateCamera(camId, {
-              transform: {
-                ...start,
-                rotation: [
-                  r[0] + (gs.activeAxis === 'X' ? angle : 0),
-                  r[1] + (gs.activeAxis === 'Y' ? angle : 0),
-                  r[2] + (gs.activeAxis === 'Z' ? angle : 0)
-                ]
-              }
-            });
-          }
-        } else {
-          updateObjects(selectedObjectIds, (id) => {
-            const start = gs.startTransforms[id];
-            if (!start) return {};
-            const r = [...start.rotation] as [number,number,number];
-            return {
-              transform: {
-                ...start,
-                rotation: [
-                  r[0] + (gs.activeAxis === 'X' ? angle : 0),
-                  r[1] + (gs.activeAxis === 'Y' ? angle : 0),
-                  r[2] + (gs.activeAxis === 'Z' ? angle : 0)
-                ]
-              }
-            };
-          });
-        }
-      } else if (gs.activeAxis && transformMode==='scale') {
-        const delta=1+(dx-dy)*0.005;
-        const ax = gs.activeAxis;
-        const scaleX = ax === 'X' || ax === 'XY' || ax === 'XZ' || ax === 'FREE' ? delta : 1;
-        const scaleY = ax === 'Y' || ax === 'XY' || ax === 'YZ' || ax === 'FREE' ? delta : 1;
-        const scaleZ = ax === 'Z' || ax === 'XZ' || ax === 'YZ' || ax === 'FREE' ? delta : 1;
-
-        if (editMode==='OBJECT') {
-          // Scale the whole object
-          updateObjects(selectedObjectIds, (id) => {
-            const start = gs.startTransforms[id];
-            if (!start) return {};
-            const s = [...start.scale] as [number,number,number];
-            return {
-              transform: {
-                ...start,
-                scale: [
-                  Math.max(0.01, s[0] * scaleX),
-                  Math.max(0.01, s[1] * scaleY),
-                  Math.max(0.01, s[2] * scaleZ)
-                ]
-              }
-            };
-          });
-        } else {
-          // Scale selected vertices around their centroid (local space)
-          const mesh=primitivesGroupRef.current?.children.find((ch:any)=>ch.userData.id===selectedObjectId) as THREE.Mesh|undefined;
-          if (mesh) {
-            const pos=mesh.geometry.getAttribute('position');
-            const centroid=new THREE.Vector3();
-            const idxs=Object.keys(gs.startVertexOffsets).map(Number);
-            idxs.forEach(idx=>centroid.add(new THREE.Vector3(pos.getX(idx),pos.getY(idx),pos.getZ(idx))));
-            if (idxs.length) centroid.divideScalar(idxs.length);
-            updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>{
-              const base=new THREE.Vector3(pos.getX(Number(idx)),pos.getY(Number(idx)),pos.getZ(Number(idx)));
-              const s = so as [number,number,number];
-              const fromCenter=new THREE.Vector3().subVectors(base.clone().add(new THREE.Vector3(...s)),centroid);
-              // Scale only along the active axes
-              const scaledFromCenter=fromCenter.clone();
-              scaledFromCenter.x *= scaleX;
-              scaledFromCenter.y *= scaleY;
-              scaledFromCenter.z *= scaleZ;
-              const newWorld=centroid.clone().add(scaledFromCenter);
-              return {index:Number(idx), offset:[newWorld.x-base.x,newWorld.y-base.y,newWorld.z-base.z] as [number,number,number]};
-            }));
+            } else {
+              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
+                index:parseInt(idx), offset:[so[0] + moveLocal.x, so[1] + moveLocal.y, so[2] + moveLocal.z] as [number,number,number]
+              })));
+            }
           }
         }
       }
@@ -4053,6 +4400,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
       if (!selectedObjectId && !selectedLightId && !selectedCameraId) return;
 
+      const selObj = selectedObjectId ? projectRef.current.objects.find(o=>o.id===selectedObjectId) : null;
       let gizmoPos = new THREE.Vector3();
       
       if (selectedLightId) {
@@ -4064,7 +4412,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (!c || !cameraRef.current || !renderer) return;
         gizmoPos.fromArray(c.transform.position);
       } else if (selectedObjectId) {
-        const selObj=projectRef.current.objects.find(o=>o.id===selectedObjectId);
         if (!selObj||!cameraRef.current||!renderer) return;
 
         const mesh = primitivesGroupRef.current.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
@@ -4110,57 +4457,66 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
       }
 
-      const projected=gizmoPos.clone().project(cameraRef.current);
-      if (projected.z>1) return;
-      const cx=(projected.x*0.5+0.5)*w, cy=(-projected.y*0.5+0.5)*h;
-      const AXIS_LEN=Math.min(w,h)*0.12;
-      const gs=gizmoStateRef.current;
+      const layout = computeGizmoLayout(gizmoPos, cameraRef.current, w, h, transformSpace, selObj);
+      if (!layout) return;
+      const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
+      const gs = gizmoStateRef.current;
 
-      const dirs: Record<string, {nx:number, ny:number, color:string}> = {};
-
-      for (const {axis,color} of [{axis:'X' as const,color:'#ff3333'},{axis:'Y' as const,color:'#33ff33'},{axis:'Z' as const,color:'#4488ff'}]) {
-        const dir=axis==='X'?new THREE.Vector3(1,0,0):axis==='Y'?new THREE.Vector3(0,1,0):new THREE.Vector3(0,0,1);
-        const pe=gizmoPos.clone().add(dir).project(cameraRef.current);
-        const ex=(pe.x*0.5+0.5)*w, ey=(-pe.y*0.5+0.5)*h;
-        const sdx=ex-cx, sdy=ey-cy, len=Math.sqrt(sdx*sdx+sdy*sdy);
-        const nx=len>0?(sdx/len)*AXIS_LEN:0, ny=len>0?(sdy/len)*AXIS_LEN:0;
-        dirs[axis] = { nx, ny, color };
-        
-        const tipX=cx+nx, tipY=cy+ny;
-        const isHov=gs.hoveredAxis===axis||gs.activeAxis===axis;
+      // Draw Axis Lines & Arrows
+      for (const axis of ['X', 'Y', 'Z']) {
+        const d = dirs[axis];
+        if (!d) continue;
+        const tipX = cx + d.nx, tipY = cy + d.ny;
+        const isHov = gs.hoveredAxis === axis || gs.activeAxis === axis;
         ctx.save();
-        ctx.globalAlpha=isHov?1:0.9; ctx.strokeStyle=color; ctx.lineWidth=isHov?4:2.5;
-        ctx.lineCap='round'; ctx.shadowColor=color; ctx.shadowBlur=isHov?8:3;
-        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(tipX,tipY); ctx.stroke();
-        const angle=Math.atan2(ny,nx), al=10;
-        ctx.beginPath(); ctx.moveTo(tipX,tipY);
-        ctx.lineTo(tipX-al*Math.cos(angle-0.4),tipY-al*Math.sin(angle-0.4));
-        ctx.lineTo(tipX-al*Math.cos(angle+0.4),tipY-al*Math.sin(angle+0.4));
-        ctx.closePath(); ctx.fillStyle=color; ctx.fill();
-        ctx.shadowBlur=0; ctx.font='bold 11px monospace'; ctx.fillStyle=color;
-        ctx.fillText(axis,tipX+5,tipY-5);
+        ctx.globalAlpha = isHov ? 1 : 0.9;
+        ctx.strokeStyle = d.color;
+        ctx.lineWidth = isHov ? 2.5 : 1.4;
+        ctx.lineCap = 'round';
+        ctx.shadowColor = d.color;
+        ctx.shadowBlur = isHov ? 6 : 2;
+
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(tipX, tipY);
+        ctx.stroke();
+
+        const angle = Math.atan2(d.ny, d.nx);
+        const al = 8;
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - al * Math.cos(angle - 0.4), tipY - al * Math.sin(angle - 0.4));
+        ctx.lineTo(tipX - al * Math.cos(angle + 0.4), tipY - al * Math.sin(angle + 0.4));
+        ctx.closePath();
+        ctx.fillStyle = d.color;
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+        ctx.font = 'bold 11px monospace';
+        ctx.fillStyle = d.color;
+        ctx.fillText(axis, tipX + 5, tipY - 5);
         ctx.restore();
       }
 
-      // Draw 2D planes
-      if (transformMode === 'translate' || transformMode === 'scale') {
-        const drawPlane = (a1: string, a2: string, planeName: 'XY'|'YZ'|'XZ', color: string) => {
+      // Draw 2D translation planes
+      if (transformMode === 'translate' || transformMode === 'universal' || transformMode === 'scale') {
+        const drawPlane = (a1: string, a2: string, planeName: string, color: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return;
           const isHov = gs.hoveredAxis === planeName || gs.activeAxis === planeName;
           ctx.save();
-          ctx.globalAlpha = isHov ? 0.6 : 0.2;
+          ctx.globalAlpha = isHov ? 0.6 : 0.25;
           ctx.fillStyle = color;
           ctx.beginPath();
-          ctx.moveTo(cx + d1.nx*0.15, cy + d1.ny*0.15);
-          ctx.lineTo(cx + d1.nx*0.4, cy + d1.ny*0.4);
-          ctx.lineTo(cx + (d1.nx + d2.nx)*0.4, cy + (d1.ny + d2.ny)*0.4);
-          ctx.lineTo(cx + d2.nx*0.4, cy + d2.ny*0.4);
-          ctx.lineTo(cx + d2.nx*0.15, cy + d2.ny*0.15);
+          ctx.moveTo(cx + d1.nx * 0.15, cy + d1.ny * 0.15);
+          ctx.lineTo(cx + d1.nx * 0.4, cy + d1.ny * 0.4);
+          ctx.lineTo(cx + (d1.nx + d2.nx) * 0.4, cy + (d1.ny + d2.ny) * 0.4);
+          ctx.lineTo(cx + d2.nx * 0.4, cy + d2.ny * 0.4);
+          ctx.lineTo(cx + d2.nx * 0.15, cy + d2.ny * 0.15);
           ctx.closePath();
           ctx.fill();
           if (isHov) {
-            ctx.strokeStyle = '#fff';
+            ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = 1;
             ctx.stroke();
           }
@@ -4170,12 +4526,90 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         drawPlane('X', 'Y', 'XY', '#ffff33');
         drawPlane('Y', 'Z', 'YZ', '#33ffff');
         drawPlane('X', 'Z', 'XZ', '#ff33ff');
-
-        // Draw center FREE
-        const isFreeHov = gs.hoveredAxis === 'FREE' || gs.activeAxis === 'FREE';
-        ctx.save(); ctx.beginPath(); ctx.arc(cx,cy,isFreeHov?6:4,0,Math.PI*2);
-        ctx.fillStyle=isFreeHov?'#fff':'#ccc'; ctx.shadowColor='#fff'; ctx.shadowBlur=isFreeHov?8:4; ctx.fill(); ctx.restore();
       }
+
+      // Draw Rotation Arcs (camera-facing 3D arcs)
+      if (transformMode === 'rotate' || transformMode === 'universal') {
+        for (const rotAxis of ['Z', 'X', 'Y']) {
+          const arc = rotArcs[rotAxis];
+          if (!arc || !arc.pts.length) continue;
+          const isHov = gs.hoveredAxis === `ROT_${rotAxis}` || gs.activeAxis === `ROT_${rotAxis}`;
+
+          ctx.save();
+          ctx.globalAlpha = isHov ? 1 : 0.85;
+          ctx.strokeStyle = arc.arcColor;
+          ctx.lineWidth = isHov ? 2.2 : 1.3;
+          ctx.shadowColor = arc.arcColor;
+          ctx.shadowBlur = isHov ? 8 : 2;
+
+          ctx.beginPath();
+          ctx.moveTo(arc.pts[0].x, arc.pts[0].y);
+          for (let i = 1; i < arc.pts.length; i++) {
+            ctx.lineTo(arc.pts[i].x, arc.pts[i].y);
+          }
+          ctx.stroke();
+
+          // Draw spherical node handle on the frontmost point of the arc
+          const nodeR = isHov ? 6.5 : 4.5;
+          ctx.fillStyle = arc.sphereColor;
+          ctx.shadowColor = arc.sphereColor;
+          ctx.shadowBlur = isHov ? 10 : 4;
+          ctx.beginPath();
+          ctx.arc(arc.handlePt.x, arc.handlePt.y, nodeR, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1.0;
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      }
+
+      // Draw Scale Cubes
+      if (transformMode === 'scale' || transformMode === 'universal') {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const scaleName = `SCALE_${axis}`;
+          const isHov = gs.hoveredAxis === scaleName || gs.activeAxis === scaleName || (transformMode === 'scale' && (gs.hoveredAxis === axis || gs.activeAxis === axis));
+          const cubeX = cx + d.nx * 0.85;
+          const cubeY = cy + d.ny * 0.85;
+          const sz = isHov ? 8 : 5.5;
+          ctx.save();
+          ctx.fillStyle = d.color;
+          ctx.shadowColor = d.color;
+          ctx.shadowBlur = isHov ? 6 : 2;
+          ctx.fillRect(cubeX - sz/2, cubeY - sz/2, sz, sz);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(cubeX - sz/2, cubeY - sz/2, sz, sz);
+          ctx.restore();
+        }
+      }
+
+      // Draw Outer Trackball Ring
+      const OUTER_R = AXIS_LEN * 1.15;
+      const isOuterHov = gs.hoveredAxis === 'ROT_VIEW' || gs.activeAxis === 'ROT_VIEW' || gs.hoveredAxis === 'SCALE_UNIFORM' || gs.activeAxis === 'SCALE_UNIFORM';
+      ctx.save();
+      ctx.globalAlpha = isOuterHov ? 0.9 : 0.35;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = isOuterHov ? 1.8 : 0.9;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, OUTER_R, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Draw center FREE handle
+      const isFreeHov = gs.hoveredAxis === 'FREE' || gs.activeAxis === 'FREE';
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, isFreeHov ? 7 : 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = isFreeHov ? '#ffffff' : '#dddddd';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = isFreeHov ? 10 : 3;
+      ctx.fill();
+      ctx.restore();
     };
 
     let rafId: number;
