@@ -1777,13 +1777,18 @@ export function roundAnglesMesh(
   // Verify overall mesh orientation: sum dot products of face normals with (centroid - meshCentroid)
   let totalOrient = 0;
   origFaces.forEach(f => {
-    const v0 = uniqueVerts[f[0]];
-    const v1 = uniqueVerts[f[1]];
-    const v2 = uniqueVerts[f[2]];
-    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    const norm = new THREE.Vector3();
+    const len = f.length;
+    for (let i = 0; i < len; i++) {
+      const pCurr = uniqueVerts[f[i]];
+      const pNext = uniqueVerts[f[(i + 1) % len]];
+      norm.x += (pCurr.y - pNext.y) * (pCurr.z + pNext.z);
+      norm.y += (pCurr.z - pNext.z) * (pCurr.x + pNext.x);
+      norm.z += (pCurr.x - pNext.x) * (pCurr.y + pNext.y);
+    }
     const centroid = new THREE.Vector3();
     f.forEach(idx => centroid.add(uniqueVerts[idx]));
-    centroid.divideScalar(f.length);
+    centroid.divideScalar(len);
     totalOrient += norm.dot(centroid.clone().sub(meshCentroid));
   });
 
@@ -1791,20 +1796,22 @@ export function roundAnglesMesh(
     origFaces.forEach(f => f.reverse());
   }
 
-  // Compute face normals and face centroids
+  // Compute face normals and face centroids using Newell's method
   const faceNormals: THREE.Vector3[] = [];
   const faceCentroids: THREE.Vector3[] = [];
   origFaces.forEach(f => {
-    const v0 = uniqueVerts[f[0]];
-    const v1 = uniqueVerts[f[1]];
-    const v2 = uniqueVerts[f[2]];
-    let norm = new THREE.Vector3().crossVectors(
-      v1.clone().sub(v0),
-      v2.clone().sub(v0)
-    );
+    const norm = new THREE.Vector3();
+    const len = f.length;
+    for (let i = 0; i < len; i++) {
+      const pCurr = uniqueVerts[f[i]];
+      const pNext = uniqueVerts[f[(i + 1) % len]];
+      norm.x += (pCurr.y - pNext.y) * (pCurr.z + pNext.z);
+      norm.y += (pCurr.z - pNext.z) * (pCurr.x + pNext.x);
+      norm.z += (pCurr.x - pNext.x) * (pCurr.y + pNext.y);
+    }
     const centroid = new THREE.Vector3();
     f.forEach(idx => centroid.add(uniqueVerts[idx]));
-    centroid.divideScalar(f.length);
+    centroid.divideScalar(len);
     faceCentroids.push(centroid);
 
     if (norm.lengthSq() > 1e-6) norm.normalize(); else norm.set(0, 1, 0);
@@ -1863,9 +1870,12 @@ export function roundAnglesMesh(
     }
   });
 
-  if (sharpEdges.size === 0) {
-    return { vertices: inputVerts, faces: inputFaces };
-  }
+  // Count sharp edges touching each vertex
+  const vertSharpCount = new Map<number, number>();
+  sharpEdges.forEach(se => {
+    vertSharpCount.set(se.v1, (vertSharpCount.get(se.v1) || 0) + 1);
+    vertSharpCount.set(se.v2, (vertSharpCount.get(se.v2) || 0) + 1);
+  });
 
   // Output structures
   const outVerts: V3[] = [];
@@ -1904,8 +1914,10 @@ export function roundAnglesMesh(
       const vCurr = f[i];
       const vNext = f[(i + 1) % len];
 
-      const isPrevSharp = sharpEdges.has(getEdgeKey(vPrev, vCurr));
-      const isNextSharp = sharpEdges.has(getEdgeKey(vCurr, vNext));
+      const prevKey = getEdgeKey(vPrev, vCurr);
+      const nextKey = getEdgeKey(vCurr, vNext);
+      const isPrevSharp = sharpEdges.has(prevKey);
+      const isNextSharp = sharpEdges.has(nextKey);
 
       const P = uniqueVerts[vCurr].clone();
 
@@ -1932,15 +1944,8 @@ export function roundAnglesMesh(
           disp.multiplyScalar(dist);
         } else if (isPrevSharp) {
           disp = inPrev.clone().multiplyScalar(rad);
-        } else {
+        } else if (isNextSharp) {
           disp = inNext.clone().multiplyScalar(rad);
-        }
-
-        // Clamp shift so inset never exceeds 40% distance to centroid
-        const distToCentroid = P.distanceTo(centroid);
-        const maxShift = Math.max(1e-4, distToCentroid * 0.4);
-        if (disp.length() > maxShift) {
-          disp.setLength(maxShift);
         }
 
         const insetP = P.clone().add(disp);
@@ -1969,54 +1974,56 @@ export function roundAnglesMesh(
     if (i1_f1 === -1 || i2_f1 === -1 || i1_f2 === -1 || i2_f2 === -1) return;
 
     const p1_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i1_f1]]);
-    const p2_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i2_f1]]);
-
     const p1_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i1_f2]]);
-    const p2_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i2_f2]]);
-
     const n1 = faceNormals[f1];
     const n2 = f1 !== f2 ? faceNormals[f2] : n1;
-    const midNormal = new THREE.Vector3().addVectors(n1, n2);
-    if (midNormal.lengthSq() > 1e-6) midNormal.normalize(); else midNormal.copy(n1);
 
-    const arcRows: [number, number][] = [];
-    arcRows.push([faceInsetVerts[f1][i1_f1], faceInsetVerts[f1][i2_f1]]);
-
+    const v1Arc: number[] = [faceInsetVerts[f1][i1_f1]];
     for (let k = 1; k < segs; k++) {
       const t = k / segs;
       const nT = new THREE.Vector3().lerpVectors(n1, n2, t);
-      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(midNormal);
-
-      const v1_k = p1_f1.clone().lerp(p1_f2, t);
-      const v2_k = p2_f1.clone().lerp(p2_f2, t);
-
+      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(n1);
+      const pos = p1_f1.clone().lerp(p1_f2, t);
       if (segs > 1 && angle > 0.01) {
         const bulge = Math.sin(t * Math.PI) * rad * Math.tan(angle / 4);
-        v1_k.addScaledVector(nT, bulge);
-        v2_k.addScaledVector(nT, bulge);
+        pos.addScaledVector(nT, bulge);
       }
-
-      const idx1 = addVertex(v1_k);
-      const idx2 = addVertex(v2_k);
-      arcRows.push([idx1, idx2]);
+      v1Arc.push(addVertex(pos));
     }
+    v1Arc.push(faceInsetVerts[f2][i1_f2]);
 
-    arcRows.push([faceInsetVerts[f2][i1_f2], faceInsetVerts[f2][i2_f2]]);
+    const p2_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i2_f1]]);
+    const p2_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i2_f2]]);
 
-    // Save directed arcs for v1 (from f1 to f2) and v2 (from f1 to f2)
-    const v1ArcF1toF2 = arcRows.map(row => row[0]);
-    const v2ArcF1toF2 = arcRows.map(row => row[1]);
+    const v2Arc: number[] = [faceInsetVerts[f1][i2_f1]];
+    for (let k = 1; k < segs; k++) {
+      const t = k / segs;
+      const nT = new THREE.Vector3().lerpVectors(n1, n2, t);
+      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(n1);
+      const pos = p2_f1.clone().lerp(p2_f2, t);
+      if (segs > 1 && angle > 0.01) {
+        const bulge = Math.sin(t * Math.PI) * rad * Math.tan(angle / 4);
+        pos.addScaledVector(nT, bulge);
+      }
+      v2Arc.push(addVertex(pos));
+    }
+    v2Arc.push(faceInsetVerts[f2][i2_f2]);
 
-    arcMap.set(getArcKey(v1, f1, f2), v1ArcF1toF2);
-    arcMap.set(getArcKey(v1, f2, f1), [...v1ArcF1toF2].reverse());
+    // Save directed arcs for corner caps
+    arcMap.set(getArcKey(v1, f1, f2), v1Arc);
+    arcMap.set(getArcKey(v1, f2, f1), [...v1Arc].reverse());
+    arcMap.set(getArcKey(v2, f1, f2), v2Arc);
+    arcMap.set(getArcKey(v2, f2, f1), [...v2Arc].reverse());
 
-    arcMap.set(getArcKey(v2, f1, f2), v2ArcF1toF2);
-    arcMap.set(getArcKey(v2, f2, f1), [...v2ArcF1toF2].reverse());
+    const midNormal = new THREE.Vector3().addVectors(n1, n2);
+    if (midNormal.lengthSq() > 1e-6) midNormal.normalize(); else midNormal.copy(n1);
 
     // Create quad strips
     for (let k = 0; k < segs; k++) {
-      const [a1, a2] = arcRows[k];
-      const [b1, b2] = arcRows[k + 1];
+      const a1 = v1Arc[k];
+      const a2 = v2Arc[k];
+      const b1 = v1Arc[k + 1];
+      const b2 = v2Arc[k + 1];
       const quad = fixWinding([a1, a2, b2, b1], midNormal);
       outFaces.push({ indices: quad });
     }
@@ -2036,32 +2043,39 @@ export function roundAnglesMesh(
   });
 
   vertToFaces.forEach((fList, vIdx) => {
-    if (fList.length < 3) return;
+    const sharpCount = vertSharpCount.get(vIdx) || 0;
+    if (sharpCount < 3) return; // Only true corners with 3+ sharp edges get corner caps!
 
     // Outward vertex normal N_v
     const N_v = new THREE.Vector3();
     fList.forEach(fIdx => N_v.add(faceNormals[fIdx]));
     if (N_v.lengthSq() > 1e-6) N_v.normalize(); else N_v.set(0, 1, 0);
 
-    // Reference coordinate frame for radial sorting
-    const refTangent = Math.abs(N_v.y) < 0.9 ? new THREE.Vector3(0, 1, 0).cross(N_v).normalize() : new THREE.Vector3(1, 0, 0).cross(N_v).normalize();
-    const refBitangent = new THREE.Vector3().crossVectors(N_v, refTangent).normalize();
+    // Topological face walk around vIdx using shared edge adjacencies
+    const faceSet = new Set<number>(fList);
+    const sortedFaces: number[] = [];
+    let currF = fList[0];
 
-    const centerP = uniqueVerts[vIdx];
+    for (let step = 0; step < fList.length; step++) {
+      if (sortedFaces.includes(currF)) break;
+      sortedFaces.push(currF);
 
-    // Compute polar angle for each face touching vIdx
-    const faceAngles: { fIdx: number; angle: number }[] = fList.map(fIdx => {
-      const loc = origFaces[fIdx].indexOf(vIdx);
-      const insetIdx = faceInsetVerts[fIdx][loc];
-      const insetP = new THREE.Vector3(...outVerts[insetIdx]);
-      const dir = insetP.clone().sub(centerP);
-      const x = dir.dot(refTangent);
-      const y = dir.dot(refBitangent);
-      return { fIdx, angle: Math.atan2(y, x) };
-    });
+      const fIndices = origFaces[currF];
+      const loc = fIndices.indexOf(vIdx);
+      if (loc === -1) break;
 
-    faceAngles.sort((a, b) => a.angle - b.angle);
-    const sortedFaces = faceAngles.map(item => item.fIdx);
+      const len = fIndices.length;
+      const vNext = fIndices[(loc + 1) % len];
+      const edgeKey = getEdgeKey(vIdx, vNext);
+      const edgeRef = edgeMap.get(edgeKey);
+
+      if (!edgeRef) break;
+      const nextF = edgeRef.faces.find(item => item.fIdx !== currF && faceSet.has(item.fIdx))?.fIdx;
+      if (nextF === undefined || nextF === sortedFaces[0]) break;
+      currF = nextF;
+    }
+
+    if (sortedFaces.length < 3) return;
 
     const loop: number[] = [];
     const numFaces = sortedFaces.length;
@@ -2097,7 +2111,7 @@ export function roundAnglesMesh(
     });
     avgP.divideScalar(loop.length);
 
-    const cornerCenterP = avgP.clone().addScaledVector(N_v, rad * 0.35);
+    const cornerCenterP = avgP.clone().addScaledVector(N_v, rad * 0.3);
     const centerIdx = addVertex(cornerCenterP);
 
     const numPts = loop.length;

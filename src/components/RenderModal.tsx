@@ -170,7 +170,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       pt.tiles.set(1, 1);
     }
 
-    pt.renderDelay           = 300;  // ms de delay antes de iniciar PT — da tiempo a compilar shaders
+    pt.renderDelay           = 0;     // Iniciar Path Tracing inmediatamente sin delay
     pt.fadeDuration          = 0;
     pt.minSamples            = 1;
     pt.dynamicLowRes         = true;  // preview de baja resolución durante compilación
@@ -241,14 +241,17 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       });
     } else {
       // Luz por defecto si no hay luces configuradas
-      const sun = new THREE.DirectionalLight('#fff5e0', 3);
-      sun.position.set(3, 8, 5);
+      const sun = new THREE.DirectionalLight('#fff5e0', 6);
+      sun.position.set(5, 10, 7);
       sun.castShadow = true;
       sun.shadow.mapSize.set(2048, 2048);
       sun.shadow.radius = 4;
       sun.shadow.bias = -0.0005;
       scene.add(sun);
-      scene.add(new THREE.AmbientLight('#c8d8ff', 0.4));
+
+      const fillLight = new THREE.DirectionalLight('#c8d8ff', 2);
+      fillLight.position.set(-5, 4, -5);
+      scene.add(fillLight);
     }
 
     // ── Plano de suelo con sombra ─────────────────────────────────────────
@@ -424,15 +427,18 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const loaded = await Promise.all(objPromises);
     loaded.forEach(o => { if (o) scene.add(o); });
 
-    
-    // ── Construir BVH ───────────────────────────────────────────────
-    setStatus('Generando BVH...');
+    scene.updateMatrixWorld(true);
+
+    setStatus('Inicializando fotones en GPU...');
     try {
+      pt.updateMaterials();
+      pt.updateEnvironment();
+      pt.updateLights();
       pt.setScene(scene, camera);
+      pt.reset();
     } catch (err: any) {
-      console.error('[Render] setScene failed:', err);
-      const msg = 'Error al preparar la escena. Prueba calidad Borrador.';
-      if (mountedRef.current) setError(msg);
+      console.error('[Render Error]:', err);
+      if (mountedRef.current) setError('Error al compilar la escena en GPU.');
       return;
     }
 
@@ -726,7 +732,7 @@ function setupSyntheticSky(scene: THREE.Scene, renderer: THREE.WebGLRenderer, in
       const i = (y * W + x) * 4;
       const sunX = Math.abs(x / W - 0.25) * W;
       const sunY = Math.abs(v - 0.42) * H;
-      const sunF = Math.exp(-(sunX * sunX + sunY * sunY) / 60) * 3;
+      const sunF = Math.exp(-(sunX * sunX + sunY * sunY) / 60) * 12;
       pixels[i    ] = cTop.r * t + cHor.r * (1-t) + cSun.r * sunF;
       pixels[i + 1] = cTop.g * t + cHor.g * (1-t) + cSun.g * sunF;
       pixels[i + 2] = cTop.b * t + cHor.b * (1-t) + cSun.b * sunF;
