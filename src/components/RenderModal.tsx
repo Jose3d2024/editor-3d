@@ -156,9 +156,6 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     // ── Path Tracer ───────────────────────────────────────────────────────
     const pt = new WebGLPathTracer(renderer);
-    if ((pt as any)._pathTracer) (pt as any)._pathTracer.compileMaterial = () => Promise.resolve();
-    if ((pt as any)._lowResPathTracer) (pt as any)._lowResPathTracer.compileMaterial = () => Promise.resolve();
-    // pt.setBVHWorker(new GenerateMeshBVHWorker()); // Comentado para evitar problemas con Vite/Workers
     pt.renderToCanvas        = true;
     pt.synchronizeRenderSize = true;
     pt.bounces               = preset.bounces;
@@ -403,7 +400,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         }
       }
 
-      if (!mesh && obj.vertices && obj.vertices.length > 0) {
+      if (!mesh) {
         try {
           const geo = createBaseGeometry(obj);
           const mat = await loadMaterial(obj);

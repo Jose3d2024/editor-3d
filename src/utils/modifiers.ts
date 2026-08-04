@@ -1769,6 +1769,28 @@ export function roundAnglesMesh(
   const maxAllowedRad = isFinite(minEdgeLen) ? minEdgeLen * 0.45 : radius;
   const rad = Math.min(Math.max(0.0005, radius), Math.max(0.0005, maxAllowedRad));
 
+  // Mesh centroid for outward normal verification
+  const meshCentroid = new THREE.Vector3();
+  uniqueVerts.forEach(v => meshCentroid.add(v));
+  if (uniqueVerts.length > 0) meshCentroid.divideScalar(uniqueVerts.length);
+
+  // Verify overall mesh orientation: sum dot products of face normals with (centroid - meshCentroid)
+  let totalOrient = 0;
+  origFaces.forEach(f => {
+    const v0 = uniqueVerts[f[0]];
+    const v1 = uniqueVerts[f[1]];
+    const v2 = uniqueVerts[f[2]];
+    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    const centroid = new THREE.Vector3();
+    f.forEach(idx => centroid.add(uniqueVerts[idx]));
+    centroid.divideScalar(f.length);
+    totalOrient += norm.dot(centroid.clone().sub(meshCentroid));
+  });
+
+  if (totalOrient < 0) {
+    origFaces.forEach(f => f.reverse());
+  }
+
   // Compute face normals and face centroids
   const faceNormals: THREE.Vector3[] = [];
   const faceCentroids: THREE.Vector3[] = [];
@@ -1776,17 +1798,17 @@ export function roundAnglesMesh(
     const v0 = uniqueVerts[f[0]];
     const v1 = uniqueVerts[f[1]];
     const v2 = uniqueVerts[f[2]];
-    const norm = new THREE.Vector3().crossVectors(
+    let norm = new THREE.Vector3().crossVectors(
       v1.clone().sub(v0),
       v2.clone().sub(v0)
-    ).normalize();
-    if (isNaN(norm.x) || norm.lengthSq() < 1e-6) norm.set(0, 1, 0);
-    faceNormals.push(norm);
-
+    );
     const centroid = new THREE.Vector3();
     f.forEach(idx => centroid.add(uniqueVerts[idx]));
     centroid.divideScalar(f.length);
     faceCentroids.push(centroid);
+
+    if (norm.lengthSq() > 1e-6) norm.normalize(); else norm.set(0, 1, 0);
+    faceNormals.push(norm);
   });
 
   // Build edge adjacency map
@@ -1862,7 +1884,9 @@ export function roundAnglesMesh(
     const v2 = new THREE.Vector3(...outVerts[indices[2]]);
     const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
     if (norm.dot(targetNormal) < 0) {
-      indices.reverse();
+      if (indices.length === 3) return [indices[0], indices[2], indices[1]];
+      if (indices.length === 4) return [indices[0], indices[3], indices[2], indices[1]];
+      return [...indices].reverse();
     }
     return indices;
   };
@@ -1879,9 +1903,6 @@ export function roundAnglesMesh(
       const vPrev = f[(i - 1 + len) % len];
       const vCurr = f[i];
       const vNext = f[(i + 1) % len];
-
-      const kPrev = getEdgeKey(vPrev, vCurr);
-      const kNext = getEdgeKey(vNext, vCurr); // Key match helper
 
       const isPrevSharp = sharpEdges.has(getEdgeKey(vPrev, vCurr));
       const isNextSharp = sharpEdges.has(getEdgeKey(vCurr, vNext));
@@ -1931,8 +1952,9 @@ export function roundAnglesMesh(
     outFaces.push({ indices: faceIndices });
   });
 
-  // Connect sharp edges with 'segs' arc strips
-  const edgeCornerArcs = new Map<string, number[]>();
+  // Connect sharp edges with 'segs' arc strips and store directed arcs for corner caps
+  const arcMap = new Map<string, number[]>();
+  const getArcKey = (vIdx: number, fA: number, fB: number) => `${vIdx}_${fA}_${fB}`;
 
   sharpEdges.forEach(({ key, f1, f2, v1, v2, angle }) => {
     const f1Indices = origFaces[f1];
@@ -1981,12 +2003,15 @@ export function roundAnglesMesh(
 
     arcRows.push([faceInsetVerts[f2][i1_f2], faceInsetVerts[f2][i2_f2]]);
 
-    // Save arc points at v1 and v2
-    const v1Arc = arcRows.map(row => row[0]);
-    const v2Arc = arcRows.map(row => row[1]);
+    // Save directed arcs for v1 (from f1 to f2) and v2 (from f1 to f2)
+    const v1ArcF1toF2 = arcRows.map(row => row[0]);
+    const v2ArcF1toF2 = arcRows.map(row => row[1]);
 
-    edgeCornerArcs.set(`${v1}_${key}`, v1Arc);
-    edgeCornerArcs.set(`${v2}_${key}`, v2Arc);
+    arcMap.set(getArcKey(v1, f1, f2), v1ArcF1toF2);
+    arcMap.set(getArcKey(v1, f2, f1), [...v1ArcF1toF2].reverse());
+
+    arcMap.set(getArcKey(v2, f1, f2), v2ArcF1toF2);
+    arcMap.set(getArcKey(v2, f2, f1), [...v2ArcF1toF2].reverse());
 
     // Create quad strips
     for (let k = 0; k < segs; k++) {
@@ -1997,7 +2022,7 @@ export function roundAnglesMesh(
     }
   });
 
-  // Construct Corner Cap Patches at vertices where >= 3 sharp edges meet
+  // Construct Corner Cap Patches using radial ordering around vertex normal
   const vertToFaces = new Map<number, number[]>();
   origFaces.forEach((f, fIdx) => {
     f.forEach(v => {
@@ -2011,105 +2036,68 @@ export function roundAnglesMesh(
   });
 
   vertToFaces.forEach((fList, vIdx) => {
-    const vSharpEdges: SharpEdge[] = [];
-    sharpEdges.forEach(se => {
-      if (se.v1 === vIdx || se.v2 === vIdx) {
-        vSharpEdges.push(se);
-      }
+    if (fList.length < 3) return;
+
+    // Outward vertex normal N_v
+    const N_v = new THREE.Vector3();
+    fList.forEach(fIdx => N_v.add(faceNormals[fIdx]));
+    if (N_v.lengthSq() > 1e-6) N_v.normalize(); else N_v.set(0, 1, 0);
+
+    // Reference coordinate frame for radial sorting
+    const refTangent = Math.abs(N_v.y) < 0.9 ? new THREE.Vector3(0, 1, 0).cross(N_v).normalize() : new THREE.Vector3(1, 0, 0).cross(N_v).normalize();
+    const refBitangent = new THREE.Vector3().crossVectors(N_v, refTangent).normalize();
+
+    const centerP = uniqueVerts[vIdx];
+
+    // Compute polar angle for each face touching vIdx
+    const faceAngles: { fIdx: number; angle: number }[] = fList.map(fIdx => {
+      const loc = origFaces[fIdx].indexOf(vIdx);
+      const insetIdx = faceInsetVerts[fIdx][loc];
+      const insetP = new THREE.Vector3(...outVerts[insetIdx]);
+      const dir = insetP.clone().sub(centerP);
+      const x = dir.dot(refTangent);
+      const y = dir.dot(refBitangent);
+      return { fIdx, angle: Math.atan2(y, x) };
     });
 
-    if (vSharpEdges.length < 3) return;
+    faceAngles.sort((a, b) => a.angle - b.angle);
+    const sortedFaces = faceAngles.map(item => item.fIdx);
 
-    // Build topological loop around vIdx
     const loop: number[] = [];
-    const visitedEdges = new Set<string>();
+    const numFaces = sortedFaces.length;
 
-    const edgeToFaces = new Map<string, number[]>();
-    vSharpEdges.forEach(se => {
-      const facesForEdge: number[] = [];
-      fList.forEach(fIdx => {
-        const f = origFaces[fIdx];
-        if (f.includes(se.v1) && f.includes(se.v2)) {
-          facesForEdge.push(fIdx);
-        }
-      });
-      edgeToFaces.set(se.key, facesForEdge);
-    });
+    for (let i = 0; i < numFaces; i++) {
+      const fA = sortedFaces[i];
+      const fB = sortedFaces[(i + 1) % numFaces];
+      const locA = origFaces[fA].indexOf(vIdx);
+      const insetIdxA = faceInsetVerts[fA][locA];
 
-    let currEdge = vSharpEdges[0];
-    let currFace = edgeToFaces.get(currEdge.key)?.[0] ?? fList[0];
-
-    for (let step = 0; step < vSharpEdges.length + 2; step++) {
-      if (visitedEdges.has(currEdge.key)) break;
-      visitedEdges.add(currEdge.key);
-
-      const arcKey = `${vIdx}_${currEdge.key}`;
-      const arcPts = edgeCornerArcs.get(arcKey);
-
-      const f = origFaces[currFace];
-      const loc = f.indexOf(vIdx);
-      const insetAtCurrFace = loc !== -1 ? faceInsetVerts[currFace][loc] : undefined;
-
-      if (arcPts && arcPts.length > 0) {
-        const d0 = insetAtCurrFace !== undefined && arcPts[0] === insetAtCurrFace;
-        const ptsToAdd = d0 ? arcPts.slice(0, -1) : [...arcPts].reverse().slice(0, -1);
+      const arcKey = getArcKey(vIdx, fA, fB);
+      if (arcMap.has(arcKey)) {
+        const arc = arcMap.get(arcKey)!;
+        const ptsToAdd = arc.slice(0, -1);
         ptsToAdd.forEach(p => {
           if (loop.length === 0 || loop[loop.length - 1] !== p) {
             loop.push(p);
           }
         });
-      } else if (insetAtCurrFace !== undefined) {
-        if (loop.length === 0 || loop[loop.length - 1] !== insetAtCurrFace) {
-          loop.push(insetAtCurrFace);
+      } else {
+        if (loop.length === 0 || loop[loop.length - 1] !== insetIdxA) {
+          loop.push(insetIdxA);
         }
       }
-
-      if (loc === -1) break;
-      const prevV = f[(loc - 1 + f.length) % f.length];
-      const nextV = f[(loc + 1) % f.length];
-
-      const kPrev = getEdgeKey(vIdx, prevV);
-      const kNext = getEdgeKey(vIdx, nextV);
-
-      const nextEdgeKey = kPrev === currEdge.key ? kNext : kPrev;
-      let nextEdge = vSharpEdges.find(se => se.key === nextEdgeKey);
-      if (!nextEdge) {
-        nextEdge = vSharpEdges.find(se => !visitedEdges.has(se.key));
-      }
-      if (!nextEdge) break;
-
-      const facesOfNext = edgeToFaces.get(nextEdge.key) || [];
-      const otherFace = facesOfNext.find(fIdx => fIdx !== currFace);
-      currFace = otherFace !== undefined ? otherFace : currFace;
-      currEdge = nextEdge;
-    }
-
-    if (loop.length < 3) {
-      // Fallback: collect face inset points
-      fList.forEach(fIdx => {
-        const f = origFaces[fIdx];
-        const loc = f.indexOf(vIdx);
-        if (loc !== -1) {
-          const idx = faceInsetVerts[fIdx][loc];
-          if (!loop.includes(idx)) loop.push(idx);
-        }
-      });
     }
 
     if (loop.length < 3) return;
 
-    // Calculate average position & normal
+    // Calculate average position of loop
     const avgP = new THREE.Vector3();
-    const avgNorm = new THREE.Vector3();
-    fList.forEach(fIdx => avgNorm.add(faceNormals[fIdx]));
-    if (avgNorm.lengthSq() > 1e-6) avgNorm.normalize(); else avgNorm.set(0, 1, 0);
-
     loop.forEach(idx => {
       avgP.add(new THREE.Vector3(...outVerts[idx]));
     });
     avgP.divideScalar(loop.length);
 
-    const cornerCenterP = avgP.clone().addScaledVector(avgNorm, rad * 0.3);
+    const cornerCenterP = avgP.clone().addScaledVector(N_v, rad * 0.35);
     const centerIdx = addVertex(cornerCenterP);
 
     const numPts = loop.length;
@@ -2117,7 +2105,7 @@ export function roundAnglesMesh(
       const p1 = loop[i];
       const p2 = loop[(i + 1) % numPts];
       if (p1 === p2) continue;
-      const tri = fixWinding([centerIdx, p1, p2], avgNorm);
+      const tri = fixWinding([centerIdx, p1, p2], N_v);
       outFaces.push({ indices: tri });
     }
   });
