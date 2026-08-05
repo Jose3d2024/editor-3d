@@ -1673,9 +1673,9 @@ export function roundAnglesMesh(
   }
   let inputFaces = obj.faces || [];
 
-  // Si no tiene vértices explícitos aún (p. ej. cualquier primitiva recién creada),
+  // Si no tiene vértices o caras explícitas aún (p. ej. cualquier primitiva o extrusión recién creada),
   // obtenemos la geometría base desde createBaseGeometry
-  if (!inputVerts || inputVerts.length === 0) {
+  if (!inputVerts || inputVerts.length === 0 || !inputFaces || inputFaces.length === 0) {
     try {
       const baseGeo = createBaseGeometry(obj as any);
       const res = fromThreeGeometry(baseGeo);
@@ -2044,7 +2044,7 @@ export function roundAnglesMesh(
 
   vertToFaces.forEach((fList, vIdx) => {
     const sharpCount = vertSharpCount.get(vIdx) || 0;
-    if (sharpCount < 3) return; // Only true corners with 3+ sharp edges get corner caps!
+    if (sharpCount < 2) return; // Corners and curved rim transitions with 2+ sharp edges get sealed!
 
     // Outward vertex normal N_v
     const N_v = new THREE.Vector3();
@@ -2075,7 +2075,7 @@ export function roundAnglesMesh(
       currF = nextF;
     }
 
-    if (sortedFaces.length < 3) return;
+    if (sortedFaces.length < 2) return;
 
     const loop: number[] = [];
     const numFaces = sortedFaces.length;
@@ -2125,7 +2125,7 @@ export function roundAnglesMesh(
   });
 
   // Re-index / build final geometry
-  const temporalGeo = new THREE.BufferGeometry();
+  let temporalGeo = new THREE.BufferGeometry();
   const posicionesFlotantes: number[] = [];
   const indicesTriangulados: number[] = [];
 
@@ -2138,6 +2138,7 @@ export function roundAnglesMesh(
 
   temporalGeo.setAttribute('position', new THREE.Float32BufferAttribute(posicionesFlotantes, 3));
   temporalGeo.setIndex(indicesTriangulados);
+  temporalGeo = BufferGeometryUtils.mergeVertices(temporalGeo, 1e-4);
   temporalGeo.computeVertexNormals();
 
   const geometriaFinalizada = fromThreeGeometry(temporalGeo);

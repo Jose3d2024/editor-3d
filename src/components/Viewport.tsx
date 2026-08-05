@@ -11,6 +11,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { loadOptimizedEnvironmentTexture } from '../utils/hdrLoader';
+import { setupSceneEnvironment } from '../utils/environmentHelper';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { MeshoptDecoder } from 'meshoptimizer';
 import { useStore } from '../store/useStore';
@@ -161,12 +162,14 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
   const [title, setTitle] = React.useState(initialTitle);
   const [viewCameraId, setViewCameraId] = React.useState<string | null>(null);
+  const [showViewDropdown, setShowViewDropdown] = React.useState(false);
 
   // Sync with prop if it changes (e.g. from MultiViewport)
   useEffect(() => {
     setType(initialType);
     setTitle(initialTitle);
     setViewCameraId(null);
+    setShowViewDropdown(false);
   }, [initialType, initialTitle]);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -755,26 +758,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     }
     rendererRef.current = renderer;
 
-    // Initial environment setup
+    // Initial environment setup - default room environment while project environment useEffect loads
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    const envData = projectRef.current.environment;
-    if (envData.hdriUrl) {
-      loadOptimizedEnvironmentTexture(envData.hdriUrl, { maxDimension: envData.maxResolution || 2048 })
-        .then((texture) => {
-          texture.mapping = THREE.EquirectangularReflectionMapping;
-          const envMap = pmremGenerator.fromEquirectangular(texture).texture;
-          scene.environment = envMap;
-          scene.background = envData.backgroundVisible ? texture : new THREE.Color(0x1a1a1a);
-
-          if (bgTextureRef.current && bgTextureRef.current !== texture) bgTextureRef.current.dispose();
-          if (envTextureRef.current && envTextureRef.current !== envMap) envTextureRef.current.dispose();
-          bgTextureRef.current = texture;
-          envTextureRef.current = envMap;
-        })
-        .catch((e) => console.error('Failed to load initial environment map:', e));
-    } else {
-      scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    }
+    const initialRoomEnv = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = initialRoomEnv;
+    scene.background = new THREE.Color(0x1a1a1a);
     pmremGenerator.dispose();
 
     // ALL viewports get OrbitControls — perspective gets full rotate+pan+zoom,
@@ -1150,43 +1138,41 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const renderer = rendererRef.current;
     const env = project.environment;
 
-    const updateEnv = async () => {
-      const pmremGenerator = new THREE.PMREMGenerator(renderer);
-      pmremGenerator.compileEquirectangularShader();
-      if (env.hdriUrl) {
-        try {
-          const texture = await loadOptimizedEnvironmentTexture(env.hdriUrl, { maxDimension: env.maxResolution || 2048 });
-          texture.mapping = THREE.EquirectangularReflectionMapping;
-          const envMap = pmremGenerator.fromEquirectangular(texture).texture;
-          scene.environment = envMap;
-          scene.background = env.backgroundVisible ? texture : new THREE.Color(0x1a1a1a);
+    let isCancelled = false;
 
-          if (bgTextureRef.current && bgTextureRef.current !== texture) {
-            bgTextureRef.current.dispose();
-          }
-          if (envTextureRef.current && envTextureRef.current !== envMap) {
-            envTextureRef.current.dispose();
-          }
-          bgTextureRef.current = texture;
-          envTextureRef.current = envMap;
-        } catch (e) {
-          console.error('Failed to load HDRI/EXR:', e);
-          scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-          scene.background = new THREE.Color(0x1a1a1a);
-        }
-      } else {
-        scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-        scene.background = new THREE.Color(0x1a1a1a);
+    setupSceneEnvironment(scene, renderer, env).then(res => {
+      if (isCancelled) return;
+      if (bgTextureRef.current && bgTextureRef.current !== res.bgTexture && bgTextureRef.current !== res.envTexture) {
+        bgTextureRef.current.dispose();
       }
-      pmremGenerator.dispose();
-    };
+      if (envTextureRef.current && envTextureRef.current !== res.envTexture && envTextureRef.current !== res.pmremTexture) {
+        envTextureRef.current.dispose();
+      }
+      bgTextureRef.current = res.bgTexture || res.envTexture;
+      envTextureRef.current = res.pmremTexture || res.envTexture;
+    }).catch(err => {
+      console.error('Error updating environment:', err);
+    });
 
-    updateEnv();
-  }, [project.environment.hdriUrl, project.environment.backgroundVisible, project.environment.maxResolution]);
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    project.environment.hdriUrl,
+    project.environment.backgroundMode,
+    project.environment.backgroundVisible,
+    project.environment.backgroundColor,
+    project.environment.backgroundBlur,
+    project.environment.backgroundIntensity,
+    project.environment.rotation,
+    project.environment.intensity,
+    project.environment.exposure,
+    project.environment.maxResolution
+  ]);
 
   useEffect(() => {
     if (rendererRef.current) {
-      rendererRef.current.toneMappingExposure = project.environment.exposure;
+      rendererRef.current.toneMappingExposure = project.environment.exposure ?? 1.1;
     }
   }, [project.environment.exposure]);
 
@@ -4653,43 +4639,75 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         </div>
 
         {/* View Selector Dropdown */}
-        <div className="relative group" onPointerDown={e=>e.stopPropagation()}>
-          <button className="p-1 sm:p-1.5 bg-transparent hover:bg-black/40 text-white rounded border border-transparent hover:border-white/20 transition-colors drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
-            <ChevronDown size={12} />
+        <div 
+          className="relative" 
+          onPointerDown={e => e.stopPropagation()}
+          onMouseEnter={() => setShowViewDropdown(true)}
+          onMouseLeave={() => setShowViewDropdown(false)}
+        >
+          <button 
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowViewDropdown(prev => !prev);
+            }}
+            className="p-1 sm:p-1.5 bg-black/50 hover:bg-zinc-800 text-white rounded border border-white/20 hover:border-indigo-400 transition-colors drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] flex items-center gap-1 cursor-pointer"
+            title="Seleccionar Visor"
+          >
+            <ChevronDown size={12} className={`transition-transform duration-150 ${showViewDropdown ? 'rotate-180' : ''}`} />
           </button>
-          <div className="absolute top-full left-0 mt-1 hidden group-hover:block bg-zinc-900 border border-white/10 rounded shadow-xl overflow-hidden min-w-[100px]">
-            {(['PERSPECTIVE', 'TOP', 'BOTTOM', 'FRONT', 'BACK', 'LEFT', 'RIGHT'] as ViewportType[]).map(v => (
-              <button
-                key={v}
-                onClick={() => {
-                  setType(v);
-                  setTitle(v.charAt(0) + v.slice(1).toLowerCase());
-                  setViewCameraId(null);
-                }}
-                className={`w-full text-left px-3 py-1.5 text-[10px] hover:bg-indigo-600 transition-colors ${type === v && !viewCameraId ? 'text-indigo-400' : 'text-zinc-300'}`}
-              >
-                {v}
-              </button>
-            ))}
-            {project.cameras && project.cameras.length > 0 && (
-              <>
-                <div className="h-px bg-white/10 my-1" />
-                {project.cameras.map(cam => (
+
+          {showViewDropdown && (
+            <div className="absolute top-full left-0 pt-1 min-w-[130px] z-50">
+              <div className="bg-zinc-900/95 backdrop-blur-md border border-white/20 rounded-md shadow-2xl overflow-hidden py-1">
+                <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10">
+                  Visores 3D
+                </div>
+                {(['PERSPECTIVE', 'TOP', 'BOTTOM', 'FRONT', 'BACK', 'LEFT', 'RIGHT'] as ViewportType[]).map(v => (
                   <button
-                    key={cam.id}
-                    onClick={() => {
-                      setType('CAMERA');
-                      setTitle(cam.name);
-                      setViewCameraId(cam.id);
+                    key={v}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setType(v);
+                      setTitle(v.charAt(0) + v.slice(1).toLowerCase());
+                      setViewCameraId(null);
+                      setShowViewDropdown(false);
                     }}
-                    className={`w-full text-left px-3 py-1.5 text-[10px] hover:bg-indigo-600 transition-colors ${viewCameraId === cam.id ? 'text-indigo-400' : 'text-zinc-300'}`}
+                    className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-between cursor-pointer ${type === v && !viewCameraId ? 'text-indigo-400 font-bold bg-indigo-950/50' : 'text-zinc-200'}`}
                   >
-                    {cam.name}
+                    <span>{v}</span>
+                    {type === v && !viewCameraId && <span className="text-[9px] text-indigo-300">✓</span>}
                   </button>
                 ))}
-              </>
-            )}
-          </div>
+                {project.cameras && project.cameras.length > 0 && (
+                  <>
+                    <div className="h-px bg-white/10 my-1" />
+                    <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10">
+                      Cámaras
+                    </div>
+                    {project.cameras.map(cam => (
+                      <button
+                        key={cam.id}
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setType('CAMERA');
+                          setTitle(cam.name);
+                          setViewCameraId(cam.id);
+                          setShowViewDropdown(false);
+                        }}
+                        className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-between cursor-pointer ${viewCameraId === cam.id ? 'text-indigo-400 font-bold bg-indigo-950/50' : 'text-zinc-200'}`}
+                      >
+                        <span className="truncate max-w-[100px]">{cam.name}</span>
+                        {viewCameraId === cam.id && <span className="text-[9px] text-indigo-300">✓</span>}
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {isRecording && activeViewport === type && (

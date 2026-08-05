@@ -245,9 +245,16 @@ export interface Project {
   showGrid?: boolean;
 }
 
+export type BackgroundMode = 'HDRI' | 'GRADIENT' | 'COLOR' | 'TRANSPARENT';
+
 export interface EnvironmentSettings {
   hdriUrl: string | null;
+  backgroundMode?: BackgroundMode;
   backgroundVisible: boolean;
+  backgroundColor?: string;
+  backgroundBlur?: number;
+  backgroundIntensity?: number;
+  rotation?: number;
   intensity: number;
   exposure: number;
   maxResolution?: number;

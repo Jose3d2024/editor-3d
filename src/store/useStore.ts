@@ -69,10 +69,15 @@ const DEFAULT_PROJECT: Project = {
     activePlane: null,
   },
   environment: {
-    hdriUrl: null,
-    backgroundVisible: false,
-    intensity: 1,
-    exposure: 1,
+    hdriUrl: 'https://threejs.org/examples/textures/equirectangular/quarry_01_1k.hdr',
+    backgroundMode: 'GRADIENT',
+    backgroundVisible: true,
+    backgroundColor: '#16171d',
+    backgroundBlur: 0.25,
+    backgroundIntensity: 1.0,
+    rotation: 0,
+    intensity: 1.2,
+    exposure: 1.1,
     maxResolution: 2048,
   },
   showGrid: true,
@@ -1682,7 +1687,7 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
-  roundAnglesObject: async (id, radius = 0.08, segments = 3, angleThresholdDeg = 20) => {
+  roundAnglesObject: async (id, radius = 0.08, segments = 3, angleThresholdDeg = 35) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
     if (!obj) return;

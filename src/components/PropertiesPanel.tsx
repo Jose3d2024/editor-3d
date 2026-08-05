@@ -18,7 +18,8 @@ import {
   sweepMesh, SWEEP_PROFILES, makeStraightPath, makeArcPath, makeHelixPath,
   loftMesh, circleSection, squareSection, starSection,
 } from '../utils/modifiers';
-import type { V3, MeshFace, MaterialData, CameraObject, Transform } from '../types';
+import type { V3, MeshFace, MaterialData, CameraObject, Transform, BackgroundMode } from '../types';
+import { PRESET_HDRIS } from '../utils/environmentHelper';
 import { useStore } from '../store/useStore';
 import type { CSGObject } from '../types';
 import { MapEditorModal } from './MapEditorModal';
@@ -838,7 +839,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [smoothIters, setSmoothIters] = useState(1);
   const [roundRadius, setRoundRadius] = useState(0.08);
   const [roundSegments, setRoundSegments] = useState(3);
-  const [roundAngleThreshold, setRoundAngleThreshold] = useState(20);
+  const [roundAngleThreshold, setRoundAngleThreshold] = useState(35);
   const [optimizeRatio, setOptimizeRatio] = useState(0.3);
   const [weldTolerance, setWeldTolerance] = useState(0.001);
   const [shrinkResolution, setShrinkResolution] = useState(3);
@@ -1607,42 +1608,91 @@ const SceneManager: React.FC = () => {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex-1 overflow-y-auto custom-scrollbar p-1 space-y-1">
-        <Section title="Entorno" icon={<Globe size={14}/>} defaultOpen>
+        <Section title="Entorno e Iluminación" icon={<Globe size={14}/>} defaultOpen>
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2">
-              {hdriOptions.map(opt => (
+              {PRESET_HDRIS.map(opt => (
                 <button
-                  key={opt.name}
+                  key={opt.id}
                   onClick={() => updateEnvironment({ hdriUrl: opt.url })}
-                  className={`flex flex-col items-center gap-2 p-3 rounded-xl border transition-all ${
+                  className={`flex flex-col items-center gap-1.5 p-2 rounded-xl border transition-all ${
                     env.hdriUrl === opt.url 
-                      ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300' 
+                      ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300 shadow' 
                       : 'bg-zinc-900/50 border-white/5 text-zinc-500 hover:bg-zinc-800 hover:border-white/10'
                   }`}
+                  title={opt.desc}
                 >
-                  <span className="text-xl">{opt.icon}</span>
+                  <span className="text-lg">{opt.icon}</span>
                   <span className="text-[9px] font-bold uppercase tracking-tighter truncate w-full text-center">{opt.name}</span>
                 </button>
               ))}
-              <label className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl border border-dashed border-indigo-500/30 bg-indigo-950/20 text-indigo-300 hover:bg-indigo-900/30 hover:border-indigo-400 cursor-pointer transition-all">
-                <Upload size={16} className="text-indigo-400" />
-                <span className="text-[9px] font-bold uppercase tracking-tighter text-center">Subir HDR / EXR</span>
-                <span className="text-[7.5px] text-zinc-400 text-center leading-tight">EXR, HDR, JPG, PNG<br/><span className="text-emerald-400 font-semibold">Auto-reducción FPS</span></span>
+              <label className="flex flex-col items-center justify-center gap-1 p-2 rounded-xl border border-dashed border-indigo-500/30 bg-indigo-950/20 text-indigo-300 hover:bg-indigo-900/30 hover:border-indigo-400 cursor-pointer transition-all">
+                <Upload size={14} className="text-indigo-400" />
+                <span className="text-[9px] font-bold uppercase tracking-tighter text-center">Subir HDR</span>
+                <span className="text-[7.5px] text-zinc-400 text-center leading-tight">EXR, HDR, JPG</span>
                 <input type="file" accept=".hdr,.exr,.png,.jpg,.jpeg,.webp,.avif" onChange={handleHDRIUpload} className="hidden" />
               </label>
             </div>
 
             <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between px-1">
-                <span className="text-[10px] text-zinc-400 font-medium">Mostrar Fondo HDR</span>
-                <button 
-                  onClick={() => updateEnvironment({ backgroundVisible: !env.backgroundVisible })}
-                  className={`w-10 h-5 rounded-full transition-colors relative ${env.backgroundVisible ? 'bg-indigo-600' : 'bg-zinc-800'}`}
-                >
-                  <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${env.backgroundVisible ? 'left-6' : 'left-1'}`} />
-                </button>
+              {/* Modo de Fondo */}
+              <div>
+                <span className="text-[10px] text-zinc-400 font-medium block mb-1">Modo de Fondo</span>
+                <div className="grid grid-cols-2 gap-1 bg-zinc-900/80 p-1 rounded-xl border border-zinc-800">
+                  {[
+                    { id: 'GRADIENT', label: 'Estudio (Gradiente)' },
+                    { id: 'HDRI',     label: 'Imagen HDRI' },
+                    { id: 'COLOR',    label: 'Color Sólido' },
+                    { id: 'TRANSPARENT', label: 'Transparente' },
+                  ].map(m => {
+                    const currentMode = env.backgroundMode || (env.backgroundVisible ? 'HDRI' : 'GRADIENT');
+                    const active = currentMode === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        onClick={() => updateEnvironment({
+                          backgroundMode: m.id as BackgroundMode,
+                          backgroundVisible: m.id === 'HDRI' || m.id === 'GRADIENT',
+                        })}
+                        className={`py-1 px-1.5 rounded-lg text-[9.5px] font-bold transition-all ${
+                          active
+                            ? 'bg-indigo-600 text-white shadow'
+                            : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-              <div className="flex items-center justify-between px-1">
+
+              {(env.backgroundMode === 'HDRI' || (!env.backgroundMode && env.backgroundVisible)) && (
+                <NumRow
+                  label="Desenfoque Fondo (Bokeh)"
+                  value={env.backgroundBlur ?? 0.25}
+                  onChange={v => updateEnvironment({ backgroundBlur: v })}
+                  min={0} max={1} step={0.05} slider
+                />
+              )}
+
+              {env.backgroundMode === 'COLOR' && (
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-[10px] text-zinc-400 font-medium">Color de Fondo</span>
+                  <input
+                    type="color"
+                    value={env.backgroundColor || '#16171d'}
+                    onChange={e => updateEnvironment({ backgroundColor: e.target.value })}
+                    className="w-8 h-6 bg-transparent rounded border border-zinc-700 cursor-pointer"
+                  />
+                </div>
+              )}
+
+              <NumRow label="Rotación Luz (Dirección)" value={env.rotation ?? 0} onChange={v => updateEnvironment({ rotation: v })} min={0} max={360} step={5} slider />
+              <NumRow label="Intensidad HDRI" value={env.intensity} onChange={v => updateEnvironment({ intensity: v })} min={0.1} max={5} step={0.1} slider />
+              <NumRow label="Exposición Cámara" value={env.exposure} onChange={v => updateEnvironment({ exposure: v })} min={0.2} max={5} step={0.1} slider />
+
+              <div className="flex items-center justify-between px-1 pt-1">
                 <span className="text-[10px] text-zinc-400 font-medium">Límite Res. (FPS)</span>
                 <select
                   value={env.maxResolution || 2048}
@@ -1654,8 +1704,6 @@ const SceneManager: React.FC = () => {
                   <option value={4096}>4K (Alta Calidad)</option>
                 </select>
               </div>
-              <NumRow label="Intensidad HDRI" value={env.intensity} onChange={v => updateEnvironment({ intensity: v })} min={0} max={5} step={0.1} slider />
-              <NumRow label="Exposición" value={env.exposure} onChange={v => updateEnvironment({ exposure: v })} min={0} max={5} step={0.1} slider />
             </div>
           </div>
         </Section>
