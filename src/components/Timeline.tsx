@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '../store/useStore';
 import {
   Play, Pause, Square, SkipBack, Clock, Circle, Plus, Trash2,
-  ChevronDown, ChevronRight, Key, Layers
+  ChevronDown, ChevronRight, Key, Layers, Repeat
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -36,7 +36,8 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
 
   const { objects, duration } = project;
 
-  // ── Animación ──────────────────────────────────────────────────────────
+  // ── Animación y Bucle ──────────────────────────────────────────────────
+  const [isLooping, setIsLooping] = useState(false);
   const rafRef      = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
 
@@ -46,12 +47,21 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
       const s  = useStore.getState();
       if (s.isPlaying) {
         const next = s.currentTime + dt;
-        s.setCurrentTime(next >= s.project.duration ? 0 : next);
+        if (next >= s.project.duration) {
+          if (isLooping) {
+            s.setCurrentTime(0);
+          } else {
+            s.setCurrentTime(s.project.duration);
+            s.setIsPlaying(false);
+          }
+        } else {
+          s.setCurrentTime(next);
+        }
       }
     }
     lastTimeRef.current = now;
     rafRef.current = requestAnimationFrame(tick);
-  }, []);
+  }, [isLooping]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(tick);
@@ -143,6 +153,19 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
             title="Detener"
           >
             <Square size={13} fill="currentColor" />
+          </button>
+
+          {/* Loop / Bucle */}
+          <button
+            onClick={() => setIsLooping(!isLooping)}
+            className={`p-1.5 rounded-lg transition-all ${
+              isLooping
+                ? 'text-indigo-400 bg-indigo-500/20 font-bold'
+                : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
+            }`}
+            title={isLooping ? 'Bucle activado (repite al finalizar)' : 'Bucle desactivado (se detiene al finalizar)'}
+          >
+            <Repeat size={13} />
           </button>
 
           <div className="w-px h-4 bg-white/5 mx-1" />

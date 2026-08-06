@@ -1,18 +1,22 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { BackgroundMode } from '../types';
-import { X, Download, Play, Pause, RefreshCw, Sparkles, Settings, Camera, Sun, Globe, Palette, RotateCw, Upload } from 'lucide-react';
+import {
+  X, Download, Play, Pause, RefreshCw, Sparkles, Settings, Camera,
+  Sun, Globe, Palette, RotateCw, Upload, Video, Film, Clock, Target,
+  Route, CheckCircle, FileVideo, Layers
+} from 'lucide-react';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { MeshoptDecoder } from 'meshoptimizer';
-import { loadOptimizedEnvironmentTexture } from '../utils/hdrLoader';
 import { setupSceneEnvironment, PRESET_HDRIS } from '../utils/environmentHelper';
 import { fileToDataURL } from '../utils/silhouettes';
 import { createBaseGeometry } from '../utils/csg';
+import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 
 interface RenderModalProps { onClose: () => void; }
 
@@ -25,7 +29,6 @@ const QUALITY_PRESETS = {
 };
 type QualityKey = keyof typeof QUALITY_PRESETS;
 
-// ── Helpers ────────────────────────────────────────────────────────────────
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 
 function getInterpolatedTransform(obj: any, time: number) {
@@ -102,6 +105,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   const containerRef  = useRef<HTMLDivElement>(null);
   const { project, currentTime, lastCameraState, updateEnvironment } = useStore();
 
+  // Mode Selection: PHOTO (imagen fija) vs VIDEO (animación)
+  const [renderType, setRenderType] = useState<'PHOTO' | 'VIDEO'>('PHOTO');
+
   const [samples, setSamples]       = useState(0);
   const [isRendering, setIsRendering] = useState(false);
   const [status, setStatus]         = useState('Configurando...');
@@ -110,9 +116,19 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   const [showGround, setShowGround] = useState(false);
   const [fov, setFov]               = useState((lastCameraState as any)?.fov || 45);
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
-  const [resolution, setResolution] = useState<'viewport' | '1080p' | '4k' | 'square'>('viewport');
+  const [resolution, setResolution] = useState<'viewport' | '720p' | '1080p' | '4k' | 'square' | 'vertical'>('viewport');
   const [ready, setReady]           = useState(false);
   const [error, setError]           = useState('');
+
+  // ── Parámetros de Generación de Video ────────────────────────────────────
+  const [durationSource, setDurationSource] = useState<'ANIMATED_OBJECT' | 'TIMELINE' | 'CUSTOM'>('ANIMATED_OBJECT');
+  const [customDuration, setCustomDuration] = useState(5.0);
+  const [videoFps, setVideoFps]             = useState<24 | 30 | 60>(30);
+  const [videoBitrate, setVideoBitrate]     = useState<number>(8); // Mbps (2, 4, 8, 16)
+  const [videoCodec, setVideoCodec]         = useState<string>('video/webm;codecs=vp9');
+  const [isVideoRecording, setIsVideoRecording] = useState(false);
+  const [videoProgress, setVideoProgress]   = useState({ currentFrame: 0, totalFrames: 0, pct: 0, etaSec: 0 });
+  const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
 
   const rendererRef   = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef     = useRef<THREE.PerspectiveCamera | null>(null);
@@ -121,7 +137,62 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
   const preset = QUALITY_PRESETS[quality];
 
-  // ── Inicio del render ──────────────────────────────────────────────────
+  // Detect loaded GLTF animations or procedural keyframes
+  const detectedAnimationInfo = useMemo(() => {
+    let maxDur = 0;
+    let sourceName = 'Ninguna animación detectada';
+
+    project.objects.forEach(obj => {
+      if (obj.meshData?.animations && Array.isArray(obj.meshData.animations)) {
+        obj.meshData.animations.forEach((anim: any) => {
+          const dur = anim.duration || anim.length || 0;
+          if (dur > maxDur) {
+            maxDur = dur;
+            sourceName = `${obj.name} (${anim.name || 'Clip GLTF'}, ${dur.toFixed(2)}s)`;
+          }
+        });
+      }
+      if (obj.keyframes && obj.keyframes.length > 0) {
+        const maxKeyTime = Math.max(...obj.keyframes.map(k => k.time || 0));
+        if (maxKeyTime > maxDur) {
+          maxDur = maxKeyTime;
+          sourceName = `${obj.name} (Timeline Keyframes, ${maxKeyTime.toFixed(2)}s)`;
+        }
+      }
+    });
+
+    return { maxDur, sourceName };
+  }, [project.objects]);
+
+  // Total duration of video in seconds
+  const effectiveVideoDuration = useMemo(() => {
+    if (durationSource === 'ANIMATED_OBJECT' && detectedAnimationInfo.maxDur > 0) {
+      return detectedAnimationInfo.maxDur;
+    }
+    if (durationSource === 'CUSTOM') {
+      return customDuration;
+    }
+    return project.duration || 5.0;
+  }, [durationSource, detectedAnimationInfo, customDuration, project.duration]);
+
+  // Available codecs supported by browser MediaRecorder
+  const supportedCodecs = useMemo(() => {
+    const candidates = [
+      { id: 'video/webm;codecs=vp9', label: 'VP9 (Máxima Calidad WebM)' },
+      { id: 'video/webm;codecs=vp8', label: 'VP8 (Compatibilidad Alta)' },
+      { id: 'video/webm;codecs=h264', label: 'H.264 (AVC Video)' },
+      { id: 'video/webm', label: 'WebM Estándar' },
+    ];
+    if (typeof window !== 'undefined' && window.MediaRecorder) {
+      return candidates.map(c => ({
+        ...c,
+        supported: MediaRecorder.isTypeSupported(c.id),
+      }));
+    }
+    return candidates.map(c => ({ ...c, supported: true }));
+  }, []);
+
+  // ── Inicio del render de Imagen Fija (Photo) ──────────────────────────────────
   const startRender = useCallback(async () => {
     if (!canvasRef.current || !containerRef.current) return;
 
@@ -140,12 +211,16 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     let w = containerRef.current.clientWidth;
     let h = containerRef.current.clientHeight;
 
-    if (resolution === '1080p') {
+    if (resolution === '720p') {
+      w = 1280; h = 720;
+    } else if (resolution === '1080p') {
       w = 1920; h = 1080;
     } else if (resolution === '4k') {
       w = 3840; h = 2160;
     } else if (resolution === 'square') {
-      w = 1024; h = 1024;
+      w = 1080; h = 1080;
+    } else if (resolution === 'vertical') {
+      w = 1080; h = 1920;
     }
 
     // ── Renderer de alta definición con ToneMapping ───────────────────────
@@ -164,15 +239,22 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     rendererRef.current = renderer;
 
-    // ── Cámara ────────────────────────────────────────────────────────────
+    // ── Cámara y Evaluación de Ruta / Objetivo ─────────────────────────────
     const camera = new THREE.PerspectiveCamera(fov, w / h, 0.01, 1000);
     
     if (selectedCameraId) {
       const camObj = project.cameras?.find(c => c.id === selectedCameraId);
       if (camObj) {
-        camera.position.fromArray(camObj.transform.position);
-        camera.rotation.fromArray(camObj.transform.rotation);
-        camera.fov = camObj.fov;
+        if (camObj.targetObjectId || camObj.pathObjectId) {
+          const evalCam = evaluateCameraTransform(camObj, project.objects, currentTime, project.duration || 5);
+          camera.position.copy(evalCam.position);
+          if (evalCam.target) camera.lookAt(evalCam.target);
+          camera.fov = evalCam.fov;
+        } else {
+          camera.position.fromArray(camObj.transform.position);
+          camera.rotation.fromArray(camObj.transform.rotation);
+          camera.fov = camObj.fov;
+        }
       }
     } else if ((lastCameraState as any)?.position) {
       camera.position.fromArray((lastCameraState as any).position);
@@ -198,56 +280,22 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       project.lights.forEach((lData: any) => {
         if (!lData.visible) return;
         const color = lData.color || '#ffffff';
-        const intensity = lData.intensity ?? 1;
-        const pos = lData.transform?.position || [0, 5, 0];
-        const rot = lData.transform?.rotation || [0, 0, 0];
-
-        switch (lData.type) {
-          case 'POINT': {
-            const light = new THREE.PointLight(color, intensity * 50, lData.distance ?? 0, lData.decay ?? 2);
-            light.position.fromArray(pos);
-            light.castShadow = true;
-            light.shadow.mapSize.width = 1024;
-            light.shadow.mapSize.height = 1024;
-            light.shadow.radius = 3;
-            scene.add(light);
-            break;
-          }
-          case 'DIRECTIONAL': {
-            const dl = new THREE.DirectionalLight(color, intensity * 3.5);
-            dl.castShadow = lData.castShadow ?? true;
-            dl.position.fromArray(pos);
-            dl.shadow.mapSize.width = 2048;
-            dl.shadow.mapSize.height = 2048;
-            dl.shadow.radius = 4;
-            const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(rot[0], rot[1], rot[2]));
-            dl.target.position.copy(dl.position).add(dir);
-            dl.target.updateMatrixWorld(true);
-            scene.add(dl);
-            scene.add(dl.target);
-            break;
-          }
-          case 'SPOT': {
-            const sl = new THREE.SpotLight(color, intensity * 80, lData.distance ?? 0, lData.angle ?? Math.PI / 4, lData.penumbra ?? 0.3, lData.decay ?? 2);
-            sl.castShadow = lData.castShadow ?? true;
-            sl.position.fromArray(pos);
-            sl.shadow.mapSize.width = 1024;
-            sl.shadow.mapSize.height = 1024;
-            sl.shadow.radius = 3;
-            const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(rot[0], rot[1], rot[2]));
-            sl.target.position.copy(sl.position).add(dir);
-            sl.target.updateMatrixWorld(true);
-            scene.add(sl);
-            scene.add(sl.target);
-            break;
-          }
-          case 'RECTAREA': {
-            const rl = new THREE.RectAreaLight(color, intensity * 15, lData.width ?? 2, lData.height ?? 2);
-            rl.position.fromArray(pos);
-            rl.rotation.fromArray(rot);
-            scene.add(rl);
-            break;
-          }
+        const intensity = lData.intensity || 1;
+        if (lData.type === 'POINT') {
+          const light = new THREE.PointLight(color, intensity, lData.distance || 0, lData.decay || 2);
+          light.position.fromArray(lData.transform.position);
+          light.castShadow = lData.castShadow ?? true;
+          scene.add(light);
+        } else if (lData.type === 'SPOT') {
+          const light = new THREE.SpotLight(color, intensity, lData.distance || 0, lData.angle || Math.PI / 4, lData.penumbra || 0.5, lData.decay || 2);
+          light.position.fromArray(lData.transform.position);
+          light.castShadow = lData.castShadow ?? true;
+          scene.add(light);
+        } else if (lData.type === 'DIRECTIONAL') {
+          const light = new THREE.DirectionalLight(color, intensity);
+          light.position.fromArray(lData.transform.position);
+          light.castShadow = lData.castShadow ?? true;
+          scene.add(light);
         }
       });
     }
@@ -452,51 +500,32 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     quadScene.add(quadMesh);
     const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-    // Guardar posición original de luz solar para jittering
-    const baseSunPos = sun.position.clone();
-
-    setReady(true);
-    setStatus('Iniciando render fotorrealista acumulativo...');
-    setIsRendering(true);
-
-    // ── Loop de Acumulación Físico ─────────────────────────────────────────
     let currentSample = 0;
+    setIsRendering(true);
+    setReady(true);
 
+    // ── Loop de Acumulación Sub-Píxel ──────────────────────────────────────
     const loop = () => {
       if (!mountedRef.current || !rendererRef.current) return;
 
       currentSample++;
 
-      // 1. Jittering de sub-píxel para Super-Sampling Anti-Aliasing (Halton)
-      const dx = (halton(currentSample, 2) - 0.5) / w;
-      const dy = (halton(currentSample, 3) - 0.5) / h;
-      camera.setViewOffset(w, h, dx * w, dy * h, w, h);
+      // Sub-Pixel Jitter con secuencia de Halton
+      const jitterX = (halton(currentSample, 2) - 0.5) / w;
+      const jitterY = (halton(currentSample, 3) - 0.5) / h;
+      camera.setViewOffset(w, h, jitterX * w, jitterY * h, w, h);
 
-      // 2. Jittering suave de sombra solar para penumbra física
-      const lightJitterX = (Math.random() - 0.5) * 0.15;
-      const lightJitterY = (Math.random() - 0.5) * 0.15;
-      sun.position.set(baseSunPos.x + lightJitterX, baseSunPos.y + lightJitterY, baseSunPos.z);
-
-      // 3. Renderizar cuadro actual en rtCurrent
+      // Renderizar la vista jittered a rtCurrent
       renderer.setRenderTarget(rtCurrent);
       renderer.clear();
       renderer.render(scene, camera);
 
-      // 4. Meclar con cuadro acumulado
-      if (currentSample === 1) {
-        // Primer cuadro: copiar directamente a rtA
-        quadMaterial.uniforms.tNew.value = rtCurrent.texture;
-        quadMaterial.uniforms.tOld.value = rtCurrent.texture;
-        quadMaterial.uniforms.blendWeight.value = 1.0;
-      } else {
-        // Cuadros posteriores: mezclar 1/N con rtB (cuadro acumulado previo)
-        quadMaterial.uniforms.tNew.value = rtCurrent.texture;
-        quadMaterial.uniforms.tOld.value = rtB.texture;
-        quadMaterial.uniforms.blendWeight.value = 1.0 / currentSample;
-      }
+      // Mezclar la muestra nueva con el acumulado histórico (rtA -> rtB)
+      blendShader.uniforms.tNew.value = rtCurrent.texture;
+      blendShader.uniforms.tOld.value = currentSample === 1 ? rtCurrent.texture : rtA.texture;
+      blendShader.uniforms.blendWeight.value = 1.0 / currentSample;
 
-      // Renderizar mezcla en rtA
-      renderer.setRenderTarget(rtA);
+      renderer.setRenderTarget(rtB);
       renderer.clear();
       renderer.render(quadScene, quadCamera);
 
@@ -531,6 +560,280 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     rafRef.current = requestAnimationFrame(loop);
   }, [project, project.environment, currentTime, quality, fov, showGround, preset, lastCameraState, selectedCameraId, resolution]);
 
+  // ── GENERACIÓN Y EXPORTACIÓN DE VIDEO OFFLINE FRAME-BY-FRAME ──────────────
+  const startVideoRendering = useCallback(async () => {
+    if (!canvasRef.current || !containerRef.current) return;
+    if (isVideoRecording) return;
+
+    setIsVideoRecording(true);
+    setRecordedVideoUrl(null);
+    setStatus('Iniciando codificador de video...');
+
+    let w = containerRef.current.clientWidth;
+    let h = containerRef.current.clientHeight;
+
+    if (resolution === '720p') { w = 1280; h = 720; }
+    else if (resolution === '1080p') { w = 1920; h = 1080; }
+    else if (resolution === '4k') { w = 3840; h = 2160; }
+    else if (resolution === 'square') { w = 1080; h = 1080; }
+    else if (resolution === 'vertical') { w = 1080; h = 1920; }
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvasRef.current,
+      antialias: true,
+      preserveDrawingBuffer: true,
+      powerPreference: 'high-performance',
+    });
+    renderer.setSize(w, h, false);
+    renderer.setPixelRatio(1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = project.environment.exposure ?? 1.2;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const camera = new THREE.PerspectiveCamera(fov, w / h, 0.01, 1000);
+    const scene = new THREE.Scene();
+    await setupSceneEnvironment(scene, renderer, project.environment);
+
+    // Luces de Estudio
+    const sun = new THREE.DirectionalLight('#fffaf0', 4);
+    sun.position.set(6, 10, 6);
+    sun.castShadow = true;
+    sun.shadow.mapSize.width = 2048;
+    sun.shadow.mapSize.height = 2048;
+    scene.add(sun);
+
+    const fillLight = new THREE.DirectionalLight('#dce8ff', 2);
+    fillLight.position.set(-6, 4, -6);
+    scene.add(fillLight);
+
+    // Plano de suelo si activado
+    if (showGround) {
+      let minY = 0;
+      project.objects.forEach((obj: any) => {
+        if (obj.transform) minY = Math.min(minY, obj.transform.position[1] - 0.5);
+      });
+      const groundGeo = new THREE.PlaneGeometry(60, 60);
+      const groundMat = new THREE.MeshPhysicalMaterial({ color: new THREE.Color('#22242c'), roughness: 0.7 });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = minY - 0.01;
+      ground.receiveShadow = true;
+      scene.add(ground);
+    }
+
+    const texLoader = new THREE.TextureLoader();
+
+    const loadMaterial = async (obj: any): Promise<THREE.MeshPhysicalMaterial> => {
+      const projectMaterials = project.materials || [];
+      const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
+      const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
+      const rawColor = mData.colorBase || mData.color || obj.color || '#cccccc';
+      const finalColorHex = (typeof rawColor === 'string' && rawColor.trim() !== '' && rawColor !== '#000000')
+        ? rawColor : (obj.color && obj.color !== '#000000' ? obj.color : '#cccccc');
+
+      const mat = new THREE.MeshPhysicalMaterial({
+        color: new THREE.Color(finalColorHex),
+        metalness: mData.metalness ?? 0,
+        roughness: mData.roughness ?? 0.4,
+        transmission: mData.transmission ?? 0,
+        opacity: mData.opacity ?? obj.opacity ?? 1,
+        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
+        side: THREE.FrontSide,
+      });
+
+      const loads: Promise<void>[] = [];
+      if (mData.mapAlbedo || mData.map) loads.push(loadTex(texLoader, mData.mapAlbedo || mData.map, true).then(t => { mat.map = t; }).catch(() => {}));
+      if (mData.mapNormal || mData.normalMap) loads.push(loadTex(texLoader, mData.mapNormal || mData.normalMap).then(t => { mat.normalMap = t; }).catch(() => {}));
+      await Promise.all(loads);
+      return mat;
+    };
+
+    // Cargar objetos y mixers de animación GLTF
+    const loadedObjects: { mesh: THREE.Object3D; objData: any; mixer?: THREE.AnimationMixer }[] = [];
+
+    for (const obj of project.objects) {
+      if (!obj.visible) continue;
+      let mesh: THREE.Object3D | null = null;
+      let mixer: THREE.AnimationMixer | undefined = undefined;
+
+      if (obj.meshData) {
+        try {
+          if (obj.meshData.type === 'gltf') {
+            const loader = new GLTFLoader();
+            const dLoader = new DRACOLoader();
+            dLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+            loader.setDRACOLoader(dLoader);
+            loader.setMeshoptDecoder(MeshoptDecoder);
+            const gltf = await loader.loadAsync(obj.meshData.data);
+            mesh = gltf.scene;
+
+            if (gltf.animations && gltf.animations.length > 0) {
+              mixer = new THREE.AnimationMixer(mesh);
+              gltf.animations.forEach(clip => {
+                const action = mixer!.clipAction(clip);
+                action.play();
+              });
+            }
+
+            if (obj.materialId || (obj.material && Object.keys(obj.material).length > 0)) {
+              const mat = await loadMaterial(obj);
+              mesh.traverse((child: any) => {
+                if (child.isMesh) {
+                  child.material = mat;
+                  child.castShadow = true;
+                  child.receiveShadow = true;
+                }
+              });
+            } else {
+              mesh.traverse((child: any) => {
+                if (child.isMesh) {
+                  child.castShadow = true;
+                  child.receiveShadow = true;
+                }
+              });
+            }
+          } else if (obj.meshData.type === 'obj') {
+            const group = await new OBJLoader().loadAsync(obj.meshData.data);
+            const mat = await loadMaterial(obj);
+            group.traverse((child: any) => { if (child.isMesh) { child.material = mat; child.castShadow = true; child.receiveShadow = true; } });
+            mesh = group;
+          } else if (obj.meshData.type === 'stl') {
+            const geo = await new STLLoader().loadAsync(obj.meshData.data);
+            geo.computeVertexNormals();
+            const mat = await loadMaterial(obj);
+            const m = new THREE.Mesh(geo, mat);
+            m.castShadow = true; m.receiveShadow = true;
+            mesh = m;
+          }
+        } catch (e) {
+          console.error(`Error al cargar modelo en render de video:`, e);
+        }
+      }
+
+      if (!mesh) {
+        try {
+          const geo = createBaseGeometry(obj);
+          geo.computeVertexNormals();
+          const mat = await loadMaterial(obj);
+          const m = new THREE.Mesh(geo, mat);
+          m.castShadow = true; m.receiveShadow = true;
+          mesh = m;
+        } catch (_) {}
+      }
+
+      if (mesh) {
+        scene.add(mesh);
+        loadedObjects.push({ mesh, objData: obj, mixer });
+      }
+    }
+
+    // Posición inicial de la cámara
+    const camObj = selectedCameraId ? project.cameras?.find(c => c.id === selectedCameraId) : null;
+    if (camObj) {
+      const evalCam = evaluateCameraTransform(camObj, project.objects, 0, effectiveVideoDuration);
+      camera.position.copy(evalCam.position);
+      if (evalCam.target) camera.lookAt(evalCam.target);
+      camera.fov = evalCam.fov;
+    } else if ((lastCameraState as any)?.position) {
+      camera.position.fromArray((lastCameraState as any).position);
+      camera.lookAt(new THREE.Vector3().fromArray((lastCameraState as any).target ?? [0, 0, 0]));
+    } else {
+      camera.position.set(0, 2, 6);
+      camera.lookAt(0, 0, 0);
+    }
+    camera.updateProjectionMatrix();
+
+    // Configurar MediaRecorder usando captureStream con el FPS deseado
+    const totalDuration = effectiveVideoDuration;
+    const fps = videoFps;
+    const totalFrames = Math.max(1, Math.ceil(totalDuration * fps));
+    const mimeType = supportedCodecs.find(c => c.id === videoCodec && c.supported)?.id || 'video/webm';
+
+    // Primer render previo para inicializar el buffer del canvas
+    renderer.render(scene, camera);
+
+    const stream = canvasRef.current.captureStream(fps);
+    const mediaRecorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: videoBitrate * 1000000,
+    });
+
+    const chunks: Blob[] = [];
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    mediaRecorder.start();
+
+    const startTimeMs = Date.now();
+    const frameDelayMs = Math.max(16, Math.floor(1000 / fps));
+
+    // Renderizar cuadro a cuadro
+    for (let frame = 0; frame < totalFrames; frame++) {
+      if (!mountedRef.current) break;
+
+      const frameTime = (frame / fps);
+
+      // 1. Actualizar animaciones GLTF y transformaciones de objetos
+      loadedObjects.forEach(item => {
+        if (item.mixer) {
+          item.mixer.setTime(frameTime);
+        }
+        const tr = getInterpolatedTransform(item.objData, frameTime);
+        item.mesh.position.fromArray(tr.position);
+        item.mesh.rotation.fromArray(tr.rotation);
+        item.mesh.scale.fromArray(tr.scale);
+        item.mesh.updateMatrixWorld(true);
+      });
+
+      // 2. Actualizar Cámara
+      if (camObj) {
+        const evalCam = evaluateCameraTransform(camObj, project.objects, frameTime, totalDuration);
+        camera.position.copy(evalCam.position);
+        if (evalCam.target) camera.lookAt(evalCam.target);
+        camera.fov = evalCam.fov;
+        camera.updateProjectionMatrix();
+      }
+
+      scene.updateMatrixWorld(true);
+
+      // 3. Renderizar cuadro
+      renderer.clear();
+      renderer.render(scene, camera);
+
+      // Calcular ETA
+      const elapsedSec = (Date.now() - startTimeMs) / 1000;
+      const avgSecPerFrame = elapsedSec / (frame + 1);
+      const remainingSec = Math.round((totalFrames - (frame + 1)) * avgSecPerFrame);
+
+      setVideoProgress({
+        currentFrame: frame + 1,
+        totalFrames,
+        pct: Math.round(((frame + 1) / totalFrames) * 100),
+        etaSec: remainingSec,
+      });
+
+      setStatus(`Generando video: Cuadro ${frame + 1} / ${totalFrames} (${Math.round(((frame + 1) / totalFrames) * 100)}%)`);
+
+      // Breve retardo por cuadro para que MediaRecorder registre el fotograma del stream
+      await new Promise(r => setTimeout(r, frameDelayMs));
+    }
+
+    // Detener MediaRecorder y generar URL de video
+    await new Promise(r => setTimeout(r, 200));
+    mediaRecorder.stop();
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(chunks, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      setRecordedVideoUrl(url);
+      setIsVideoRecording(false);
+      setStatus('✓ Video renderizado y listo para descargar!');
+    };
+  }, [
+    project, currentTime, resolution, fov, selectedCameraId, lastCameraState, showGround,
+    effectiveVideoDuration, videoFps, videoBitrate, videoCodec, supportedCodecs, isVideoRecording
+  ]);
+
   useEffect(() => {
     mountedRef.current = true;
     startRender();
@@ -544,7 +847,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     };
   }, []);
 
-  const handleDownload = () => {
+  const handleDownloadPhoto = () => {
     if (!canvasRef.current || samples < 1) return;
     const link = document.createElement('a');
     link.download = `render_${project.name}_${samples}spp.png`;
@@ -559,17 +862,43 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl w-full max-w-5xl h-[88vh] flex flex-col overflow-hidden shadow-2xl">
         {/* ── Header ── */}
         <div className="px-6 py-4 bg-zinc-900/80 border-b border-zinc-800 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-4">
             <div className="p-2 bg-violet-600/20 text-violet-400 rounded-xl border border-violet-500/30">
               <Sparkles size={18} />
             </div>
             <div>
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                Renderizado Fotorrealista
+                Estudio de Renderizado Profesional
               </h2>
               <p className="text-[11px] text-zinc-400 font-mono">
                 {status}
               </p>
+            </div>
+
+            {/* Selector de Modo: Foto vs Video */}
+            <div className="flex bg-zinc-950 p-1 rounded-xl border border-zinc-800 ml-4">
+              <button
+                onClick={() => setRenderType('PHOTO')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  renderType === 'PHOTO'
+                    ? 'bg-violet-600 text-white shadow-md'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Camera size={14} />
+                Foto Fija (PNG)
+              </button>
+              <button
+                onClick={() => setRenderType('VIDEO')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                  renderType === 'VIDEO'
+                    ? 'bg-violet-600 text-white shadow-md'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Film size={14} />
+                Video Animado
+              </button>
             </div>
           </div>
 
@@ -597,31 +926,154 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           {/* Panel Lateral de Ajustes */}
           {showSettings && (
             <div className="w-80 bg-zinc-900 border-r border-zinc-800 p-5 flex flex-col gap-5 overflow-y-auto z-10 flex-shrink-0">
-              {/* Calidad */}
-              <div>
-                <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider block mb-2">
-                  Calidad de Render
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  {(Object.keys(QUALITY_PRESETS) as QualityKey[]).map(key => {
-                    const q = QUALITY_PRESETS[key];
-                    const active = quality === key;
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => setQuality(key)}
-                        className={`p-2.5 rounded-xl border text-left transition-all ${
-                          active
-                            ? 'bg-violet-600/20 border-violet-500 text-white'
-                            : 'bg-zinc-800/50 border-zinc-700/50 text-zinc-400 hover:bg-zinc-800'
-                        }`}>
-                        <div className="text-xs font-bold">{q.label}</div>
-                        <div className="text-[10px] text-zinc-400 font-mono mt-0.5">{q.samples} SPP · {q.desc}</div>
-                      </button>
-                    );
-                  })}
+              
+              {/* ── SECCIÓN ESPECÍFICA DE VIDEO ── */}
+              {renderType === 'VIDEO' && (
+                <div className="p-4 bg-violet-950/40 rounded-2xl border border-violet-500/30 space-y-4 animate-in fade-in">
+                  <div className="flex items-center gap-2 text-violet-300">
+                    <Film size={16} />
+                    <h4 className="text-xs font-bold uppercase tracking-wider">Ajustes de Video Animado</h4>
+                  </div>
+
+                  {/* Origen de Duración */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                      Duración del Video
+                    </label>
+                    <select
+                      value={durationSource}
+                      onChange={e => setDurationSource(e.target.value as any)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
+                    >
+                      {detectedAnimationInfo.maxDur > 0 && (
+                        <option value="ANIMATED_OBJECT">
+                          🎬 Objeto Animado ({detectedAnimationInfo.maxDur.toFixed(2)}s)
+                        </option>
+                      )}
+                      <option value="TIMELINE">
+                        ⏱️ Línea de Tiempo del Proyecto ({(project.duration || 5).toFixed(2)}s)
+                      </option>
+                      <option value="CUSTOM">
+                        ⚙️ Duración Personalizada
+                      </option>
+                    </select>
+
+                    {detectedAnimationInfo.maxDur > 0 && durationSource === 'ANIMATED_OBJECT' && (
+                      <p className="text-[10px] text-violet-300/80 font-mono flex items-center gap-1 pt-1">
+                        <CheckCircle size={11} />
+                        Detectado: {detectedAnimationInfo.sourceName}
+                      </p>
+                    )}
+
+                    {durationSource === 'CUSTOM' && (
+                      <div className="flex items-center gap-2 pt-1">
+                        <input
+                          type="range" min="1" max="60" step="0.5"
+                          value={customDuration}
+                          onChange={e => setCustomDuration(parseFloat(e.target.value))}
+                          className="flex-1 accent-violet-500 bg-zinc-950 rounded-lg h-1.5"
+                        />
+                        <span className="text-xs font-mono text-white w-12 text-right">{customDuration.toFixed(1)}s</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* FPS */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                      Cuadros por Segundo (FPS)
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[24, 30, 60].map(f => (
+                        <button
+                          key={f}
+                          onClick={() => setVideoFps(f as any)}
+                          className={`py-1.5 rounded-lg border text-xs font-bold transition-all ${
+                            videoFps === f
+                              ? 'bg-violet-600 border-violet-400 text-white'
+                              : 'bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {f} FPS
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Tasa de Bits / Compresión */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                      Calidad de Compresión (Bitrate)
+                    </label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {[
+                        { mbps: 16, label: 'Master (16 Mbps)' },
+                        { mbps: 8,  label: 'Pro HD (8 Mbps)' },
+                        { mbps: 4,  label: 'Estándar (4 Mbps)' },
+                        { mbps: 2,  label: 'Web (2 Mbps)' },
+                      ].map(b => (
+                        <button
+                          key={b.mbps}
+                          onClick={() => setVideoBitrate(b.mbps)}
+                          className={`p-1.5 rounded-lg border text-[10px] font-bold transition-all ${
+                            videoBitrate === b.mbps
+                              ? 'bg-violet-600 border-violet-400 text-white'
+                              : 'bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {b.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Formato y Códec */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest block">
+                      Códec de Salida
+                    </label>
+                    <select
+                      value={videoCodec}
+                      onChange={e => setVideoCodec(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500"
+                    >
+                      {supportedCodecs.map(c => (
+                        <option key={c.id} value={c.id} disabled={!c.supported}>
+                          {c.label} {!c.supported ? '(No soportado)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* Calidad de Render (para foto) */}
+              {renderType === 'PHOTO' && (
+                <div>
+                  <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider block mb-2">
+                    Calidad de Muestreo (SSAA)
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(Object.keys(QUALITY_PRESETS) as QualityKey[]).map(key => {
+                      const q = QUALITY_PRESETS[key];
+                      const active = quality === key;
+                      return (
+                        <button
+                          key={key}
+                          onClick={() => setQuality(key)}
+                          className={`p-2.5 rounded-xl border text-left transition-all ${
+                            active
+                              ? 'bg-violet-600/20 border-violet-500 text-white'
+                              : 'bg-zinc-800/50 border-zinc-700/50 text-zinc-400 hover:bg-zinc-800'
+                          }`}>
+                          <div className="text-xs font-bold">{q.label}</div>
+                          <div className="text-[10px] text-zinc-400 font-mono mt-0.5">{q.samples} SPP · {q.desc}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Resolución */}
               <div>
@@ -631,9 +1083,11 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                 <div className="grid grid-cols-2 gap-2">
                   {[
                     { id: 'viewport', label: 'Viewport' },
-                    { id: '1080p',    label: 'Full HD (1080p)' },
+                    { id: '720p',     label: '720p HD' },
+                    { id: '1080p',    label: '1080p Full HD' },
                     { id: '4k',       label: '4K Ultra HD' },
                     { id: 'square',   label: 'Cuadrado (1:1)' },
+                    { id: 'vertical', label: 'Vertical (9:16)' },
                   ].map(r => (
                     <button
                       key={r.id}
@@ -653,7 +1107,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
               <div>
                 <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider block mb-2 flex items-center gap-1.5">
                   <Camera size={13} />
-                  Cámara
+                  Cámara de Render
                 </label>
                 <select
                   value={selectedCameraId || ''}
@@ -661,7 +1115,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                   className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500">
                   <option value="">Vista de Edición Actual</option>
                   {(project.cameras || []).map(c => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
+                    <option key={c.id} value={c.id}>
+                      {c.name} {c.targetObjectId ? '🎯(Sigue Objetivo)' : ''} {c.pathObjectId ? '🛣️(En Ruta)' : ''}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -681,7 +1137,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                 />
               </div>
 
-              {/* Opciones de Entorno, Fondo e Iluminación */}
+              {/* Opciones de Entorno e Iluminación */}
               <div className="space-y-3 pt-2 border-t border-zinc-800">
                 <label className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block flex items-center justify-between">
                   <span className="flex items-center gap-1.5">
@@ -723,97 +1179,6 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                   })}
                 </div>
 
-                {/* Modo de Fondo */}
-                <div>
-                  <span className="text-[10px] text-zinc-400 font-medium block mb-1">Modo de Fondo</span>
-                  <div className="grid grid-cols-2 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800">
-                    {[
-                      { id: 'GRADIENT', label: 'Estudio (Gradiente)' },
-                      { id: 'HDRI',     label: 'Imagen HDRI' },
-                      { id: 'COLOR',    label: 'Color Sólido' },
-                      { id: 'TRANSPARENT', label: 'Transparente' },
-                    ].map(m => {
-                      const currentMode = project.environment.backgroundMode || (project.environment.backgroundVisible ? 'HDRI' : 'GRADIENT');
-                      const active = currentMode === m.id;
-                      return (
-                        <button
-                          key={m.id}
-                          onClick={() => updateEnvironment({
-                            backgroundMode: m.id as BackgroundMode,
-                            backgroundVisible: m.id === 'HDRI' || m.id === 'GRADIENT',
-                          })}
-                          className={`py-1.5 px-2 rounded-lg text-[10px] font-bold transition-all ${
-                            active
-                              ? 'bg-violet-600 text-white shadow'
-                              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
-                          }`}
-                        >
-                          {m.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Desenfoque del Fondo Bokeh */}
-                {(project.environment.backgroundMode === 'HDRI' || (!project.environment.backgroundMode && project.environment.backgroundVisible)) && (
-                  <div>
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="text-[10px] text-zinc-400">Desenfoque de Fondo (Bokeh)</span>
-                      <span className="text-[10px] font-mono text-zinc-300">
-                        {Math.round((project.environment.backgroundBlur ?? 0.25) * 100)}%
-                      </span>
-                    </div>
-                    <input
-                      type="range" min="0" max="1" step="0.05"
-                      value={project.environment.backgroundBlur ?? 0.25}
-                      onChange={e => updateEnvironment({ backgroundBlur: parseFloat(e.target.value) })}
-                      className="w-full accent-violet-500 bg-zinc-800 rounded-lg h-1.5 cursor-pointer"
-                    />
-                  </div>
-                )}
-
-                {/* Color de Fondo Sólido */}
-                {project.environment.backgroundMode === 'COLOR' && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-zinc-400">Color Sólido de Fondo</span>
-                    <input
-                      type="color"
-                      value={project.environment.backgroundColor || '#16171d'}
-                      onChange={e => updateEnvironment({ backgroundColor: e.target.value })}
-                      className="w-8 h-6 bg-transparent rounded border border-zinc-700 cursor-pointer"
-                    />
-                  </div>
-                )}
-
-                {/* Rotación HDRI */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] text-zinc-400">Rotación de Luz (Dirección)</span>
-                    <span className="text-[10px] font-mono text-zinc-300">{project.environment.rotation ?? 0}°</span>
-                  </div>
-                  <input
-                    type="range" min="0" max="360" step="5"
-                    value={project.environment.rotation ?? 0}
-                    onChange={e => updateEnvironment({ rotation: parseInt(e.target.value, 10) })}
-                    className="w-full accent-violet-500 bg-zinc-800 rounded-lg h-1.5 cursor-pointer"
-                  />
-                </div>
-
-                {/* Intensidad IBL */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] text-zinc-400">Intensidad de Luz HDRI</span>
-                    <span className="text-[10px] font-mono text-zinc-300">{(project.environment.intensity ?? 1.2).toFixed(1)}x</span>
-                  </div>
-                  <input
-                    type="range" min="0.1" max="4.0" step="0.1"
-                    value={project.environment.intensity ?? 1.2}
-                    onChange={e => updateEnvironment({ intensity: parseFloat(e.target.value) })}
-                    className="w-full accent-violet-500 bg-zinc-800 rounded-lg h-1.5 cursor-pointer"
-                  />
-                </div>
-
                 {/* Exposición Global */}
                 <div>
                   <div className="flex justify-between items-center mb-1">
@@ -839,13 +1204,15 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                 </label>
               </div>
 
-              {/* Botón Aplicar */}
-              <button
-                onClick={startRender}
-                className="mt-auto py-2.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-violet-900/30 flex items-center justify-center gap-2">
-                <RefreshCw size={14} />
-                Reiniciar Render
-              </button>
+              {/* Botón Aplicar / Reiniciar */}
+              {renderType === 'PHOTO' && (
+                <button
+                  onClick={startRender}
+                  className="mt-auto py-2.5 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-violet-900/30 flex items-center justify-center gap-2">
+                  <RefreshCw size={14} />
+                  Reiniciar Preview Foto
+                </button>
+              )}
             </div>
           )}
 
@@ -864,26 +1231,69 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
               </div>
             )}
 
-            {/* Controles de render flotantes */}
-            {ready && (
-              <div className="absolute top-3 right-3 flex flex-col gap-1.5 z-20">
-                {samples < preset.samples && (
-                  <button onClick={() => setIsRendering(v => !v)}
-                    className="p-2.5 bg-zinc-900/80 backdrop-blur-sm border border-white/10 rounded-xl text-white hover:bg-zinc-800 transition-all"
-                    title={isRendering ? 'Pausar' : 'Continuar'}>
-                    {isRendering ? <Pause size={15} /> : <Play size={15} />}
-                  </button>
-                )}
-                <button onClick={startRender}
-                  className="p-2.5 bg-zinc-900/80 backdrop-blur-sm border border-white/10 rounded-xl text-white hover:bg-zinc-800 transition-all"
-                  title="Reiniciar">
-                  <RefreshCw size={15} />
-                </button>
+            {/* Progreso de Grabación de Video Overlay */}
+            {isVideoRecording && (
+              <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center p-8 z-30">
+                <div className="p-4 bg-violet-600/20 border border-violet-500/40 rounded-full animate-bounce mb-4 text-violet-400">
+                  <Film size={32} />
+                </div>
+                <h3 className="text-base font-bold text-white mb-1">
+                  Renderizando Video Cuadro a Cuadro...
+                </h3>
+                <p className="text-xs text-zinc-400 font-mono mb-4">
+                  Cuadro {videoProgress.currentFrame} / {videoProgress.totalFrames} ({videoProgress.pct}%)
+                  {videoProgress.etaSec > 0 ? ` · Tiempo estimado: ${videoProgress.etaSec}s` : ''}
+                </p>
+
+                <div className="w-80 h-2 bg-zinc-800 rounded-full overflow-hidden mb-6">
+                  <div
+                    className="h-full bg-gradient-to-r from-violet-600 to-indigo-400 transition-all duration-200"
+                    style={{ width: `${videoProgress.pct}%` }}
+                  />
+                </div>
+
+                <div className="text-[11px] text-zinc-500 max-w-sm text-center">
+                  Capturando movimiento continuo sin pérdida de cuadros, aplicando sombras suaves y desplazamiento de cámara.
+                </div>
               </div>
             )}
 
-            {/* Barra de progreso */}
-            {ready && (
+            {/* Vista previa de video completado */}
+            {recordedVideoUrl && !isVideoRecording && (
+              <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-6 z-30">
+                <div className="max-w-xl w-full bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+                  <div className="px-4 py-3 bg-zinc-950 border-b border-zinc-800 flex items-center justify-between">
+                    <span className="text-xs font-bold text-white flex items-center gap-2">
+                      <CheckCircle size={15} className="text-emerald-400" />
+                      Vista Previa de Video Renderizado
+                    </span>
+                    <button
+                      onClick={() => setRecordedVideoUrl(null)}
+                      className="text-zinc-400 hover:text-white p-1"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                  <video src={recordedVideoUrl} controls autoPlay loop className="w-full h-64 object-contain bg-black" />
+                  <div className="p-4 bg-zinc-950/80 flex items-center justify-between">
+                    <div className="text-[11px] text-zinc-400 font-mono">
+                      Duración: {effectiveVideoDuration.toFixed(1)}s · {videoFps} FPS · {videoBitrate} Mbps
+                    </div>
+                    <a
+                      href={recordedVideoUrl}
+                      download={`render_video_${project.name}.webm`}
+                      className="px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-violet-900/30 flex items-center gap-2"
+                    >
+                      <Download size={14} />
+                      Guardar Video (.webm)
+                    </a>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Barra de progreso de Foto */}
+            {ready && renderType === 'PHOTO' && (
               <div className="absolute bottom-0 left-0 right-0 px-4 py-3 bg-gradient-to-t from-black/80 to-transparent z-20">
                 <div className="flex items-center justify-between text-[10px] font-bold text-white/80 mb-1.5">
                   <div className="flex items-center gap-2">
@@ -909,15 +1319,28 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         {/* ── Footer ── */}
         <div className="px-5 py-3 bg-zinc-900/50 border-t border-zinc-800 flex items-center justify-between flex-shrink-0">
           <span className="text-[10px] text-zinc-500">
-            {ready ? 'Renderizado Fotorrealista PBR — Super-Sampling Anti-Aliasing y Iluminación IBL' : 'Usa calidad Borrador para previsualizar rápido, Ultra para resultado final.'}
+            {renderType === 'PHOTO'
+              ? 'Renderizado Fotorrealista PBR — Super-Sampling Anti-Aliasing e Iluminación IBL'
+              : `Generador de Video Pro — ${effectiveVideoDuration.toFixed(1)}s de animación a ${videoFps} FPS (${videoBitrate} Mbps)`}
           </span>
-          <button
-            onClick={handleDownload}
-            disabled={samples < 1}
-            className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-[11px] font-bold transition-all active:scale-[0.98] shadow-lg shadow-violet-900/30">
-            <Download size={14} />
-            Guardar PNG
-          </button>
+
+          {renderType === 'PHOTO' ? (
+            <button
+              onClick={handleDownloadPhoto}
+              disabled={samples < 1}
+              className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-[11px] font-bold transition-all active:scale-[0.98] shadow-lg shadow-violet-900/30">
+              <Download size={14} />
+              Guardar PNG
+            </button>
+          ) : (
+            <button
+              onClick={startVideoRendering}
+              disabled={isVideoRecording}
+              className="flex items-center gap-2 px-5 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold transition-all active:scale-[0.98] shadow-lg shadow-violet-900/40">
+              <Video size={15} />
+              {isVideoRecording ? 'Renderizando Video...' : '🎥 Iniciar Renderizado de Video'}
+            </button>
+          )}
         </div>
       </div>
     </div>,

@@ -191,7 +191,7 @@ const autoSmoothBezierHandles = (
 interface Store extends AppState {
   resetProject: () => void;
   setProject: (project: Project) => void;
-  addObject: (type: PrimitiveType) => void;
+  addObject: (type: PrimitiveType | CSGObject) => void;
   addLight: (type: LightType) => void;
   removeLight: (id: string) => void;
   updateLight: (id: string, updates: Partial<LightObject>) => void;
@@ -456,7 +456,6 @@ export const useStore = create<Store>()((set, get) => ({
       lights: get().project.lights.map(l => l.id === id ? { ...l, ...updates } : l)
     };
     set({ project });
-    get().saveHistory();
   },
 
   selectLight: (id) => {
@@ -490,7 +489,6 @@ export const useStore = create<Store>()((set, get) => ({
   updateCamera: (id, updates) => {
     const project = { ...get().project, cameras: (get().project.cameras || []).map(c => c.id === id ? { ...c, ...updates } : c) };
     set({ project });
-    get().saveHistory();
   },
 
   selectCamera: (id) => {
@@ -711,8 +709,18 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   // ── Add object ────────────────────────────────────────────────────────────
-  addObject: (type) => {
+  addObject: (typeOrObj) => {
     const state = get();
+    if (typeof typeOrObj === 'object' && typeOrObj !== null) {
+      set({
+        project: { ...state.project, objects: [...state.project.objects, typeOrObj] },
+        selectedObjectId: typeOrObj.id,
+        selectedObjectIds: [typeOrObj.id],
+      });
+      get().saveHistory();
+      return;
+    }
+    const type = typeOrObj as PrimitiveType;
     const p: CSGObject['parameters'] = {};
     switch (type) {
       case 'SPHERE':       p.segments = 32; p.sphereType = 'UV'; p.detail = 1; break;

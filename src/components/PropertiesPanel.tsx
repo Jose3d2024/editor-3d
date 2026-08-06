@@ -24,6 +24,7 @@ import { useStore } from '../store/useStore';
 import type { CSGObject } from '../types';
 import { MapEditorModal } from './MapEditorModal';
 import { ProceduralMapModal, ProceduralConfig } from './ProceduralMapModal';
+import { createCameraPathObject } from '../utils/cameraPathHelper';
 import {
   ChevronDown, ChevronUp, ChevronRight, RotateCw, Maximize, Maximize2,
   Move, Eye, EyeOff, Trash2, Copy, Save, Book,
@@ -32,7 +33,7 @@ import {
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   Image as ImageIcon, Upload, Download, FileDown,
   Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split,
-  ArrowUpFromLine, Target, ArrowDownNarrowWide
+  ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route
 } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
@@ -1420,7 +1421,7 @@ const HierarchyItem: React.FC<{
 };
 
 const CameraPropertiesSection: React.FC<{ camera: CameraObject }> = ({ camera }) => {
-  const { updateCamera, selectCamera } = useStore();
+  const { updateCamera, selectCamera, project, addObject } = useStore();
 
   const handleChange = (field: keyof CameraObject, value: any) => {
     updateCamera(camera.id, { [field]: value });
@@ -1443,6 +1444,21 @@ const CameraPropertiesSection: React.FC<{ camera: CameraObject }> = ({ camera })
     updateCamera(camera.id, { fov: newFov, filmGauge: newFilmGauge });
   };
 
+  const handleCreatePath = (type: 'CIRCLE' | 'SPIRAL' | 'SINE' = 'CIRCLE') => {
+    let targetPos: V3 = [0, 2, 0];
+    if (camera.targetObjectId) {
+      const tgtObj = project.objects.find(o => o.id === camera.targetObjectId);
+      if (tgtObj) targetPos = tgtObj.transform.position;
+    }
+    const newPath = createCameraPathObject(`Ruta_Camara_${camera.name}`, targetPos, 7, type);
+    addObject(newPath);
+    updateCamera(camera.id, {
+      pathObjectId: newPath.id,
+      followPathAnimation: true,
+      pathProgress: 0,
+    });
+  };
+
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-300">
       <div className="flex items-center gap-3 mb-6">
@@ -1452,6 +1468,101 @@ const CameraPropertiesSection: React.FC<{ camera: CameraObject }> = ({ camera })
         <div>
           <h3 className="text-sm font-bold text-white tracking-tight">{camera.name}</h3>
           <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">Propiedades de Cámara</p>
+        </div>
+      </div>
+
+      {/* ── SEGUIMIENTO DE OBJETIVO (TARGET TRACKING) ── */}
+      <div className="p-4 bg-indigo-950/30 rounded-2xl border border-indigo-500/20 space-y-3">
+        <div className="flex items-center gap-2 text-indigo-400">
+          <Target size={15} />
+          <h4 className="text-xs font-bold text-white uppercase tracking-wider">Objetivo de Cámara (Look At)</h4>
+        </div>
+        
+        <div className="space-y-1">
+          <label className="text-[10px] font-medium text-zinc-400">Marcar objeto objetivo a seguir</label>
+          <select
+            value={camera.targetObjectId || ''}
+            onChange={(e) => handleChange('targetObjectId', e.target.value || null)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500 transition-colors"
+          >
+            <option value="">-- Ninguno (Dirección Libres / Libre) --</option>
+            {project.objects.map(obj => (
+              <option key={obj.id} value={obj.id}>
+                🎯 {obj.name} ({obj.type})
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* ── RUTA Y TRAYECTORIA DE CÁMARA (CAMERA PATH & CURVE MOVEMENT) ── */}
+      <div className="p-4 bg-violet-950/30 rounded-2xl border border-violet-500/20 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-violet-400">
+            <Route size={15} />
+            <h4 className="text-xs font-bold text-white uppercase tracking-wider">Ruta / Trayectoria de Cámara</h4>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-[10px] font-medium text-zinc-400">Objeto o Curva para el desplazamiento</label>
+          <select
+            value={camera.pathObjectId || ''}
+            onChange={(e) => handleChange('pathObjectId', e.target.value || null)}
+            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500 transition-colors"
+          >
+            <option value="">-- Ninguna (Posición Estática) --</option>
+            {project.objects.map(obj => (
+              <option key={obj.id} value={obj.id}>
+                🛣️ {obj.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Botones de creación rápida de ruta */}
+          <div className="flex gap-1.5 pt-1">
+            <button
+              onClick={() => handleCreatePath('CIRCLE')}
+              className="flex-1 py-1.5 px-2 bg-violet-900/40 hover:bg-violet-800/60 border border-violet-700/50 rounded-lg text-[10px] font-bold text-violet-200 transition-all flex items-center justify-center gap-1">
+              <Compass size={12} />
+              + Crear Órbita
+            </button>
+            <button
+              onClick={() => handleCreatePath('SPIRAL')}
+              className="flex-1 py-1.5 px-2 bg-violet-900/40 hover:bg-violet-800/60 border border-violet-700/50 rounded-lg text-[10px] font-bold text-violet-200 transition-all flex items-center justify-center gap-1">
+              <Route size={12} />
+              + Espiral
+            </button>
+          </div>
+
+          {camera.pathObjectId && (
+            <div className="space-y-3 pt-2 border-t border-violet-500/20">
+              <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={camera.followPathAnimation ?? true}
+                  onChange={(e) => handleChange('followPathAnimation', e.target.checked)}
+                  className="rounded bg-zinc-950 border-zinc-700 text-violet-500 focus:ring-0"
+                />
+                <span className="font-semibold text-violet-300">Sincronizar con Línea de Tiempo</span>
+              </label>
+
+              {!(camera.followPathAnimation ?? true) && (
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <span className="text-zinc-400">Progreso en Ruta</span>
+                    <span className="font-mono text-violet-300">{Math.round((camera.pathProgress || 0) * 100)}%</span>
+                  </div>
+                  <input
+                    type="range" min="0" max="1" step="0.01"
+                    value={camera.pathProgress || 0}
+                    onChange={(e) => handleChange('pathProgress', parseFloat(e.target.value))}
+                    className="w-full accent-violet-500 bg-zinc-900 rounded-lg h-1.5"
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

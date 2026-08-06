@@ -21,6 +21,7 @@ import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
+import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { Plus, Minus, ChevronDown, Globe } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 
@@ -758,6 +759,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     grid.visible = projectRef.current.showGrid !== false;
 
     let camera: THREE.Camera;
+    let initialCamTarget: THREE.Vector3 | null = null;
     if (type === 'CAMERA' && viewCameraId) {
       const camData = projectRef.current.cameras?.find(c => c.id === viewCameraId);
       if (camData) {
@@ -771,6 +773,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         camera.position.fromArray(camData.transform.position);
         camera.rotation.fromArray(camData.transform.rotation);
         camera.scale.fromArray(camData.transform.scale);
+
+        const dir = new THREE.Vector3(0, 0, -1).applyEuler(camera.rotation);
+        initialCamTarget = new THREE.Vector3().copy(camera.position).addScaledVector(dir, 5);
       } else {
         camera = new THREE.PerspectiveCamera(50, width/height, 0.1, 1000);
         camera.position.set(5,5,5);
@@ -813,16 +818,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     scene.background = new THREE.Color(0x1a1a1a);
     pmremGenerator.dispose();
 
-    // ALL viewports get OrbitControls — perspective gets full rotate+pan+zoom,
-    // ortho views get pan+zoom only (rotate disabled so the angle is locked).
+    // ALL viewports get OrbitControls — perspective and camera views get full rotate+pan+zoom
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping  = type === 'PERSPECTIVE';
+    controls.enableDamping  = type === 'PERSPECTIVE' || type === 'CAMERA';
     controls.dampingFactor  = 0.1;
     controls.enableRotate   = type === 'PERSPECTIVE' || type === 'CAMERA';
     controls.mouseButtons   = (type === 'PERSPECTIVE' || type === 'CAMERA')
       ? { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
       : { LEFT: THREE.MOUSE.PAN,    MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     controls.screenSpacePanning = true;
+    if (initialCamTarget) {
+      controls.target.copy(initialCamTarget);
+      controls.update();
+    }
     
     controlsRef.current = controls;
 
@@ -1015,8 +1023,13 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       lens.userData = { id: cData.id, isCamera: true };
       camGroup.add(lens);
 
-      camGroup.position.fromArray(cData.transform.position);
-      camGroup.rotation.fromArray(cData.transform.rotation);
+      const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
+      camGroup.position.copy(evalCam.position);
+      if (evalCam.target) {
+        camGroup.lookAt(evalCam.target);
+      } else {
+        camGroup.rotation.fromArray(cData.transform.rotation);
+      }
       camGroup.scale.fromArray(cData.transform.scale);
       
       camGroup.userData = { id: cData.id, isCamera: true };
@@ -1108,6 +1121,36 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       id = requestAnimationFrame(animate);
       try {
         if (rendererRef.current && cameraRef.current && sceneRef.current) {
+          // Dynamic camera path & target tracking evaluation (only when viewing through a camera)
+          const { project, currentTime } = useStore.getState();
+          if (type === 'CAMERA' && viewCameraId) {
+            const camData = project.cameras?.find(c => c.id === viewCameraId);
+            if (camData && (camData.targetObjectId || camData.pathObjectId)) {
+              const evalCam = evaluateCameraTransform(camData, project.objects, currentTime, project.duration || 5);
+              cameraRef.current.position.copy(evalCam.position);
+              if (evalCam.target) {
+                cameraRef.current.lookAt(evalCam.target);
+                if (controlsRef.current) {
+                  controlsRef.current.target.copy(evalCam.target);
+                }
+              }
+            }
+          }
+
+          // Dynamic camera path & target tracking evaluation for visual cameras in scene
+          (project.cameras || []).forEach(cData => {
+            const cg = camerasRef.current.get(cData.id);
+            if (cg) {
+              const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
+              cg.position.copy(evalCam.position);
+              if (evalCam.target) {
+                cg.lookAt(evalCam.target);
+              } else {
+                cg.rotation.fromArray(cData.transform.rotation);
+              }
+            }
+          });
+
           if (controlsRef.current) controlsRef.current.update();
 
           // Update parallax camera position
@@ -2824,7 +2867,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (selLight) {
         objPos.fromArray(selLight.transform.position);
       } else if (selCam) {
-        objPos.fromArray(selCam.transform.position);
+        const evalCam = evaluateCameraTransform(selCam, projectRef.current.objects, currentTime, projectRef.current.duration || 5);
+        objPos.copy(evalCam.position);
       } else if (selObj) {
         if (editMode==='OBJECT') {
           const _interp = getInterpolatedTransform(selObj, currentTime);
@@ -3076,7 +3120,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           if (selLight) {
             gizmoWorldPos.fromArray(selLight.transform.position);
           } else if (selCam) {
-            gizmoWorldPos.fromArray(selCam.transform.position);
+            const evalCam = evaluateCameraTransform(selCam, projectRef.current.objects, currentTime, projectRef.current.duration || 5);
+            gizmoWorldPos.copy(evalCam.position);
           } else if (selObj) {
             if (editMode === 'OBJECT') {
               const _interp = getInterpolatedTransform(selObj, currentTime);
@@ -4217,7 +4262,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         );
         controlsRef.current.enabled = !drawMode && !isSiluetaActiveInThisViewport;
       }
-      isDraggingRef.current = false;
+      if (isDraggingRef.current) {
+        saveHistory();
+        isDraggingRef.current = false;
+      }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -4450,7 +4498,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       } else if (selectedCameraId) {
         const c = projectRef.current.cameras?.find(c => c.id === selectedCameraId);
         if (!c || !cameraRef.current || !renderer) return;
-        gizmoPos.fromArray(c.transform.position);
+        const evalCam = evaluateCameraTransform(c, projectRef.current.objects, currentTime, projectRef.current.duration || 5);
+        gizmoPos.copy(evalCam.position);
       } else if (selectedObjectId) {
         if (!selObj||!cameraRef.current||!renderer) return;
 

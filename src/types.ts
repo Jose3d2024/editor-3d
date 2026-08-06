@@ -222,6 +222,13 @@ export interface CameraObject {
   near: number;
   far: number;
   zoom: number;
+
+  // Seguimiento de Objetivo y Ruta de Cámara
+  targetObjectId?: string | null;     // ID del objeto al que la cámara apunta/sigue
+  pathObjectId?: string | null;       // ID de la línea o curva por la que se desplaza la cámara
+  pathProgress?: number;              // Progreso manual (0.00 a 1.00) en la ruta
+  followPathAnimation?: boolean;      // Sincronizar movimiento en la ruta con la línea de tiempo
+  cameraOffset?: V3;                  // Desplazamiento opcional respecto a la ruta o al objetivo
 }
 
 export interface Project {
