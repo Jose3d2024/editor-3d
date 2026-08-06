@@ -139,12 +139,23 @@ export async function setupSceneEnvironment(
   scene.backgroundRotation.set(0, rotRad, 0);
 
   // Background Handling according to backgroundMode or backgroundVisible
-  const bgMode: BackgroundMode = env.backgroundMode || (env.backgroundVisible ? 'HDRI' : 'GRADIENT');
+  let bgMode: BackgroundMode = env.backgroundMode ?? (env.backgroundVisible ? 'HDRI' : 'GRADIENT');
+  if (env.backgroundVisible === false) {
+    bgMode = 'GRADIENT';
+  }
+
   let bgTexture: THREE.Texture | null = null;
 
   if (bgMode === 'HDRI') {
-    scene.background = envTexture;
-    scene.backgroundBlurriness = env.backgroundBlur ?? 0.25;
+    if (envTexture) {
+      envTexture.mapping = THREE.EquirectangularReflectionMapping;
+      envTexture.generateMipmaps = true;
+      envTexture.needsUpdate = true;
+      scene.background = envTexture;
+    } else {
+      scene.background = pmremTexture;
+    }
+    scene.backgroundBlurriness = env.backgroundBlur ?? 0;
     scene.backgroundIntensity = env.backgroundIntensity ?? 1.0;
   } else if (bgMode === 'GRADIENT') {
     bgTexture = createStudioGradientBackground(env.backgroundColor || '#181921');

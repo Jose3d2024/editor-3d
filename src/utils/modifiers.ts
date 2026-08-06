@@ -1881,9 +1881,20 @@ export function roundAnglesMesh(
   const outVerts: V3[] = [];
   const outFaces: MeshFace[] = [];
 
+  const vertHashMap = new Map<string, number>();
   const addVertex = (v: THREE.Vector3): number => {
+    // Quantize coordinates with 1e-4 tolerance to weld shared boundary vertices
+    const qx = Math.round(v.x * 10000);
+    const qy = Math.round(v.y * 10000);
+    const qz = Math.round(v.z * 10000);
+    const key = `${qx}_${qy}_${qz}`;
+    const existing = vertHashMap.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
     const idx = outVerts.length;
     outVerts.push([v.x, v.y, v.z]);
+    vertHashMap.set(key, idx);
     return idx;
   };
 
@@ -1891,23 +1902,20 @@ export function roundAnglesMesh(
     if (indices.length < 3) return indices;
     const v0 = new THREE.Vector3(...outVerts[indices[0]]);
     const v1 = new THREE.Vector3(...outVerts[indices[1]]);
-    const v2 = new THREE.Vector3(...outVerts[indices[2]]);
-    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    const vLast = new THREE.Vector3(...outVerts[indices[indices.length - 1]]);
+    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), vLast.clone().sub(v0));
     if (norm.dot(targetNormal) < 0) {
-      if (indices.length === 3) return [indices[0], indices[2], indices[1]];
-      if (indices.length === 4) return [indices[0], indices[3], indices[2], indices[1]];
       return [...indices].reverse();
     }
     return indices;
   };
 
-  // Inset each face away from its sharp edges
-  const faceInsetVerts: number[][] = origFaces.map(() => []);
+  // 1. Compute per-face, per-vertex inset positions
+  const rawInsetPos: THREE.Vector3[][] = origFaces.map(() => []);
 
   origFaces.forEach((f, fIdx) => {
     const len = f.length;
     const n = faceNormals[fIdx];
-    const centroid = faceCentroids[fIdx];
 
     for (let i = 0; i < len; i++) {
       const vPrev = f[(i - 1 + len) % len];
@@ -1922,7 +1930,7 @@ export function roundAnglesMesh(
       const P = uniqueVerts[vCurr].clone();
 
       if (!isPrevSharp && !isNextSharp) {
-        faceInsetVerts[fIdx].push(addVertex(P));
+        rawInsetPos[fIdx].push(P);
       } else {
         const Pprev = uniqueVerts[vPrev];
         const Pnext = uniqueVerts[vNext];
@@ -1933,28 +1941,108 @@ export function roundAnglesMesh(
         if (eNextDir.lengthSq() > 1e-12) eNextDir.normalize();
 
         const inPrev = isPrevSharp ? new THREE.Vector3().crossVectors(n, ePrevDir).normalize() : new THREE.Vector3(0, 0, 0);
-        const inNext = isNextSharp ? new THREE.Vector3().crossVectors(n, eNextDir).normalize() : new THREE.Vector3(0, 0, 0);
+        const inNext = isNextSharp ? new THREE.Vector3().crossVectors(eNextDir, n).normalize() : new THREE.Vector3(0, 0, 0);
 
         let disp = new THREE.Vector3();
         if (isPrevSharp && isNextSharp) {
           disp.addVectors(inPrev, inNext);
           if (disp.lengthSq() > 1e-6) disp.normalize();
           const cosHalfAngle = Math.max(0.1, inPrev.dot(disp));
-          const dist = Math.min(rad * 2.0, rad / cosHalfAngle);
+          const dist = Math.min(rad * 2.5, rad / cosHalfAngle);
           disp.multiplyScalar(dist);
         } else if (isPrevSharp) {
-          disp = inPrev.clone().multiplyScalar(rad);
+          const uNext = eNextDir.clone();
+          const denom = uNext.dot(inPrev);
+          if (denom > 0.05) {
+            const dist = Math.min(rad * 2.5, rad / denom);
+            disp = uNext.multiplyScalar(dist);
+          } else {
+            disp = inPrev.clone().multiplyScalar(rad);
+          }
         } else if (isNextSharp) {
-          disp = inNext.clone().multiplyScalar(rad);
+          const uPrev = Pprev.clone().sub(P);
+          if (uPrev.lengthSq() > 1e-12) uPrev.normalize();
+          const denom = uPrev.dot(inNext);
+          if (denom > 0.05) {
+            const dist = Math.min(rad * 2.5, rad / denom);
+            disp = uPrev.multiplyScalar(dist);
+          } else {
+            disp = inNext.clone().multiplyScalar(rad);
+          }
         }
 
-        const insetP = P.clone().add(disp);
-        faceInsetVerts[fIdx].push(addVertex(insetP));
+        rawInsetPos[fIdx].push(P.add(disp));
       }
     }
+  });
 
-    const faceIndices = fixWinding([...faceInsetVerts[fIdx]], n);
-    outFaces.push({ indices: faceIndices });
+  // Construct vertex-to-faces map for corner caps and smooth patch welding
+  const vertToFaces = new Map<number, number[]>();
+  origFaces.forEach((f, fIdx) => {
+    f.forEach(v => {
+      let list = vertToFaces.get(v);
+      if (!list) {
+        list = [];
+        vertToFaces.set(v, list);
+      }
+      list.push(fIdx);
+    });
+  });
+
+  // 2. Weld smooth edge adjacent faces so they share identical inset vertices
+  const faceInsetVerts: number[][] = origFaces.map(() => []);
+
+  vertToFaces.forEach((fList, vIdx) => {
+    const visited = new Set<number>();
+    fList.forEach(fIdx => {
+      if (visited.has(fIdx)) return;
+
+      const patch: number[] = [];
+      const queue = [fIdx];
+      visited.add(fIdx);
+
+      while (queue.length > 0) {
+        const curr = queue.shift()!;
+        patch.push(curr);
+
+        const currFace = origFaces[curr];
+        const locCurr = currFace.indexOf(vIdx);
+        const lenCurr = currFace.length;
+        const vPrev = currFace[(locCurr - 1 + lenCurr) % lenCurr];
+        const vNext = currFace[(locCurr + 1) % lenCurr];
+
+        fList.forEach(neighbor => {
+          if (visited.has(neighbor)) return;
+          const neighborFace = origFaces[neighbor];
+          if (neighborFace.includes(vPrev) && !sharpEdges.has(getEdgeKey(vIdx, vPrev))) {
+            visited.add(neighbor);
+            queue.push(neighbor);
+          } else if (neighborFace.includes(vNext) && !sharpEdges.has(getEdgeKey(vIdx, vNext))) {
+            visited.add(neighbor);
+            queue.push(neighbor);
+          }
+        });
+      }
+
+      const avgP = new THREE.Vector3();
+      patch.forEach(f => {
+        const loc = origFaces[f].indexOf(vIdx);
+        avgP.add(rawInsetPos[f][loc]);
+      });
+      avgP.divideScalar(patch.length);
+
+      const weldedIdx = addVertex(avgP);
+
+      patch.forEach(f => {
+        const loc = origFaces[f].indexOf(vIdx);
+        faceInsetVerts[f][loc] = weldedIdx;
+      });
+    });
+  });
+
+  // 3. Add inset faces to outFaces
+  origFaces.forEach((f, fIdx) => {
+    outFaces.push({ indices: [...faceInsetVerts[fIdx]] });
   });
 
   // Connect sharp edges with 'segs' arc strips and store directed arcs for corner caps
@@ -2015,6 +2103,10 @@ export function roundAnglesMesh(
     arcMap.set(getArcKey(v2, f1, f2), v2Arc);
     arcMap.set(getArcKey(v2, f2, f1), [...v2Arc].reverse());
 
+    const loc1 = origFaces[f1].indexOf(v1);
+    const loc2 = origFaces[f1].indexOf(v2);
+    const isForwardInF1 = ((loc1 + 1) % f1Indices.length) === loc2;
+
     const midNormal = new THREE.Vector3().addVectors(n1, n2);
     if (midNormal.lengthSq() > 1e-6) midNormal.normalize(); else midNormal.copy(n1);
 
@@ -2024,24 +2116,13 @@ export function roundAnglesMesh(
       const a2 = v2Arc[k];
       const b1 = v1Arc[k + 1];
       const b2 = v2Arc[k + 1];
-      const quad = fixWinding([a1, a2, b2, b1], midNormal);
+      const quadIndices = isForwardInF1 ? [a2, a1, b2, b1] : [a1, a2, b1, b2];
+      const quad = quadIndices;
       outFaces.push({ indices: quad });
     }
   });
 
   // Construct Corner Cap Patches using radial ordering around vertex normal
-  const vertToFaces = new Map<number, number[]>();
-  origFaces.forEach((f, fIdx) => {
-    f.forEach(v => {
-      let list = vertToFaces.get(v);
-      if (!list) {
-        list = [];
-        vertToFaces.set(v, list);
-      }
-      list.push(fIdx);
-    });
-  });
-
   vertToFaces.forEach((fList, vIdx) => {
     const sharpCount = vertSharpCount.get(vIdx) || 0;
     if (sharpCount < 2) return; // Corners and curved rim transitions with 2+ sharp edges get sealed!
@@ -2104,6 +2185,20 @@ export function roundAnglesMesh(
 
     if (loop.length < 3) return;
 
+    // Calculate polygon normal of loop to ensure CCW orientation relative to N_v
+    const loopNormal = new THREE.Vector3();
+    const numLoop = loop.length;
+    for (let i = 0; i < numLoop; i++) {
+      const pA = new THREE.Vector3(...outVerts[loop[i]]);
+      const pB = new THREE.Vector3(...outVerts[loop[(i + 1) % numLoop]]);
+      loopNormal.x += (pA.y - pB.y) * (pA.z + pB.z);
+      loopNormal.y += (pA.z - pB.z) * (pA.x + pB.x);
+      loopNormal.z += (pA.x - pB.x) * (pA.y + pB.y);
+    }
+    if (loopNormal.dot(N_v) < 0) {
+      loop.reverse();
+    }
+
     // Calculate average position of loop
     const avgP = new THREE.Vector3();
     loop.forEach(idx => {
@@ -2119,8 +2214,7 @@ export function roundAnglesMesh(
       const p1 = loop[i];
       const p2 = loop[(i + 1) % numPts];
       if (p1 === p2) continue;
-      const tri = fixWinding([centerIdx, p1, p2], N_v);
-      outFaces.push({ indices: tri });
+      outFaces.push({ indices: [p1, p2, centerIdx] });
     }
   });
 

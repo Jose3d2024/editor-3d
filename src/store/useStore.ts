@@ -73,7 +73,7 @@ const DEFAULT_PROJECT: Project = {
     backgroundMode: 'GRADIENT',
     backgroundVisible: true,
     backgroundColor: '#16171d',
-    backgroundBlur: 0.25,
+    backgroundBlur: 0,
     backgroundIntensity: 1.0,
     rotation: 0,
     intensity: 1.2,

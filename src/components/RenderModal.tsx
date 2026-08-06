@@ -108,7 +108,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   const [quality, setQuality]       = useState<QualityKey>('draft');
   const [showSettings, setShowSettings] = useState(false);
   const [showGround, setShowGround] = useState(false);
-  const [fov, setFov]               = useState(45);
+  const [fov, setFov]               = useState((lastCameraState as any)?.fov || 45);
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
   const [resolution, setResolution] = useState<'viewport' | '1080p' | '4k' | 'square'>('viewport');
   const [ready, setReady]           = useState(false);

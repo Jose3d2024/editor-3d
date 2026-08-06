@@ -21,7 +21,7 @@ import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
-import { Plus, Minus, ChevronDown } from 'lucide-react';
+import { Plus, Minus, ChevronDown, Globe } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 
 interface ViewportProps {
@@ -363,7 +363,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const scaledToVertex = toVertex.multiplyScalar(factor);
       const newPos = centroid.clone().add(scaledToVertex);
       const delta = newPos.sub(currentPos);
-      return { index: idx, offset: [currentOffset[0]+delta.x, currentOffset[1]+delta.y, currentOffset[2]] as [number,number,number] };
+      return { index: idx, offset: [currentOffset[0]+delta.x, currentOffset[1]+delta.y, currentOffset[2]+delta.z] as [number,number,number] };
     });
     updateVertexOffsets(selectedObjectId, updates);
     saveHistory();
@@ -374,26 +374,53 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const controls = controlsRef.current;
     if (!cam) return;
 
-    // Compute world bounding box of ALL visible objects (or just selected one)
-    const objects = projectRef.current.objects.filter(o => o.visible);
-    if (objects.length === 0) return;
+    // Filter target objects: selected objects if available, otherwise all visible objects
+    const selIds = selectedObjectIds.length > 0 ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
+    const targets = selIds.length > 0
+      ? projectRef.current.objects.filter(o => selIds.includes(o.id) && o.visible)
+      : projectRef.current.objects.filter(o => o.visible);
+    
+    const activeObjects = targets.length > 0 ? targets : projectRef.current.objects.filter(o => o.visible);
+    if (activeObjects.length === 0) return;
 
     const box = new THREE.Box3();
-    objects.forEach(obj => {
-      const _interp = getInterpolatedTransform(obj, currentTime);
-      const mat4 = new THREE.Matrix4().compose(
-        new THREE.Vector3().fromArray(_interp.position),
-        new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
-        new THREE.Vector3().fromArray(_interp.scale),
-      );
-      obj.vertices.forEach((v, i) => {
-        const off = obj.vertexOffsets?.[i] ?? [0,0,0];
-        const worldPt = new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]).applyMatrix4(mat4);
-        box.expandByPoint(worldPt);
-      });
+    let expanded = false;
+
+    // 1. Primary method: calculate exact world-space bounding box using actual rendered Object3Ds in meshesRef
+    activeObjects.forEach(obj => {
+      let object3D = meshesRef.current.get(obj.id);
+      if (!object3D && primitivesGroupRef.current) {
+        object3D = primitivesGroupRef.current.children.find(c => c.userData.id === obj.id);
+      }
+      if (object3D) {
+        object3D.updateMatrixWorld(true);
+        const meshBox = new THREE.Box3().setFromObject(object3D);
+        if (!meshBox.isEmpty() && isFinite(meshBox.min.x) && isFinite(meshBox.max.x)) {
+          box.union(meshBox);
+          expanded = true;
+        }
+      }
     });
 
-    if (box.isEmpty()) { box.set(new THREE.Vector3(-1,-1,-1), new THREE.Vector3(1,1,1)); }
+    // 2. Fallback: calculate bounding box from procedural vertices
+    if (!expanded) {
+      activeObjects.forEach(obj => {
+        const _interp = getInterpolatedTransform(obj, currentTime);
+        const mat4 = new THREE.Matrix4().compose(
+          new THREE.Vector3().fromArray(_interp.position),
+          new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+          new THREE.Vector3().fromArray(_interp.scale),
+        );
+        obj.vertices?.forEach((v, i) => {
+          const off = obj.vertexOffsets?.[i] ?? [0,0,0];
+          const worldPt = new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]).applyMatrix4(mat4);
+          box.expandByPoint(worldPt);
+          expanded = true;
+        });
+      });
+    }
+
+    if (box.isEmpty() || !expanded) { box.set(new THREE.Vector3(-1,-1,-1), new THREE.Vector3(1,1,1)); }
 
     const center = new THREE.Vector3();
     const size   = new THREE.Vector3();
@@ -402,49 +429,61 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const maxDim = Math.max(size.x, size.y, size.z, 0.5);
 
     if (type === 'PERSPECTIVE') {
-      // Move camera to fit the bounding sphere with some padding
-      const fov    = (cam as THREE.PerspectiveCamera).fov * (Math.PI / 180);
-      const dist   = (maxDim * 0.5 / Math.tan(fov * 0.5)) * 1.6;
+      const persCam = cam as THREE.PerspectiveCamera;
+      const fov    = persCam.fov * (Math.PI / 180);
+      const dist   = Math.max((maxDim * 0.5 / Math.tan(fov * 0.5)) * 1.5, 1.0);
+
+      if (persCam.far < dist * 10) {
+        persCam.far = Math.max(persCam.far, dist * 10);
+        persCam.updateProjectionMatrix();
+      }
+
       if (controls) {
-        controls.target.copy(center);
-        // Keep current viewing direction but adjust distance
+        // Safe direction vector from center to current camera position
         const dir = new THREE.Vector3().subVectors(cam.position, controls.target);
-        const len = dir.length();
-        dir.normalize().multiplyScalar(len > 0.01 ? dist : dist);
-        cam.position.copy(center).add(dir.lengthSq() > 0 ? dir : new THREE.Vector3(0.6,0.5,1).normalize().multiplyScalar(dist));
+        if (dir.lengthSq() < 0.0001) {
+          dir.set(0.6, 0.5, 1);
+        }
+        dir.normalize();
+
+        controls.target.copy(center);
+        cam.position.copy(center).add(dir.multiplyScalar(dist));
         controls.update();
       }
     } else {
       const orthoCam = cam as THREE.OrthographicCamera;
+      const distOffset = Math.max(maxDim * 3, 50);
 
-      // Reset camera position to look straight at the scene from the correct axis
       if (type === 'TOP') {
-        orthoCam.position.set(center.x, center.y + 10, center.z);
+        orthoCam.position.set(center.x, center.y + distOffset, center.z);
         orthoCam.up.set(0, 0, -1);
       } else if (type === 'BOTTOM') {
-        orthoCam.position.set(center.x, center.y - 10, center.z);
+        orthoCam.position.set(center.x, center.y - distOffset, center.z);
         orthoCam.up.set(0, 0, 1);
       } else if (type === 'FRONT') {
-        orthoCam.position.set(center.x, center.y, center.z + 10);
+        orthoCam.position.set(center.x, center.y, center.z + distOffset);
         orthoCam.up.set(0, 1, 0);
       } else if (type === 'BACK') {
-        orthoCam.position.set(center.x, center.y, center.z - 10);
+        orthoCam.position.set(center.x, center.y, center.z - distOffset);
         orthoCam.up.set(0, 1, 0);
       } else if (type === 'LEFT') {
-        orthoCam.position.set(center.x - 10, center.y, center.z);
+        orthoCam.position.set(center.x - distOffset, center.y, center.z);
         orthoCam.up.set(0, 1, 0);
       } else if (type === 'RIGHT') {
-        orthoCam.position.set(center.x + 10, center.y, center.z);
+        orthoCam.position.set(center.x + distOffset, center.y, center.z);
         orthoCam.up.set(0, 1, 0);
       }
+
+      orthoCam.near = -distOffset * 2;
+      orthoCam.far  = distOffset * 2;
       orthoCam.lookAt(center);
 
-      // Zoom to fit: adjust orthographic zoom so the bounding box fills 80% of the view
+      // Adjust orthographic zoom to fit bounding box
       const renderer = rendererRef.current;
-      const w = renderer?.domElement.clientWidth  ?? 1;
-      const h = renderer?.domElement.clientHeight ?? 1;
+      const w = renderer?.domElement.clientWidth  || 1;
+      const h = renderer?.domElement.clientHeight || 1;
       const asp = w / h;
-      const halfH = 5; // matches init size=10 → half=5
+      const halfH = 5;
       const halfW = halfH * asp;
 
       let viewW = 1, viewH = 1;
@@ -456,13 +495,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         viewW = size.z; viewH = size.y;
       }
 
-      const neededH = Math.max(viewW / asp, viewH) * 0.6;
-      const neededW = Math.max(viewW, viewH * asp) * 0.6;
-      const fitZoom  = Math.min(halfH / (neededH || 1), halfW / (neededW || 1), 10);
+      const neededH = Math.max(viewW / asp, viewH) * 0.65;
+      const neededW = Math.max(viewW, viewH * asp) * 0.65;
+      const fitZoom  = Math.min(halfH / (neededH || 0.001), halfW / (neededW || 0.001));
 
-      orthoCam.zoom = Math.max(0.1, fitZoom);
+      orthoCam.zoom = Math.max(0.00001, fitZoom);
 
-      // Pan the ortho camera so center is in middle of view (reset controls target)
       if (controls) {
         controls.target.copy(center);
         controls.update();
@@ -492,6 +530,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
     }
     controls.update();
+  };
+
+  const handleToggleHdriBg = () => {
+    const env = project.environment;
+    const isCurrentlyHdri = (env.backgroundMode === 'HDRI' && env.backgroundVisible !== false);
+    useStore.getState().updateEnvironment({
+      backgroundMode: isCurrentlyHdri ? 'GRADIENT' : 'HDRI',
+      backgroundVisible: !isCurrentlyHdri,
+    });
+    useStore.getState().saveHistory();
   };
 
   const handleAlignToAxes = () => {
@@ -793,7 +841,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     }
 
     // Update last camera state for rendering and persistence
-    controls.addEventListener('change', () => {
+    const updateCamState = () => {
       const state = useStore.getState();
       const pos = camera.position.toArray() as V3;
       const rot = camera.rotation.toArray() as V3;
@@ -810,13 +858,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       
       const target = controls.target.toArray() as V3;
       const zoom = (camera as any).zoom || 1;
-      const cameraState = { position: pos, target, zoom };
+      const pFov = (camera as THREE.PerspectiveCamera).fov || 45;
+      const cameraState = { position: pos, target, zoom, fov: pFov };
 
-      if (state.activeViewport === type || state.maximizedViewport === type) {
+      if (state.activeViewport === type || state.maximizedViewport === type || type === 'PERSPECTIVE') {
         state.setLastCameraState(cameraState);
       }
       state.setViewportCamera(type, cameraState);
-    });
+    };
+
+    // Emit initial camera state
+    updateCamState();
+
+    controls.addEventListener('change', updateCamState);
 
     renderer.render(scene, camera);
     return () => {
@@ -4724,15 +4778,27 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           {fn:handleZoomOut, title:'Alejar', icon:<line x1="5" y1="12" x2="19" y2="12"/>},
           {fn:handleRecenter,title:'Recentrar',  icon:<><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></>},
           {fn:handleResetView,title:'Reset Vista', icon:<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>},
+          {
+            fn: handleToggleHdriBg,
+            title: (project.environment.backgroundMode === 'HDRI' && project.environment.backgroundVisible !== false)
+              ? 'Mapa HDRI de fondo: VISIBLE (Haz clic para ocultar del visor)'
+              : 'Mapa HDRI de fondo: OCULTO (Haz clic para mostrar mapa HDRI en el visor)',
+            rawIcon: <Globe size={16} />,
+            active: (project.environment.backgroundMode === 'HDRI' && project.environment.backgroundVisible !== false)
+          },
           ...(selectedObjectId ? [
             {fn:handleRecenterPivot, title:'Centrar Pivote / Origen al Objeto', icon:<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>},
             {fn:handleAlignToAxes, title:'Alinear a Ejes (90°)', icon:<><path d="M4 20h16"/><path d="M4 4v16"/><path d="M14 10l-4-4-4 4"/><path d="M10 14l4 4 4-4"/></>},
             {fn:handleAlignToFloor, title:'Alinear al Suelo (Y=0)', icon:<><path d="M2 22h20"/><path d="M12 2v14"/><path d="m7 11 5 5 5-5"/></>}
           ] : []),
-        ].map(({fn,title:t,icon})=>(
+        ].map(({fn,title:t,icon,rawIcon,active})=>(
           <button key={t} onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();fn();}}
-            className="p-2 sm:p-1.5 bg-zinc-800/95 hover:bg-zinc-700 text-white rounded-lg shadow-xl cursor-pointer touch-none active:bg-indigo-600 transition-colors border border-white/10" title={t}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
+            className={`p-2 sm:p-1.5 rounded-lg shadow-xl cursor-pointer touch-none active:bg-indigo-600 transition-colors border ${
+              active
+                ? 'bg-amber-600/90 border-amber-400 text-white shadow-amber-500/20'
+                : 'bg-zinc-800/95 border-white/10 text-white hover:bg-zinc-700'
+            }`} title={t}>
+            {rawIcon ? rawIcon : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>}
           </button>
         ))}
         {/* Grid snap toggle — only useful when drawMode is active */}
