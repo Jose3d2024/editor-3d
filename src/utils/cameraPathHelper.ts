@@ -30,7 +30,34 @@ export function getInterpolatedTransformAtTime(obj: CSGObject, time: number) {
 /** Gets world space position of an object at a given time */
 export function getObjectWorldPositionAtTime(obj: CSGObject, time: number): THREE.Vector3 {
   const tr = getInterpolatedTransformAtTime(obj, time);
-  return new THREE.Vector3().fromArray(tr.position);
+  const pos = new THREE.Vector3().fromArray(tr.position);
+
+  // If object has vertices, calculate local centroid to account for vertex offsets or custom geometry
+  if (obj.vertices && obj.vertices.length > 0) {
+    let cx = 0, cy = 0, cz = 0;
+    const n = obj.vertices.length;
+    for (let i = 0; i < n; i++) {
+      const v = obj.vertices[i];
+      const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+      cx += v[0] + off[0];
+      cy += v[1] + off[1];
+      cz += v[2] + off[2];
+    }
+    cx /= n; cy /= n; cz /= n;
+
+    // If local centroid is non-zero, transform it to world space
+    if (Math.abs(cx) > 0.001 || Math.abs(cy) > 0.001 || Math.abs(cz) > 0.001) {
+      const localCentroid = new THREE.Vector3(cx, cy, cz);
+      const mat = new THREE.Matrix4().compose(
+        pos,
+        new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(tr.rotation)),
+        new THREE.Vector3().fromArray(tr.scale)
+      );
+      return localCentroid.applyMatrix4(mat);
+    }
+  }
+
+  return pos;
 }
 
 /**

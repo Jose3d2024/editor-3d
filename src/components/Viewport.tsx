@@ -22,7 +22,7 @@ import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
-import { Plus, Minus, ChevronDown, Globe } from 'lucide-react';
+import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 
 interface ViewportProps {
@@ -53,6 +53,22 @@ const snapAngleToPresets = (angleRad: number): number => {
   }
   const snappedAbs = k * 360 + closest;
   return sign * snappedAbs * (Math.PI / 180);
+};
+
+const safeLookAt = (object: THREE.Object3D, target: THREE.Vector3) => {
+  const dir = new THREE.Vector3().subVectors(target, object.position);
+  if (dir.lengthSq() < 0.000001) return;
+  dir.normalize();
+
+  // If direction is nearly parallel to default Y-up axis, temporarily switch UP vector to avoid Gimbal Lock singularity
+  const dotY = Math.abs(dir.dot(new THREE.Vector3(0, 1, 0)));
+  if (dotY > 0.999) {
+    object.up.set(0, 0, dir.y > 0 ? -1 : 1);
+  } else {
+    object.up.set(0, 1, 0);
+  }
+
+  object.lookAt(target);
 };
 
 const computeGizmoLayout = (
@@ -857,9 +873,14 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (type === 'CAMERA' && viewCameraId) {
         const camData = state.project.cameras?.find(c => c.id === viewCameraId);
         if (camData) {
-          state.updateCamera(viewCameraId, {
-            transform: { ...camData.transform, position: pos, rotation: rot }
-          });
+          const updates: any = {
+            transform: {
+              ...camData.transform,
+              position: pos,
+              ...(camData.targetObjectId ? {} : { rotation: rot })
+            }
+          };
+          state.updateCamera(viewCameraId, updates);
         }
         return;
       }
@@ -1004,31 +1025,195 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     camerasRef.current.clear();
 
     (project.cameras || []).forEach(cData => {
-      // Create a visual representation of the camera
+      const { selectedCameraId } = useStore.getState();
+      const isSelected = selectedCameraId === cData.id;
+
+      // Create visual group for the camera
       const camGroup = new THREE.Group();
       
-      // Camera body
-      const bodyGeom = new THREE.BoxGeometry(0.4, 0.4, 0.6);
-      const bodyMat = new THREE.MeshBasicMaterial({ color: 0x444444, wireframe: true });
+      // Main Camera Body (Cuerpo principal de la cámara)
+      const bodyGeom = new THREE.BoxGeometry(0.48, 0.36, 0.5);
+      const bodyMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0x4f46e5 : 0x27272a });
       const body = new THREE.Mesh(bodyGeom, bodyMat);
+      body.position.z = 0.25; // Sits from z=0 to z=+0.5
       body.userData = { id: cData.id, isCamera: true };
       camGroup.add(body);
 
-      // Camera lens
-      const lensGeom = new THREE.CylinderGeometry(0.15, 0.2, 0.3, 16);
-      const lensMat = new THREE.MeshBasicMaterial({ color: 0x888888, wireframe: true });
-      const lens = new THREE.Mesh(lensGeom, lensMat);
-      lens.rotation.x = Math.PI / 2;
-      lens.position.z = -0.45;
-      lens.userData = { id: cData.id, isCamera: true };
-      camGroup.add(lens);
+      // Body Wireframe Outline (Contorno acentuado)
+      const bodyWireMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0xc7d2fe : 0x71717a, wireframe: true });
+      const bodyWire = new THREE.Mesh(bodyGeom, bodyWireMat);
+      bodyWire.position.z = 0.25;
+      camGroup.add(bodyWire);
+
+      // Lens Base Collar (Base cilíndrica del objetivo)
+      const collarGeom = new THREE.CylinderGeometry(0.2, 0.2, 0.12, 20);
+      const collarMat = new THREE.MeshBasicMaterial({ color: 0x18181b });
+      const collar = new THREE.Mesh(collarGeom, collarMat);
+      collar.rotation.x = Math.PI / 2;
+      collar.position.z = -0.06;
+      collar.userData = { id: cData.id, isCamera: true };
+      camGroup.add(collar);
+
+      // Lens Barrel (Cuerpo del objetivo apunado hacia -Z)
+      const barrelGeom = new THREE.CylinderGeometry(0.18, 0.2, 0.32, 20);
+      const barrelMat = new THREE.MeshBasicMaterial({ color: 0x3f3f46 });
+      const barrel = new THREE.Mesh(barrelGeom, barrelMat);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.z = -0.28;
+      barrel.userData = { id: cData.id, isCamera: true };
+      camGroup.add(barrel);
+
+      // Lens Front Hood (Bisel frontal/Parasol del objetivo apuntando hacia el frente -Z)
+      const hoodGeom = new THREE.CylinderGeometry(0.24, 0.18, 0.12, 20);
+      const hoodMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0x6366f1 : 0x18181b });
+      const hood = new THREE.Mesh(hoodGeom, hoodMat);
+      hood.rotation.x = Math.PI / 2;
+      hood.position.z = -0.5;
+      hood.userData = { id: cData.id, isCamera: true };
+      camGroup.add(hood);
+
+      // Glass Lens Element (Cristal azul frontal)
+      const glassGeom = new THREE.CircleGeometry(0.22, 20);
+      const glassMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide });
+      const glass = new THREE.Mesh(glassGeom, glassMat);
+      glass.position.z = -0.561;
+      glass.userData = { id: cData.id, isCamera: true };
+      camGroup.add(glass);
+
+      // Top Film Reels (Carretes superiores)
+      const reelGeom = new THREE.CylinderGeometry(0.15, 0.15, 0.08, 16);
+      const reelMat = new THREE.MeshBasicMaterial({ color: 0x52525b });
+      const reel1 = new THREE.Mesh(reelGeom, reelMat);
+      reel1.rotation.z = Math.PI / 2;
+      reel1.position.set(0, 0.28, 0.12);
+      camGroup.add(reel1);
+
+      const reel2 = new THREE.Mesh(reelGeom, reelMat);
+      reel2.rotation.z = Math.PI / 2;
+      reel2.position.set(0, 0.28, 0.38);
+      camGroup.add(reel2);
+
+      // FOV Frustum Pyramid & Direction Arrow pointing forward towards local -Z
+      const frustumGroup = new THREE.Group();
+      
+      // Wireframe frustum pyramid from lens z=-0.60 expanding to z=-1.80
+      const frustumGeo = new THREE.BufferGeometry();
+      const frustumVerts = new Float32Array([
+        // Rear lens rectangle (z = -0.60)
+        -0.15,  0.10, -0.60,   0.15,  0.10, -0.60,
+         0.15,  0.10, -0.60,   0.15, -0.10, -0.60,
+         0.15, -0.10, -0.60,  -0.15, -0.10, -0.60,
+        -0.15, -0.10, -0.60,  -0.15,  0.10, -0.60,
+
+        // Front view frame rectangle (z = -1.80)
+        -0.60,  0.40, -1.80,   0.60,  0.40, -1.80,
+         0.60,  0.40, -1.80,   0.60, -0.40, -1.80,
+         0.60, -0.40, -1.80,  -0.60, -0.40, -1.80,
+        -0.60, -0.40, -1.80,  -0.60,  0.40, -1.80,
+
+        // Connecting corner edges
+        -0.15,  0.10, -0.60,  -0.60,  0.40, -1.80,
+         0.15,  0.10, -0.60,   0.60,  0.40, -1.80,
+         0.15, -0.10, -0.60,   0.60, -0.40, -1.80,
+        -0.15, -0.10, -0.60,  -0.60, -0.40, -1.80,
+      ]);
+      frustumGeo.setAttribute('position', new THREE.BufferAttribute(frustumVerts, 3));
+      const frustumMat = new THREE.LineBasicMaterial({
+        color: isSelected ? 0x818cf8 : 0x6366f1,
+        transparent: true,
+        opacity: isSelected ? 0.95 : 0.65,
+      });
+      const frustumLines = new THREE.LineSegments(frustumGeo, frustumMat);
+      frustumGroup.add(frustumLines);
+
+      // Prominent Direction Arrow at view frame pointing forward towards -Z
+      const arrowGeom = new THREE.ConeGeometry(0.18, 0.45, 4);
+      const arrowMat = new THREE.MeshBasicMaterial({ color: isSelected ? 0x38bdf8 : 0x818cf8 });
+      const arrow = new THREE.Mesh(arrowGeom, arrowMat);
+      arrow.rotation.x = -Math.PI / 2; // Tip (+Y) points forward along local -Z
+      arrow.rotation.z = Math.PI / 4;
+      arrow.position.z = -2.025; // Base at z=-1.80, tip at z=-2.25
+      frustumGroup.add(arrow);
+
+      camGroup.add(frustumGroup);
+
+      // Target Tracking Ray & Crosshair Reticle Group
+      const targetGroup = new THREE.Group();
+      targetGroup.name = 'targetTrackingGroup';
+
+      const targetLineGeom = new THREE.BufferGeometry();
+      const targetLineMat = new THREE.LineDashedMaterial({
+        color: 0x22d3ee,
+        dashSize: 0.3,
+        gapSize: 0.15,
+        scale: 1,
+      });
+      const targetLine = new THREE.Line(targetLineGeom, targetLineMat);
+      targetLine.name = 'targetLine';
+      targetGroup.add(targetLine);
+
+      const reticleGroup = new THREE.Group();
+      reticleGroup.name = 'targetReticle';
+      const ringGeom = new THREE.RingGeometry(0.35, 0.45, 32);
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee, side: THREE.DoubleSide });
+      const ring = new THREE.Mesh(ringGeom, ringMat);
+      reticleGroup.add(ring);
+
+      const xHairGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-0.6, 0, 0), new THREE.Vector3(0.6, 0, 0),
+        new THREE.Vector3(0, -0.6, 0), new THREE.Vector3(0, 0.6, 0),
+      ]);
+      const xHairMat = new THREE.LineBasicMaterial({ color: 0x22d3ee, linewidth: 2 });
+      reticleGroup.add(new THREE.LineSegments(xHairGeo, xHairMat));
+
+      targetGroup.add(reticleGroup);
+      camGroup.add(targetGroup);
+
+      // 2D Canvas Badge Tag (Floating 3D label above camera with icon and camera name)
+      const canvas = document.createElement('canvas');
+      canvas.width = 280;
+      canvas.height = 72;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = isSelected ? 'rgba(79, 70, 229, 0.95)' : 'rgba(24, 24, 27, 0.9)';
+        ctx.strokeStyle = isSelected ? '#a5b4fc' : 'rgba(255, 255, 255, 0.3)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(4, 4, 272, 64, 14);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 26px sans-serif';
+        ctx.fillText('📷', 16, 44);
+
+        ctx.font = 'bold 20px sans-serif';
+        ctx.fillText(cData.name.length > 15 ? cData.name.substring(0, 15) + '…' : cData.name, 60, 42);
+      }
+      const badgeTex = new THREE.CanvasTexture(canvas);
+      badgeTex.minFilter = THREE.LinearFilter;
+      const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthTest: false, transparent: true });
+      const badgeSprite = new THREE.Sprite(badgeMat);
+      badgeSprite.renderOrder = 999;
+      badgeSprite.scale.set(2.0, 0.52, 1);
+      badgeSprite.position.set(0, 0.85, 0.1);
+      camGroup.add(badgeSprite);
 
       const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
       camGroup.position.copy(evalCam.position);
       if (evalCam.target) {
-        camGroup.lookAt(evalCam.target);
+        safeLookAt(camGroup, evalCam.target);
+        targetGroup.visible = true;
+        const dist = evalCam.position.distanceTo(evalCam.target);
+        targetLine.geometry = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, -0.60),
+          new THREE.Vector3(0, 0, -dist)
+        ]);
+        (targetLine as any).computeLineDistances();
+        reticleGroup.position.set(0, 0, -dist);
       } else {
         camGroup.rotation.fromArray(cData.transform.rotation);
+        targetGroup.visible = false;
       }
       camGroup.scale.fromArray(cData.transform.scale);
       
@@ -1036,28 +1221,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       scene.add(camGroup);
       camerasRef.current.set(cData.id, camGroup);
 
-      // Add helper if selected
-      const { selectedCameraId } = useStore.getState();
-      if (selectedCameraId === cData.id) {
-        const size = cData.fov || 5;
-        const helperCam = cData.type === 'PERSPECTIVE' 
-          ? new THREE.PerspectiveCamera(cData.fov, 16/9, cData.near, cData.far)
-          : new THREE.OrthographicCamera(-size, size, size, -size, cData.near, cData.far);
-        
-        if (cData.type === 'PERSPECTIVE') {
-          (helperCam as THREE.PerspectiveCamera).filmGauge = cData.filmGauge || 35;
-        }
-        
-        const helper = new THREE.CameraHelper(helperCam);
-        camGroup.add(helper);
-        camerasRef.current.set(`${cData.id}-helper`, helper);
-      }
-
       // Sync viewport camera if this is the active camera view
       if (type === 'CAMERA' && viewCameraId === cData.id && cameraRef.current) {
         const cam = cameraRef.current;
-        cam.position.fromArray(cData.transform.position);
-        cam.rotation.fromArray(cData.transform.rotation);
+        cam.position.copy(evalCam.position);
+        if (evalCam.target) {
+          safeLookAt(cam, evalCam.target);
+          if (controlsRef.current) {
+            controlsRef.current.target.copy(evalCam.target);
+          }
+        } else {
+          cam.rotation.fromArray(cData.transform.rotation);
+        }
         cam.scale.fromArray(cData.transform.scale);
         if (cData.type === 'PERSPECTIVE' && (cam as any).isPerspectiveCamera) {
           const pCam = cam as THREE.PerspectiveCamera;
@@ -1129,7 +1304,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const evalCam = evaluateCameraTransform(camData, project.objects, currentTime, project.duration || 5);
               cameraRef.current.position.copy(evalCam.position);
               if (evalCam.target) {
-                cameraRef.current.lookAt(evalCam.target);
+                safeLookAt(cameraRef.current, evalCam.target);
                 if (controlsRef.current) {
                   controlsRef.current.target.copy(evalCam.target);
                 }
@@ -1143,10 +1318,29 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             if (cg) {
               const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
               cg.position.copy(evalCam.position);
+              const targetGroup = cg.getObjectByName('targetTrackingGroup');
               if (evalCam.target) {
-                cg.lookAt(evalCam.target);
+                safeLookAt(cg, evalCam.target);
+                if (targetGroup) {
+                  targetGroup.visible = true;
+                  const dist = evalCam.position.distanceTo(evalCam.target);
+                  const line = targetGroup.getObjectByName('targetLine') as THREE.Line;
+                  if (line) {
+                    line.geometry.dispose();
+                    line.geometry = new THREE.BufferGeometry().setFromPoints([
+                      new THREE.Vector3(0, 0, -0.60),
+                      new THREE.Vector3(0, 0, -dist)
+                    ]);
+                    (line as any).computeLineDistances();
+                  }
+                  const reticle = targetGroup.getObjectByName('targetReticle');
+                  if (reticle) {
+                    reticle.position.set(0, 0, -dist);
+                  }
+                }
               } else {
                 cg.rotation.fromArray(cData.transform.rotation);
+                if (targetGroup) targetGroup.visible = false;
               }
             }
           });
@@ -4724,12 +4918,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <div className="absolute top-1 left-1 sm:top-2 sm:left-2 z-40 flex items-center gap-1">
+      <div className="absolute top-1 left-1 sm:top-2 sm:left-2 z-40 flex items-center gap-1.5 flex-wrap">
         <div
-          className="px-1.5 py-0.5 sm:px-2 sm:py-1 bg-transparent hover:bg-black/40 text-[8px] sm:text-xs text-white rounded font-mono uppercase tracking-wider cursor-pointer hover:text-indigo-300 select-none border border-transparent hover:border-white/20 flex items-center gap-2 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] transition-all"
+          className="px-1.5 py-0.5 sm:px-2 sm:py-1 bg-black/50 hover:bg-black/70 text-[8px] sm:text-xs text-white rounded font-mono uppercase tracking-wider cursor-pointer hover:text-indigo-300 select-none border border-white/10 hover:border-white/30 flex items-center gap-1.5 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] transition-all backdrop-blur-sm"
           onPointerDown={e=>e.stopPropagation()}
           onClick={e=>{e.stopPropagation();setMaximizedViewport(maximizedViewport===type?null:type);}}
         >
+          {viewCameraId ? (
+            <Camera size={13} className="text-indigo-400 shrink-0 animate-pulse" />
+          ) : type === 'PERSPECTIVE' ? (
+            <Globe size={13} className="text-indigo-300 shrink-0" />
+          ) : (
+            <Eye size={13} className="text-zinc-400 shrink-0" />
+          )}
           <span>{title} {maximizedViewport===type?'[-]':'[+]'}</span>
           {maximizedViewport === type && (
             <div 
@@ -4740,6 +4941,27 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             </div>
           )}
         </div>
+
+        {/* Camera Target Status Badge when viewing through a Camera */}
+        {type === 'CAMERA' && viewCameraId && (
+          <div className="bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 px-2 py-0.5 rounded text-[9px] font-mono flex items-center gap-1.5 shadow-lg backdrop-blur-sm select-none">
+            <Camera size={11} className="text-indigo-400 shrink-0" />
+            <span className="font-bold text-indigo-300">VISTA CÁMARA</span>
+            {(() => {
+              const activeCam = project.cameras?.find(c => c.id === viewCameraId);
+              if (activeCam?.targetObjectId) {
+                const targetObj = project.objects.find(o => o.id === activeCam.targetObjectId);
+                return (
+                  <span className="text-indigo-200 text-[9px] border-l border-indigo-500/40 pl-1.5 flex items-center gap-1">
+                    <Target size={10} className="text-indigo-400 shrink-0" />
+                    <span>Objetivo: <strong className="text-white font-bold">{targetObj?.name || 'Objeto'}</strong></span>
+                  </span>
+                );
+              }
+              return null;
+            })()}
+          </div>
+        )}
 
         {/* View Selector Dropdown */}
         <div 
@@ -4761,7 +4983,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           </button>
 
           {showViewDropdown && (
-            <div className="absolute top-full left-0 pt-1 min-w-[130px] z-50">
+            <div className="absolute top-full left-0 pt-1 min-w-[140px] z-50">
               <div className="bg-zinc-900/95 backdrop-blur-md border border-white/20 rounded-md shadow-2xl overflow-hidden py-1">
                 <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10">
                   Visores 3D
@@ -4802,8 +5024,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                         }}
                         className={`w-full text-left px-3 py-1.5 text-[11px] hover:bg-indigo-600 hover:text-white transition-colors flex items-center justify-between cursor-pointer ${viewCameraId === cam.id ? 'text-indigo-400 font-bold bg-indigo-950/50' : 'text-zinc-200'}`}
                       >
-                        <span className="truncate max-w-[100px]">{cam.name}</span>
-                        {viewCameraId === cam.id && <span className="text-[9px] text-indigo-300">✓</span>}
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Camera size={12} className={viewCameraId === cam.id ? "text-indigo-400 shrink-0" : "text-zinc-400 shrink-0"} />
+                          <span className="truncate max-w-[100px]">{cam.name}</span>
+                        </div>
+                        {viewCameraId === cam.id && <span className="text-[9px] text-indigo-300 shrink-0">✓</span>}
                       </button>
                     ))}
                   </>
