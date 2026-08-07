@@ -80,19 +80,47 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
   const visibleCount  = Math.min(trackObjects.length, MAX_ROWS);
   const trackAreaH    = Math.max(MIN_TRACK_H, visibleCount * ROW_H + 4);
 
-  // ── Clic en el track para mover playhead ──────────────────────────────
-  const handleTrackClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x    = e.clientX - rect.left - LABEL_W;
+  // ── Drag & Click en el track para mover playhead ──────────────────────────
+  const isDraggingRef = useRef(false);
+
+  const updateTimeFromPointer = useCallback((clientX: number, targetElem: HTMLDivElement) => {
+    const rect = targetElem.getBoundingClientRect();
+    const x    = clientX - rect.left - LABEL_W;
     const w    = rect.width - LABEL_W;
     if (w <= 0) return;
     const t = Math.max(0, Math.min(duration, (x / w) * duration));
+    setIsPlaying(false);
     setCurrentTime(t);
-  }, [duration, setCurrentTime]);
+  }, [duration, setIsPlaying, setCurrentTime]);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const targetElem = e.currentTarget;
+    try { targetElem.setPointerCapture(e.pointerId); } catch {}
+    isDraggingRef.current = true;
+    updateTimeFromPointer(e.clientX, targetElem);
+  }, [updateTimeFromPointer]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDraggingRef.current) {
+      updateTimeFromPointer(e.clientX, e.currentTarget);
+    }
+  }, [updateTimeFromPointer]);
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isDraggingRef.current) {
+      isDraggingRef.current = false;
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+    }
+  }, []);
+
+  const handleTrackClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    updateTimeFromPointer(e.clientX, e.currentTarget);
+  }, [updateTimeFromPointer]);
 
   // ── Keyframe click ─────────────────────────────────────────────────────
   const handleKfClick = (e: React.MouseEvent, objId: string, kfId: string, time: number) => {
     e.stopPropagation();
+    setIsPlaying(false);
     selectObject(objId);
     setCurrentTime(time);
   };
@@ -249,8 +277,10 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
           <div className="flex-shrink-0 border-r border-white/5" style={{ width: LABEL_W }} />
           {/* Ruler */}
           <div
-            className="relative flex-1 cursor-pointer"
-            onClick={handleTrackClick}
+            className="relative flex-1 cursor-pointer touch-none"
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
           >
             {tickTimes.map((t, i) => (
               <div
@@ -391,7 +421,11 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                       type="range"
                       min={0} max={duration} step={0.001}
                       value={currentTime}
-                      onChange={(e) => setCurrentTime(parseFloat(e.target.value))}
+                      onPointerDown={() => setIsPlaying(false)}
+                      onChange={(e) => {
+                        setIsPlaying(false);
+                        setCurrentTime(parseFloat(e.target.value));
+                      }}
                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-40"
                     />
                   </div>

@@ -112,7 +112,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   const [isRendering, setIsRendering] = useState(false);
   const [status, setStatus]         = useState('Configurando...');
   const [quality, setQuality]       = useState<QualityKey>('draft');
-  const [showSettings, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(true);
   const [showGround, setShowGround] = useState(false);
   const [fov, setFov]               = useState((lastCameraState as any)?.fov || 45);
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
@@ -1137,63 +1137,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
                 />
               </div>
 
-              {/* Opciones de Entorno e Iluminación */}
+              {/* Opción de Plano de Suelo */}
               <div className="space-y-3 pt-2 border-t border-zinc-800">
-                <label className="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <Globe size={13} className="text-violet-400" />
-                    Iluminación & HDRI
-                  </span>
-                  <label className="text-[9px] text-violet-400 font-bold hover:underline cursor-pointer flex items-center gap-1">
-                    <Upload size={10} />
-                    Subir HDR
-                    <input type="file" accept=".hdr,.exr,.png,.jpg,.jpeg,.webp" onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const dataUrl = await fileToDataURL(file);
-                        updateEnvironment({ hdriUrl: `${dataUrl}#${file.name}` });
-                      }
-                    }} className="hidden" />
-                  </label>
-                </label>
-
-                {/* Presets HDRI */}
-                <div className="grid grid-cols-3 gap-1.5">
-                  {PRESET_HDRIS.map(opt => {
-                    const active = project.environment.hdriUrl === opt.url;
-                    return (
-                      <button
-                        key={opt.id}
-                        onClick={() => updateEnvironment({ hdriUrl: opt.url })}
-                        className={`p-2 rounded-xl border text-center transition-all ${
-                          active
-                            ? 'bg-violet-600/25 border-violet-500 text-white shadow-sm'
-                            : 'bg-zinc-800/40 border-zinc-700/40 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-                        }`}
-                        title={opt.desc}
-                      >
-                        <div className="text-sm">{opt.icon}</div>
-                        <div className="text-[9px] font-bold truncate mt-0.5">{opt.name}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Exposición Global */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-[10px] text-zinc-400">Exposición de Cámara</span>
-                    <span className="text-[10px] font-mono text-zinc-300">{(project.environment.exposure ?? 1.1).toFixed(1)}x</span>
-                  </div>
-                  <input
-                    type="range" min="0.2" max="3.0" step="0.1"
-                    value={project.environment.exposure ?? 1.1}
-                    onChange={e => updateEnvironment({ exposure: parseFloat(e.target.value) })}
-                    className="w-full accent-violet-500 bg-zinc-800 rounded-lg h-1.5 cursor-pointer"
-                  />
-                </div>
-
-                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer pt-1">
+                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={showGround}

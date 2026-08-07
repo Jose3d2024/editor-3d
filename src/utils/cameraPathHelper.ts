@@ -139,7 +139,8 @@ export function evaluateCameraTransform(
     const pathObj = objects.find(o => o.id === camera.pathObjectId);
     if (pathObj) {
       let progress = camera.pathProgress ?? 0;
-      if (camera.followPathAnimation && duration > 0) {
+      const followAnim = camera.followPathAnimation ?? true;
+      if (followAnim && duration > 0) {
         progress = (currentTime % duration) / duration;
       }
       camPos = samplePathObjectAtProgress(pathObj, progress, currentTime);
@@ -206,6 +207,7 @@ export function createCameraPathObject(
       shapeType: 'line',
       closed: type === 'CIRCLE',
       radius,
+      isCameraPath: true,
     },
     vertices,
     faces: [],
