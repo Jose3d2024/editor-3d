@@ -328,6 +328,8 @@ export interface AppState {
   clipboard: CSGObject | null;
   currentTime: number;
   isPlaying:   boolean;
+  isScrubbing?: boolean;
+  setIsScrubbing?: (isScrubbing: boolean) => void;
   isRecording: boolean;
   viewMode:       ViewMode;
   editMode:       EditMode;

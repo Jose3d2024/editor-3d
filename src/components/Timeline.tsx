@@ -49,10 +49,12 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
         const next = s.currentTime + dt;
         if (next >= s.project.duration) {
           if (isLooping) {
+            // Si el botón de bucle está activo, repite infinitamente
             s.setCurrentTime(0);
           } else {
-            s.setCurrentTime(s.project.duration);
+            // COMPORTAMIENTO SOLICITADO: Vuelve al principio (0) pero se detiene ahí
             s.setIsPlaying(false);
+            s.setCurrentTime(0);
           }
         } else {
           s.setCurrentTime(next);
@@ -419,9 +421,21 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                     {/* Input invisible para scrubbing */}
                     <input
                       type="range"
-                      min={0} max={duration} step={0.001}
+                      min={0}
+                      max={duration}
+                      step={0.001}
                       value={currentTime}
-                      onPointerDown={() => setIsPlaying(false)}
+                      onPointerDown={() => {
+                        // 1. Apagar la reproducción y alertar a Zustand que estamos arrastrando
+                        setIsPlaying(false);
+                        const state = useStore.getState() as any;
+                        if (state.setIsScrubbing) state.setIsScrubbing(true);
+                      }}
+                      onPointerUp={() => {
+                        // 2. Liberar la bandera de arrastre al soltar el ratón para fijar el tiempo exacto
+                        const state = useStore.getState() as any;
+                        if (state.setIsScrubbing) state.setIsScrubbing(false);
+                      }}
                       onChange={(e) => {
                         setIsPlaying(false);
                         setCurrentTime(parseFloat(e.target.value));

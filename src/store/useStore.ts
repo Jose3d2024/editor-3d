@@ -217,6 +217,7 @@ interface Store extends AppState {
   toggleObjectSelection: (id: string, multi: boolean) => void;
   setCurrentTime: (time: number) => void;
   setIsPlaying: (isPlaying: boolean) => void;
+  setIsScrubbing: (isScrubbing: boolean) => void;
   setIsRecording: (isRecording: boolean) => void;
   setViewMode: (mode: ViewMode) => void;
   setShowCSG: (show: boolean) => void;
@@ -371,6 +372,7 @@ export const useStore = create<Store>()((set, get) => ({
   selectedObjectIds: [] as string[],
   currentTime: 0,
   isPlaying: false,
+  isScrubbing: false,
   isRecording: false,
   viewMode: 'SOLID',
   showCSG: false,
@@ -2272,6 +2274,7 @@ export const useStore = create<Store>()((set, get) => ({
 
   setCurrentTime: (time) => set({ currentTime: time }),
   setIsPlaying:   (v)    => set({ isPlaying: v }),
+  setIsScrubbing: (v)    => set({ isScrubbing: v }),
   setIsRecording: (v)    => set({ isRecording: v }),
   setViewMode:    (mode) => set({ viewMode: mode }),
   setEditMode: async (mode) => {

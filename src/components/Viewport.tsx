@@ -1268,50 +1268,78 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     const animate = () => {
       id = requestAnimationFrame(animate);
       try {
-        if (rendererRef.current && cameraRef.current && sceneRef.current) {
-          // 1. Update OrbitControls first for non-camera view
-          if (type !== 'CAMERA' && controlsRef.current) {
-            controlsRef.current.update();
+        // LEER SIEMPRE LAS INSTANCIAS ACTUALES DESDE LAS REFERENCIAS MUTABLES
+        const currentRenderer = rendererRef.current;
+        const currentScene = sceneRef.current;
+        const currentCamera = cameraRef.current;
+        const currentControls = controlsRef.current;
+
+        if (currentRenderer && currentCamera && currentScene) {
+          // 1. Actualizar OrbitControls si no es la vista de la cámara activa
+          if (type !== 'CAMERA' && currentControls) {
+            currentControls.update();
           }
 
-          // 2. Dynamic camera path & target tracking evaluation (only when viewing through a camera)
-          const { project, currentTime } = useStore.getState();
+          const { project, currentTime, isPlaying, isScrubbing } = useStore.getState();
+
+          // 2. CONTROL DINÁMICO DE LA VISTA DE CÁMARA ACTIVA
           if (type === 'CAMERA') {
+            // Desactivar OrbitControls si la línea de tiempo está reproduciéndose o se está haciendo scrubbing
+            if (currentControls) {
+              currentControls.enabled = !isPlaying && !isScrubbing;
+            }
+
             const activeCamId = viewCameraId || project.cameras?.[0]?.id;
             const camData = project.cameras?.find(c => c.id === activeCamId);
+
             if (camData) {
+              // Calcular la posición exacta en el tiempo actual según la elipse/ruta
               const evalCam = evaluateCameraTransform(camData, project.objects, currentTime, project.duration || 5);
-              cameraRef.current.position.copy(evalCam.position);
+              
+              // ¡CRUCIAL! Mover la cámara real que se está renderizando en este instante
+              currentCamera.position.copy(evalCam.position);
+
               if (evalCam.target) {
-                safeLookAt(cameraRef.current, evalCam.target);
-                if (controlsRef.current) {
-                  controlsRef.current.target.copy(evalCam.target);
+                // Orientar la cámara real al Cubo Base u objetivo de seguimiento
+                safeLookAt(currentCamera, evalCam.target);
+                
+                if (currentControls) {
+                  currentControls.target.copy(evalCam.target);
+                  // Si la línea de tiempo está parada y no estamos haciendo scrubbing, dejamos que actualice
+                  if (!isPlaying && !isScrubbing) {
+                    currentControls.update();
+                  }
                 }
               } else {
-                cameraRef.current.rotation.fromArray(camData.transform.rotation);
-                if (controlsRef.current) {
+                currentCamera.rotation.fromArray(camData.transform.rotation);
+                if (currentControls) {
                   const fwd = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler().fromArray(camData.transform.rotation));
-                  controlsRef.current.target.copy(evalCam.position.clone().add(fwd));
+                  currentControls.target.copy(evalCam.position.clone().add(fwd));
+                  if (!isPlaying && !isScrubbing) {
+                    currentControls.update();
+                  }
                 }
               }
-              if (cameraRef.current instanceof THREE.PerspectiveCamera) {
+
+              // Mantener actualizado el FOV y la matriz de proyección de la cámara activa
+              if (currentCamera instanceof THREE.PerspectiveCamera) {
                 const targetFov = camData.fov || 45;
-                if (cameraRef.current.fov !== targetFov) {
-                  cameraRef.current.fov = targetFov;
-                  cameraRef.current.updateProjectionMatrix();
+                if (currentCamera.fov !== targetFov) {
+                  currentCamera.fov = targetFov;
+                  currentCamera.updateProjectionMatrix();
                 }
               }
             }
           }
 
-          // 3. Dynamic camera path & target tracking evaluation for visual cameras in scene
+          // 3. Actualizar la posición de los Gizmos/Dibujos de las cámaras en las otras escenas
           (project.cameras || []).forEach(cData => {
             const cg = camerasRef.current.get(cData.id);
             if (cg) {
-              // Hide all camera bodies and target lines in CAMERA view mode
               cg.visible = type !== 'CAMERA';
               const evalCam = evaluateCameraTransform(cData, project.objects, currentTime, project.duration || 5);
               cg.position.copy(evalCam.position);
+              
               const targetGroup = cg.getObjectByName('targetTrackingGroup');
               if (evalCam.target) {
                 safeLookAt(cg, evalCam.target);
@@ -1339,25 +1367,28 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           });
 
-          // Update parallax camera position
-          sceneRef.current.traverse((child) => {
+          // 4. Actualizar la posición de la cámara en materiales de paralaje
+          currentScene.traverse((child) => {
             if (child instanceof THREE.Mesh) {
               const materials = Array.isArray(child.material) ? child.material : [child.material];
               materials.forEach(mat => {
                 if (mat.uniforms && mat.uniforms.uCameraPos) {
-                  mat.uniforms.uCameraPos.value.copy(cameraRef.current!.position);
+                  mat.uniforms.uCameraPos.value.copy(currentCamera.position);
                 }
               });
             }
           });
 
-          rendererRef.current.render(sceneRef.current, cameraRef.current);
+          // RENDERIZAR LA ESCENA USANDO LA CÁMARA REAL CAPTURADA EN ESTE FRAME
+          currentRenderer.render(currentScene, currentCamera);
         }
-      } catch {}
+      } catch (e) {
+        console.error("Error en bucle de animación:", e);
+      }
     };
     animate();
     return () => cancelAnimationFrame(id);
-  }, []);
+  }, [type, viewCameraId]);
 
   // ── 1.5b Disable OrbitControls while draw mode is active ────────────────
   // OrbitControls and drawing listeners share the same canvas element.
