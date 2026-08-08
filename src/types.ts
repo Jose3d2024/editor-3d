@@ -229,6 +229,7 @@ export interface CameraObject {
   pathProgress?: number;              // Progreso manual (0.00 a 1.00) en la ruta
   followPathAnimation?: boolean;      // Sincronizar movimiento en la ruta con la línea de tiempo
   cameraOffset?: V3;                  // Desplazamiento opcional respecto a la ruta o al objetivo
+  keyframes?: Keyframe[];
 }
 
 export interface Project {

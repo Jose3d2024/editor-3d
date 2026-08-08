@@ -764,41 +764,97 @@ const AlignSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   );
 };
 
-const ObjectMaterialSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
-  const { project, updateObject, assignMaterialToObjects } = useStore();
+const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () => void }> = ({ obj, onOpenMaterialTab }) => {
+  const { project, updateObject, assignMaterialToObjects, updateMaterial, addMaterial } = useStore();
   const m = obj.material;
-  
+  const assignedMat = project.materials.find(mat => mat.id === obj.materialId);
+
   const handleAssign = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     assignMaterialToObjects([obj.id], val === 'none' ? null : val);
   };
 
+  const handleCreateMaterialFromObject = () => {
+    const newMat = {
+      id: 'mat_' + Math.random().toString(36).substr(2, 9),
+      name: `Material ${obj.name || 'Objeto'}`,
+      color: m?.color || obj.color || '#ffffff',
+      roughness: m?.roughness ?? 0.5,
+      metalness: m?.metalness ?? 0,
+      emissive: '#000000',
+      emissiveIntensity: 1,
+      opacity: obj.opacity ?? 1,
+      transparent: (obj.opacity ?? 1) < 1,
+    };
+    addMaterial(newMat);
+    assignMaterialToObjects([obj.id], newMat.id);
+    onOpenMaterialTab();
+  };
+
+  const updateProp = (field: string, val: any) => {
+    const nextMat = { ...m, [field]: val };
+    updateObject(obj.id, { material: nextMat });
+    if (assignedMat) {
+      updateMaterial(assignedMat.id, { [field]: val });
+    }
+  };
+
   return (
     <Section title="Material del Objeto" icon={<Palette size={14}/>} defaultOpen={true}>
       <div className="space-y-4">
+        {/* Selector de material de proyecto */}
         <div className="space-y-2">
-          <label className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest">Material de Proyecto</label>
+          <div className="flex items-center justify-between">
+            <label className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">Material Asignado</label>
+            <button
+              onClick={onOpenMaterialTab}
+              className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1 transition-colors"
+            >
+              <Palette size={11} /> Ir a la Pestaña Materiales
+            </button>
+          </div>
           <select 
             value={obj.materialId || 'none'} 
             onChange={handleAssign}
-            className="w-full bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-2.5 text-[11px] text-zinc-200 focus:outline-none focus:border-indigo-500/50 transition-all appearance-none cursor-pointer shadow-inner"
+            className="w-full bg-zinc-900/80 border border-white/10 rounded-xl px-3 py-2.5 text-[11px] text-zinc-200 focus:outline-none focus:border-indigo-500/50 transition-all appearance-none cursor-pointer shadow-inner"
           >
-            <option value="none">Ninguno (Usar color base)</option>
+            <option value="none">Ninguno (Material local simple)</option>
             {project.materials.map(mat => (
               <option key={mat.id} value={mat.id}>{mat.name}</option>
             ))}
           </select>
         </div>
 
+        {/* Botón de acceso directo al editor PBR */}
+        {assignedMat ? (
+          <button
+            onClick={onOpenMaterialTab}
+            className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 active:scale-98"
+          >
+            <Palette size={13} /> Editar "{assignedMat.name}" en Editor PBR
+          </button>
+        ) : (
+          <button
+            onClick={handleCreateMaterialFromObject}
+            className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-md active:scale-98"
+          >
+            <Plus size={13} className="text-indigo-400" /> Crear Material PBR del Proyecto
+          </button>
+        )}
+
+        {/* Propiedades en tiempo real */}
         <div className="p-4 bg-white/[0.02] rounded-2xl border border-white/5 space-y-4 shadow-xl">
-          <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">Propiedades Locales</p>
-          <NumRow label="Rugosidad" value={m?.roughness ?? 0.5} onChange={v => updateObject(obj.id, { material: { ...m, roughness: v } })} min={0} max={1} slider />
-          <NumRow label="Metálico" value={m?.metalness ?? 0} onChange={v => updateObject(obj.id, { material: { ...m, metalness: v } })} min={0} max={1} slider />
+          <p className="text-[9px] text-zinc-500 font-bold uppercase tracking-widest">
+            {assignedMat ? `Editar Parámetros ("${assignedMat.name}")` : 'Parámetros del Objeto'}
+          </p>
+          
+          <NumRow label="Rugosidad" value={m?.roughness ?? assignedMat?.roughness ?? 0.5} onChange={v => updateProp('roughness', v)} min={0} max={1} slider />
+          <NumRow label="Metálico" value={m?.metalness ?? assignedMat?.metalness ?? 0} onChange={v => updateProp('metalness', v)} min={0} max={1} slider />
           
           <div className="flex items-center justify-between pt-2 border-t border-white/5">
-            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Usar POM</span>
+            <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Usar POM (Parallax)</span>
             <button 
-              onClick={() => updateObject(obj.id, { material: { ...m, useParallax: !m?.useParallax } })}
+              onClick={() => updateProp('useParallax', !m?.useParallax)}
               className={`relative w-10 h-5 rounded-full transition-all ${m?.useParallax ? 'bg-indigo-600 shadow-lg shadow-indigo-500/20' : 'bg-zinc-800'}`}
             >
               <motion.div 
@@ -809,19 +865,22 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           </div>
           {m?.useParallax && (
             <motion.div initial={{opacity:0,y:-10}} animate={{opacity:1,y:0}} className="space-y-4 pt-2">
-              <NumRow label="Escala POM" value={m?.parallaxScale ?? 0.1} onChange={v => updateObject(obj.id, { material: { ...m, parallaxScale: v } })} min={0} max={0.5} step={0.01} slider />
-              <NumRow label="Pasos POM" value={m?.parallaxSteps ?? 32} onChange={v => updateObject(obj.id, { material: { ...m, parallaxSteps: v } })} min={8} max={128} step={1} slider />
+              <NumRow label="Escala POM" value={m?.parallaxScale ?? 0.1} onChange={v => updateProp('parallaxScale', v)} min={0} max={0.5} step={0.01} slider />
+              <NumRow label="Pasos POM" value={m?.parallaxSteps ?? 32} onChange={v => updateProp('parallaxSteps', v)} min={8} max={128} step={1} slider />
             </motion.div>
           )}
 
           <div className="flex items-center justify-between gap-3 pt-2 border-t border-white/5">
             <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Color Base</span>
             <div className="relative group">
-              <div className="w-10 h-10 rounded-xl border-2 border-white/10 shadow-lg transition-transform group-hover:scale-105" style={{ background: m?.color || obj.color || '#ffffff' }} />
+              <div 
+                className="w-10 h-10 rounded-xl border-2 border-white/10 shadow-lg transition-transform group-hover:scale-105 cursor-pointer" 
+                style={{ background: m?.color || assignedMat?.color || obj.color || '#ffffff' }} 
+              />
               <input 
                 type="color" 
-                value={m?.color || obj.color || '#ffffff'} 
-                onChange={e => updateObject(obj.id, { material: { ...m, color: e.target.value } })}
+                value={m?.color || assignedMat?.color || obj.color || '#ffffff'} 
+                onChange={e => updateProp('color', e.target.value)}
                 className="absolute inset-0 opacity-0 cursor-pointer"
               />
             </div>
@@ -2316,7 +2375,7 @@ export const PropertiesPanel: React.FC = () => {
                 <ParametersSection obj={obj}/>
                 <GeneratedSection obj={obj}/>
                 <AlignSection obj={obj}/>
-                <ObjectMaterialSection obj={obj}/>
+                <ObjectMaterialSection obj={obj} onOpenMaterialTab={() => setActiveTab('MATERIALS')}/>
                 <MeshModifiersSection obj={obj}/>
                 <ValidationSection obj={obj}/>
 

@@ -2206,15 +2206,87 @@ export function roundAnglesMesh(
     });
     avgP.divideScalar(loop.length);
 
-    const cornerCenterP = avgP.clone().addScaledVector(N_v, rad * 0.3);
-    const centerIdx = addVertex(cornerCenterP);
-
     const numPts = loop.length;
-    for (let i = 0; i < numPts; i++) {
-      const p1 = loop[i];
-      const p2 = loop[(i + 1) % numPts];
-      if (p1 === p2) continue;
-      outFaces.push({ indices: [p1, p2, centerIdx] });
+
+    // ── QUAD CORNER (BOX CORNER) TOPOLOGY WITHOUT POLAR TRIANGLE FANS ──
+    if (numPts === 4) {
+      // Standard 4-sided corner (e.g. Box Corner)
+      // Create 4 inner vertices interpolated towards centroid
+      const innerIndices: number[] = [];
+      for (let i = 0; i < 4; i++) {
+        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
+        const pInner = new THREE.Vector3()
+          .lerpVectors(pBound, avgP, 0.45)
+          .addScaledVector(N_v, rad * 0.18);
+        innerIndices.push(addVertex(pInner));
+      }
+
+      // Fused Laplacian Relaxation for the 4 inner corner patch vertices
+      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.22);
+      for (let i = 0; i < 4; i++) {
+        const pCurr = new THREE.Vector3(...outVerts[innerIndices[i]]);
+        const pPrev = new THREE.Vector3(...outVerts[innerIndices[(i + 3) % 4]]);
+        const pNext = new THREE.Vector3(...outVerts[innerIndices[(i + 1) % 4]]);
+        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
+        const avgNeighbors = new THREE.Vector3()
+          .add(pPrev).add(pNext).add(pBound).add(centerP).multiplyScalar(0.25);
+        const relaxedP = new THREE.Vector3().lerpVectors(pCurr, avgNeighbors, 0.35);
+        outVerts[innerIndices[i]] = [relaxedP.x, relaxedP.y, relaxedP.z];
+      }
+
+      // 4 Outer Quad Faces connecting boundary loop to inner quad
+      outFaces.push({ indices: [loop[0], loop[1], innerIndices[1], innerIndices[0]] });
+      outFaces.push({ indices: [loop[1], loop[2], innerIndices[2], innerIndices[1]] });
+      outFaces.push({ indices: [loop[2], loop[3], innerIndices[3], innerIndices[2]] });
+      outFaces.push({ indices: [loop[3], loop[0], innerIndices[0], innerIndices[3]] });
+
+      // 1 Central Quad Face (No central pole vertex!)
+      outFaces.push({ indices: [innerIndices[0], innerIndices[1], innerIndices[2], innerIndices[3]] });
+
+    } else if (numPts === 3) {
+      // 3-sided corner: Y-junction with 3 Quad Faces
+      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.22);
+      const centerIdx = addVertex(centerP);
+
+      const midIndices: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const pA = new THREE.Vector3(...outVerts[loop[i]]);
+        const pB = new THREE.Vector3(...outVerts[loop[(i + 1) % 3]]);
+        const pMid = new THREE.Vector3()
+          .lerpVectors(pA, pB, 0.5)
+          .addScaledVector(N_v, rad * 0.12);
+        midIndices.push(addVertex(pMid));
+      }
+
+      // 3 Quad Faces
+      outFaces.push({ indices: [loop[0], midIndices[0], centerIdx, midIndices[2]] });
+      outFaces.push({ indices: [loop[1], midIndices[1], centerIdx, midIndices[0]] });
+      outFaces.push({ indices: [loop[2], midIndices[2], centerIdx, midIndices[1]] });
+
+    } else {
+      // N-sided corner loop (N > 4): Quad Ring + Inner Patch
+      const innerIndices: number[] = [];
+      for (let i = 0; i < numPts; i++) {
+        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
+        const pInner = new THREE.Vector3()
+          .lerpVectors(pBound, avgP, 0.5)
+          .addScaledVector(N_v, rad * 0.18);
+        innerIndices.push(addVertex(pInner));
+      }
+
+      // Quad Ring
+      for (let i = 0; i < numPts; i++) {
+        const next = (i + 1) % numPts;
+        outFaces.push({ indices: [loop[i], loop[next], innerIndices[next], innerIndices[i]] });
+      }
+
+      // Inner Central Patch
+      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.25);
+      const centerIdx = addVertex(centerP);
+      for (let i = 0; i < numPts; i++) {
+        const next = (i + 1) % numPts;
+        outFaces.push({ indices: [innerIndices[i], innerIndices[next], centerIdx] });
+      }
     }
   });
 

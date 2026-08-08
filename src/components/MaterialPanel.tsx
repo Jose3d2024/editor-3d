@@ -462,15 +462,53 @@ export const MaterialPanel: React.FC = () => {
 
   if (!activeMaterial) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center text-zinc-500">
-        <Palette size={48} className="mb-4 opacity-20" />
-        <p className="text-sm">Selecciona un objeto para editar su material o ve a la librería.</p>
-        <button 
-          onClick={() => setActiveTab('library')}
-          className="mt-4 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
-        >
-          Volver a la Librería
-        </button>
+      <div className="flex flex-col items-center justify-center h-full p-6 text-center text-zinc-400 space-y-4">
+        <Palette size={40} className="opacity-30 text-indigo-400" />
+        <div className="space-y-1">
+          <p className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+            {selectedObject ? `Objeto "${selectedObject.name || 'Sin Nombre'}" Seleccionado` : 'Ningún Objeto Seleccionado'}
+          </p>
+          <p className="text-[11px] text-zinc-500 max-w-xs">
+            {selectedObject 
+              ? 'Este objeto aún no tiene un material PBR asignado de la librería.'
+              : 'Selecciona un objeto en el visor para vincular un material o abre la librería.'}
+          </p>
+        </div>
+        
+        <div className="flex flex-col gap-2 w-full max-w-xs">
+          {selectedObject && (
+            <button
+              onClick={() => {
+                const newMat = {
+                  id: 'mat_' + Math.random().toString(36).substr(2, 9),
+                  name: `Material ${selectedObject.name || 'Objeto'}`,
+                  color: selectedObject.material?.color || selectedObject.color || '#ffffff',
+                  roughness: selectedObject.material?.roughness ?? 0.5,
+                  metalness: selectedObject.material?.metalness ?? 0,
+                  emissive: '#000000',
+                  emissiveIntensity: 1,
+                  opacity: selectedObject.opacity ?? 1,
+                  transparent: (selectedObject.opacity ?? 1) < 1,
+                };
+                addMaterial(newMat);
+                const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : [selectedObject.id];
+                assignMaterialToObjects(ids, newMat.id);
+                setEditingMaterialId(newMat.id);
+                setActiveTab('edit');
+              }}
+              className="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
+            >
+              <Plus size={14} /> Crear Nuevo Material PBR
+            </button>
+          )}
+
+          <button 
+            onClick={() => setActiveTab('library')}
+            className="py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-2"
+          >
+            <FolderOpen size={14} className="text-indigo-400" /> Explorar Librería / Importar Pack PBR
+          </button>
+        </div>
       </div>
     );
   }
