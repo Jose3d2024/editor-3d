@@ -116,6 +116,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
   }, []);
 
   const handleTrackClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return;
     updateTimeFromPointer(e.clientX, e.currentTarget);
   }, [updateTimeFromPointer]);
 
@@ -425,20 +426,23 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                       max={duration}
                       step={0.001}
                       value={currentTime}
-                      onPointerDown={() => {
-                        // 1. Apagar la reproducción y alertar a Zustand que estamos arrastrando
+                      onPointerDown={(e) => {
+                        e.stopPropagation(); // <-- ¡CRUCIAL! Evita que el contenedor capte el click
                         setIsPlaying(false);
                         const state = useStore.getState() as any;
                         if (state.setIsScrubbing) state.setIsScrubbing(true);
                       }}
-                      onPointerUp={() => {
-                        // 2. Liberar la bandera de arrastre al soltar el ratón para fijar el tiempo exacto
+                      onPointerUp={(e) => {
+                        e.stopPropagation(); // Slots de seguridad
                         const state = useStore.getState() as any;
                         if (state.setIsScrubbing) state.setIsScrubbing(false);
                       }}
                       onChange={(e) => {
                         setIsPlaying(false);
                         setCurrentTime(parseFloat(e.target.value));
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation(); // Detiene el click fantasma
                       }}
                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-40"
                     />
