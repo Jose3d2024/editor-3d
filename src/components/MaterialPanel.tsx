@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useStore } from '../store/useStore';
 import { MaterialData } from '../types';
 import { MaterialThumbnail } from './MaterialThumbnail';
@@ -20,10 +20,19 @@ import {
   FolderOpen,
   AlertTriangle,
   CheckCircle,
-  X
+  X,
+  Search,
+  Sparkles
 } from 'lucide-react';
 import { createORMMap } from '../utils/materialUtils';
 import { importPBRPack, detectSlotFromFilename, importTextureFile } from '../utils/materialImporter';
+import { 
+  MATERIAL_LIBRARY, 
+  MATERIAL_CATEGORIES, 
+  generateMaterial, 
+  generateAllThumbnails, 
+  ProceduralMaterial 
+} from '../utils/proceduralTextures';
 
 // ── Modal de importación de pack PBR ────────────────────────────────────────
 const PBRImportModal: React.FC<{
@@ -301,6 +310,12 @@ export const MaterialPanel: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'library' | 'edit'>('library');
   const [showPBRImport, setShowPBRImport] = useState(false);
 
+  // Categorías y filtrado de la librería procedimental
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  const proceduralThumbnails = useMemo(() => generateAllThumbnails(), []);
+
   // Sync editingMaterialId with activeMaterialId when selection changes
   useEffect(() => {
     if (activeMaterialId) {
@@ -310,6 +325,54 @@ export const MaterialPanel: React.FC = () => {
 
   const currentMaterialId = editingMaterialId || activeMaterialId;
   const activeMaterial = materials.find(m => m.id === currentMaterialId);
+
+  const handleSelectProceduralMaterial = (pMat: ProceduralMaterial) => {
+    const maps = generateMaterial(pMat.id, 256, 256);
+    const newId = 'mat_' + pMat.id + '_' + Math.random().toString(36).substr(2, 6);
+    const d = pMat.defaults;
+
+    const newMat: MaterialData = {
+      id: newId,
+      name: pMat.name,
+      color: '#ffffff',
+      map: maps?.albedo,
+      normalMap: maps?.normal,
+      roughnessMap: maps?.roughness,
+      metalnessMap: maps?.metallic,
+      aoMap: maps?.ao,
+      displacementMap: maps?.displacement,
+      roughness: d.roughness ?? 0.5,
+      metalness: d.metalness ?? 0.0,
+      normalScale: d.normalScale ?? 1.0,
+      displacementScale: d.displacementScale ?? 0.0,
+      displacementBias: d.displacementBias ?? 0.0,
+      clearcoat: d.clearcoat ?? 0.0,
+      clearcoatRoughness: d.clearcoatRoughness ?? 0.1,
+      sheen: d.sheen ?? 0.0,
+      sheenRoughness: d.sheenRoughness ?? 0.5,
+      sheenColor: d.sheenColor ?? '#ffffff',
+      iridescence: d.iridescence ?? 0.0,
+      iridescenceIOR: d.iridescenceIOR ?? 1.3,
+      iridescenceThicknessRange: d.iridescenceThicknessRange,
+      transmission: d.transmission ?? 0.0,
+      ior: d.ior ?? 1.5,
+      thickness: d.thickness ?? 0.0,
+      emissive: '#000000',
+      emissiveIntensity: 1,
+      opacity: 1,
+      transparent: (d.transmission ?? 0) > 0,
+    };
+
+    addMaterial(newMat);
+    const ids = (selectedObjectIds && selectedObjectIds.length > 0) 
+      ? selectedObjectIds 
+      : (selectedObjectId ? [selectedObjectId] : []);
+    if (ids.length > 0) {
+      assignMaterialToObjects(ids, newMat.id);
+    }
+    setEditingMaterialId(newMat.id);
+    setActiveTab('edit');
+  };
 
   const handleExportMaterial = () => {
     if (!activeMaterial) return;
@@ -400,61 +463,188 @@ export const MaterialPanel: React.FC = () => {
             }}
           />
         )}
-        <div className="p-4 border-b border-white/10 flex items-center justify-between">
+        
+        {/* Header */}
+        <div className="p-3 border-b border-white/10 flex items-center justify-between bg-[#18181c]">
           <div className="flex items-center gap-2">
-            <Palette size={18} className="text-indigo-400" />
-            <h3 className="font-bold text-sm uppercase tracking-wider">Librería de Materiales</h3>
+            <Palette size={16} className="text-indigo-400" />
+            <h3 className="font-bold text-xs uppercase tracking-wider text-zinc-200">Librería de Materiales</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30">
+              {MATERIAL_LIBRARY.length + materials.length}
+            </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button 
               onClick={() => setShowPBRImport(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-indigo-900/40 hover:bg-indigo-800/60 text-indigo-300 transition-colors text-[10px] font-bold border border-indigo-800/40"
+              className="flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-900/40 hover:bg-indigo-800/60 text-indigo-300 transition-colors text-[10px] font-bold border border-indigo-800/40"
               title="Importar pack PBR (.mtlx, .tres, .usda, PNG...)"
             >
-              <FolderOpen size={13} /> Pack PBR
+              <FolderOpen size={12} /> Pack PBR
             </button>
             <button 
               onClick={handleImportMaterial}
-              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
+              className="p-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors"
               title="Importar Material guardado (.json)"
             >
-              <FileUp size={16} />
+              <FileUp size={14} />
             </button>
             <button 
               onClick={handleCreateMaterial}
-              className="p-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+              className="p-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
               title="Nuevo Material"
             >
-              <Plus size={16} />
+              <Plus size={14} />
             </button>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 grid grid-cols-2 gap-3">
-          {materials.map(mat => (
+        {/* Buscador y Filtro por Categoría */}
+        <div className="p-3 border-b border-white/5 space-y-2.5 bg-[#16161a]">
+          {/* Barra de búsqueda */}
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-2.5 text-zinc-500" />
+            <input 
+              type="text" 
+              value={searchQuery} 
+              onChange={e => setSearchQuery(e.target.value)} 
+              placeholder="Buscar material (ej. Terciopelo, Oro, Mármol...)" 
+              className="w-full bg-zinc-900/90 border border-white/10 rounded-xl pl-8 pr-7 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500 transition-colors"
+            />
+            {searchQuery && (
+              <button onClick={() => setSearchQuery('')} className="absolute right-2.5 top-2.5 text-zinc-500 hover:text-zinc-300">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Categorías (Pills con scroll horizontal) */}
+          <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1 text-[11px]">
             <button
-              key={mat.id}
-              onClick={() => {
-                const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
-                if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
-                setEditingMaterialId(mat.id);
-                setActiveTab('edit');
-              }}
-              className={`group relative flex flex-col items-center p-3 rounded-xl border transition-all ${
-                activeMaterialId === mat.id 
-                  ? 'border-indigo-500 bg-indigo-500/10' 
-                  : 'border-white/5 bg-white/5 hover:border-white/20'
+              onClick={() => setSelectedCategory('all')}
+              className={`px-2.5 py-1 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
+                selectedCategory === 'all'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              <MaterialThumbnail material={mat} size={64} />
-              <span className="mt-2 text-[10px] font-medium truncate w-full text-center">
-                {mat.name}
-              </span>
-              {activeMaterialId === mat.id && (
-                <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
-              )}
+              <span>✨</span>
+              <span>Todos</span>
             </button>
-          ))}
+
+            <button
+              onClick={() => setSelectedCategory('project')}
+              className={`px-2.5 py-1 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
+                selectedCategory === 'project'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Layers size={11} />
+              <span>Proyecto</span>
+              <span className="opacity-60 text-[9px]">({materials.length})</span>
+            </button>
+
+            {MATERIAL_CATEGORIES.map(cat => {
+              const count = MATERIAL_LIBRARY.filter(m => m.category === cat.id).length;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className={`px-2.5 py-1 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
+                    selectedCategory === cat.id
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                      : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  <span>{cat.icon}</span>
+                  <span>{cat.label}</span>
+                  <span className="opacity-60 text-[9px]">({count})</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Grilla de Materiales */}
+        <div className="flex-1 overflow-y-auto p-3 grid grid-cols-2 gap-2.5 custom-scrollbar">
+          {/* Materiales Procedimentales de la Librería */}
+          {selectedCategory !== 'project' && MATERIAL_LIBRARY
+            .filter(pMat => {
+              if (selectedCategory !== 'all' && pMat.category !== selectedCategory) return false;
+              if (searchQuery && !pMat.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+              return true;
+            })
+            .map(pMat => {
+              const thumbUrl = proceduralThumbnails.get(pMat.id);
+              const catObj = MATERIAL_CATEGORIES.find(c => c.id === pMat.category);
+
+              return (
+                <button
+                  key={pMat.id}
+                  onClick={() => handleSelectProceduralMaterial(pMat)}
+                  className="group relative flex flex-col items-center p-2.5 rounded-xl border border-white/5 bg-zinc-900/40 hover:border-indigo-500/50 hover:bg-indigo-900/10 transition-all text-left overflow-hidden shadow-sm hover:shadow-indigo-500/10"
+                >
+                  <div className="w-16 h-16 rounded-lg overflow-hidden bg-black/40 border border-white/10 relative flex items-center justify-center shadow-inner group-hover:scale-105 transition-transform duration-200">
+                    {thumbUrl ? (
+                      <img src={thumbUrl} alt={pMat.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <span className="text-2xl">{pMat.icon}</span>
+                    )}
+                    <div className="absolute top-1 left-1 bg-black/60 backdrop-blur-md px-1 py-0.5 rounded text-[9px] shadow">
+                      {pMat.icon}
+                    </div>
+                  </div>
+
+                  <span className="mt-2 text-[11px] font-semibold text-zinc-200 group-hover:text-white truncate w-full text-center">
+                    {pMat.name}
+                  </span>
+
+                  <span className="text-[9px] text-zinc-500 font-medium truncate">
+                    {catObj?.label || pMat.category}
+                  </span>
+                </button>
+              );
+            })
+          }
+
+          {/* Materiales en el Proyecto Actual */}
+          {(selectedCategory === 'all' || selectedCategory === 'project') && materials
+            .filter(mat => {
+              if (searchQuery && !mat.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+              return true;
+            })
+            .map(mat => (
+              <button
+                key={mat.id}
+                onClick={() => {
+                  const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
+                  if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
+                  setEditingMaterialId(mat.id);
+                  setActiveTab('edit');
+                }}
+                className={`group relative flex flex-col items-center p-2.5 rounded-xl border transition-all text-left overflow-hidden ${
+                  activeMaterialId === mat.id 
+                    ? 'border-indigo-500 bg-indigo-500/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]' 
+                    : 'border-white/5 bg-zinc-900/40 hover:border-white/20'
+                }`}
+              >
+                <div className="relative">
+                  <MaterialThumbnail material={mat} size={64} />
+                  {activeMaterialId === mat.id && (
+                    <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-indigo-500 border-2 border-zinc-900 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
+                  )}
+                </div>
+
+                <span className="mt-2 text-[11px] font-semibold text-zinc-200 truncate w-full text-center">
+                  {mat.name}
+                </span>
+
+                <span className="text-[9px] text-indigo-400 font-medium">
+                  En Proyecto
+                </span>
+              </button>
+            ))
+          }
         </div>
       </div>
     );

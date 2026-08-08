@@ -111,6 +111,17 @@ function voronoi(px:number,py:number,scale:number,seed=0):{d1:number;d2:number;i
   return{d1:Math.min(d1,1),d2:Math.min(d2,1),id};
 }
 
+function voronoiField(w: number, h: number, scale = 12, seed = 5): Float32Array {
+  const f = new Float32Array(w * h);
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const { d1 } = voronoi(px / w, py / h, scale, seed);
+      f[py * w + px] = d1;
+    }
+  }
+  return f;
+}
+
 function heightToNormal(field:Float32Array,w:number,h:number,strength:number):Uint8ClampedArray{
   const out=new Uint8ClampedArray(w*h*4);
   for(let py=0;py<h;py++)for(let px=0;px<w;px++){
@@ -169,21 +180,30 @@ export interface GeneratedMaps {
 }
 
 export interface ProceduralMaterial {
-  id:string; name:string;
-  category:'wood'|'stone'|'metal'|'paint'|'synthetic'|'ground';
-  icon:string;
+  id: string; name: string;
+  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent';
+  icon: string;
   /** Suggested UV repeat — smaller = texture appears larger on mesh */
-  defaults:{
-    roughness:number; metalness:number;
-    normalScale:number; displacementScale:number; displacementBias:number;
-    /** UV repeat in X and Y — e.g. [2,2] means tile twice */
-    tiling:[number,number];
-    clearcoat?:number;
-    clearcoatRoughness?:number;
+  defaults: {
+    roughness: number; metalness: number;
+    normalScale?: number; displacementScale?: number; displacementBias?: number;
+    /** UV repeat in X and Y — e.g. [2,2] or single number 4.0 */
+    tiling?: [number, number] | number;
+    clearcoat?: number;
+    clearcoatRoughness?: number;
+    sheen?: number;
+    sheenRoughness?: number;
+    sheenColor?: string;
+    iridescence?: number;
+    iridescenceIOR?: number;
+    iridescenceThicknessRange?: [number, number];
+    transmission?: number;
+    ior?: number;
+    thickness?: number;
   };
-  generate(width:number,height:number):GeneratedMaps;
+  generate(width: number, height: number): GeneratedMaps;
   /** Fast 64x64 albedo preview for the picker UI */
-  thumbnail?():string;
+  thumbnail?(): string;
 }
 
 /** Default thumbnail: 128x128 albedo preview */
@@ -1703,89 +1723,412 @@ export function createOakPlanksDisplacementMap(w=512,h=512):string{return grayFi
 // MATERIAL LIBRARY
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── PRESETS DE MATERIALES DE ALTA GAMA ───────────────────────────────────────
+
+const greenMarble: ProceduralMaterial = {
+  id: 'green_marble', name: 'Mármol Verde Jade', category: 'stone', icon: '🟢',
+  defaults: { roughness: 0.15, metalness: 0, normalScale: 0.6, displacementScale: 0.01, displacementBias: -0.005, tiling: [1.5, 1.5], clearcoat: 0.3, clearcoatRoughness: 0.1 },
+  generate(w, h) {
+    const f = marbleField(w, h);
+    return {
+      albedo: rgbaToDataURL(marbleAlbedo(w, h, 12, 45, 24, 8, 22, 12), w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 2), w, h),
+      roughness: grayField(mapField(f, v => clamp(0.1 + v * 0.2)), w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(f, v => clamp(0.6 + v * 0.4)), w, h),
+      displacement: grayField(f, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const goldCarbonFiber: ProceduralMaterial = {
+  id: 'gold_carbon_fiber', name: 'Fibra de Carbono Oro', category: 'synthetic', icon: '✨',
+  defaults: { roughness: 0.22, metalness: 0.85, normalScale: 2.2, displacementScale: 0.008, displacementBias: -0.004, tiling: [2, 2], clearcoat: 0.8, clearcoatRoughness: 0.05 },
+  generate(w, h) {
+    const f = carbonFiberField(w, h);
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const b = 180 + f[i] * 50 | 0;
+      rgba[i * 4] = b; 
+      rgba[i * 4 + 1] = clamp(b * 0.8, 0, 255) | 0; 
+      rgba[i * 4 + 2] = clamp(b * 0.2, 0, 255) | 0; 
+      rgba[i * 4 + 3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 6), w, h),
+      roughness: grayField(mapField(f, v => clamp(0.15 + v * 0.2)), w, h),
+      metallic: uniformMap(w, h, 0.85), 
+      ao: grayField(mapField(f, v => clamp(v * 0.85)), w, h),
+      displacement: grayField(f, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const copperVerdigris: ProceduralMaterial = {
+  id: 'copper_verdigris', name: 'Cobre Envejecido Patinado', category: 'metal', icon: '🔋',
+  defaults: { roughness: 0.75, metalness: 0.3, normalScale: 3.5, displacementScale: 0.04, displacementBias: -0.02, tiling: [1.5, 1.5] },
+  generate(w, h) {
+    const f = copperField(w, h);
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    const metallicRgba = new Uint8ClampedArray(w * h * 4);
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const x = px / w * 15, y = py / h * 15;
+        const pa = fbm(x, y, 5, 88) > 0.45 ? (fbm(x, y, 5, 88) - 0.45) * 4 : 0;
+        const i = (py * w + px) * 4;
+        rgba[i] = clamp(lerp(190, 40, pa), 0, 255) | 0;
+        rgba[i + 1] = clamp(lerp(100, 150, pa), 0, 255) | 0;
+        rgba[i + 2] = clamp(lerp(40, 135, pa), 0, 255) | 0; 
+        rgba[i + 3] = 255;
+        const mv = clamp((1.0 - pa * 1.5) * 255, 0, 255) | 0;
+        metallicRgba[i] = metallicRgba[i + 1] = metallicRgba[i + 2] = mv; 
+        metallicRgba[i + 3] = 255;
+      }
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 8), w, h),
+      roughness: grayField(mapField(f, v => clamp(0.3 + v * 0.5)), w, h),
+      metallic: rgbaToDataURL(metallicRgba, w, h), 
+      ao: grayField(mapField(f, v => clamp(0.4 + v * 0.6)), w, h),
+      displacement: grayField(f, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const velvetFabric: ProceduralMaterial = {
+  id: 'velvet_red', name: 'Terciopelo Real', category: 'textile', icon: '🧣',
+  defaults: { 
+    roughness: 0.65, metalness: 0.0, tiling: 4.0, normalScale: 0.8,
+    sheen: 1.0, sheenRoughness: 0.2, sheenColor: '#ff8888'
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const i = (py * w + px) * 4;
+        const pattern = (Math.sin(px * 1.5) * Math.cos(py * 1.5)) * 15;
+        rgba[i] = clamp(140 + pattern, 0, 255) | 0;
+        rgba[i+1] = clamp(15 + pattern, 0, 255) | 0;
+        rgba[i+2] = clamp(25 + pattern, 0, 255) | 0;
+        rgba[i+3] = 255;
+      }
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 166), metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const woolFabric: ProceduralMaterial = {
+  id: 'wool_knit', name: 'Lana Tejida Gruesa', category: 'textile', icon: '🧶',
+  defaults: { 
+    roughness: 0.9, metalness: 0.0, tiling: 5.0, normalScale: 2.5,
+    sheen: 0.8, sheenRoughness: 0.6, sheenColor: '#e0d5c1'
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    const f = new Float32Array(w * h);
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const waveX = Math.sin(px * 0.8) * 0.5 + 0.5;
+        const waveY = Math.cos(py * 0.8) * 0.5 + 0.5;
+        f[idx] = (waveX * waveY);
+        
+        const i = idx * 4;
+        const c = clamp(190 + f[idx] * 45, 0, 255) | 0;
+        rgba[i] = c; rgba[i+1] = clamp(c * 0.95, 0, 255) | 0; rgba[i+2] = clamp(c * 0.85, 0, 255) | 0; rgba[i+3] = 255;
+      }
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 5), w, h),
+      roughness: uniformMap(w, h, 230), metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(f, v => clamp(0.5 + v * 0.5)), w, h),
+      displacement: grayField(f, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const silkFabric: ProceduralMaterial = {
+  id: 'silk_smooth', name: 'Seda Satinada', category: 'textile', icon: '🎗️',
+  defaults: { 
+    roughness: 0.18, metalness: 0.0, tiling: 2.0, normalScale: 0.3,
+    sheen: 1.0, sheenRoughness: 0.1, sheenColor: '#ffffff'
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i%w)/w*4, (i/w)/h*4, 3, 15);
+      rgba[i*4] = clamp(30 + f * 40) | 0;
+      rgba[i*4+1] = clamp(40 + f * 50) | 0;
+      rgba[i*4+2] = clamp(120 + f * 60) | 0;
+      rgba[i*4+3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 45), metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const naturalSponge: ProceduralMaterial = {
+  id: 'sponge_natural', name: 'Esponja Porosa', category: 'synthetic', icon: '🧽',
+  defaults: { roughness: 0.9, metalness: 0.0, normalScale: 3.0, displacementScale: 0.03, displacementBias: -0.015 },
+  generate(w, h) {
+    const f = voronoiField(w, h, 12, 5); 
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = clamp(f[i] * 2.0);
+      rgba[i*4] = clamp(210 - v * 60) | 0;
+      rgba[i*4+1] = clamp(170 - v * 50) | 0;
+      rgba[i*4+2] = clamp(100 - v * 40) | 0;
+      rgba[i*4+3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 8), w, h),
+      roughness: uniformMap(w, h, 230), metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(f, v => clamp(1.0 - v * 0.7)), w, h),
+      displacement: grayField(f, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const compactBone: ProceduralMaterial = {
+  id: 'hueso_compacto', name: 'Tejido Óseo / Hueso', category: 'stone', icon: '🦴',
+  defaults: { 
+    roughness: 0.45, metalness: 0.0, normalScale: 0.5,
+    transmission: 0.15, ior: 1.55, thickness: 0.5
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const n = fbm((i%w)/w*30, (Math.floor(i/w))/h*30, 3, 55) * 15;
+      rgba[i*4] = clamp(235 - n) | 0;
+      rgba[i*4+1] = clamp(228 - n) | 0;
+      rgba[i*4+2] = clamp(210 - n * 2) | 0;
+      rgba[i*4+3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 115), metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 240), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const tornasolMetal: ProceduralMaterial = {
+  id: 'tornasol_optico', name: 'Cristal Tornasol Iridiscente', category: 'iridescent', icon: '💿',
+  defaults: { 
+    roughness: 0.05, metalness: 0.1, transmission: 0.4, ior: 1.6,
+    iridescence: 1.0, iridescenceIOR: 1.9, iridescenceThicknessRange: [100, 400]
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const x = (i % w) / w;
+      rgba[i*4] = clamp(Math.sin(x * 6.28) * 127 + 128) | 0;
+      rgba[i*4+1] = clamp(Math.sin(x * 6.28 + 2.0) * 127 + 128) | 0;
+      rgba[i*4+2] = clamp(Math.sin(x * 6.28 + 4.0) * 127 + 128) | 0;
+      rgba[i*4+3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 12), metallic: uniformMap(w, h, 25),
+      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const pearlIridescent: ProceduralMaterial = {
+  id: 'pearl_nacre', name: 'Madreperla / Nácar', category: 'iridescent', icon: '🦪',
+  defaults: { 
+    roughness: 0.12, metalness: 0.0, clearcoat: 0.4, clearcoatRoughness: 0.1,
+    iridescence: 0.8, iridescenceIOR: 1.5, iridescenceThicknessRange: [200, 450]
+  },
+  generate(w, h) {
+    const f = marbleField(w, h);
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = f[i] * 20;
+      rgba[i*4] = clamp(245 - v) | 0;
+      rgba[i*4+1] = clamp(240 - v) | 0;
+      rgba[i*4+2] = clamp(235 - v) | 0;
+      rgba[i*4+3] = 255;
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: rgbaToDataURL(heightToNormal(f, w, h, 1), w, h),
+      roughness: uniformMap(w, h, 30), metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── REESTRUCTURACIÓN DE LA BIBLIOTECA GENERAL ────────────────────────────────
+
 export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
   // Wood
   oakPlanks, walnut, pine, mahogany, varnishedWood,
-  // Stone
-  marble, marbleBlack, granite, slate, concrete, wetConcrete, cobblestone, sandstone,
+  
+  // Stone / Minerals / Organic
+  marble, marbleBlack, greenMarble, granite, slate, concrete, wetConcrete, compactBone,
   largeRock, cliffRock, mossyRock, volcanicRock, desertRock,
+  
   // Metal
-  brushedSteel, brushedAluminum, rustedIron, chrome, copper, gold, galvanizedMetal,
+  brushedSteel, brushedAluminum, rustedIron, chrome, copper, copperVerdigris, gold, galvanizedMetal,
+  
   // Paint
   carPaintRed, carPaintBlue, carPaintBlack, carPaintGreen, matteWhite, matteGray, carLacquer,
-  // Synthetic
-  carbonFiber, rubber, leather, plasticGlossy, fabricCanvas, ceramicGlazed,
+  
+  // Textiles
+  velvetFabric, woolFabric, silkFabric, fabricCanvas, leather,
+  
+  // Iridescent
+  tornasolMetal, pearlIridescent,
+  
+  // Synthetic / Fluid / Volumetric
+  carbonFiber, goldCarbonFiber, rubber, plasticGlossy, ceramicGlazed, naturalSponge,
+  
   // Ground
   gravel, sand, asphalt, dirt, rockyGroundMoss,
 ];
 
 export const MATERIAL_CATEGORIES = [
-  {id:'wood',      label:'Madera',    icon:'🪵'},
-  {id:'stone',     label:'Piedra / Roca', icon:'🪨'},
-  {id:'metal',     label:'Metal',     icon:'⚙️'},
-  {id:'paint',     label:'Pintura',   icon:'🎨'},
-  {id:'synthetic', label:'Sintético', icon:'🔬'},
-  {id:'ground',    label:'Suelo',     icon:'🌍'},
+  { id: 'wood', label: 'Madera', icon: '🪵' },
+  { id: 'stone', label: 'Piedra / Orgánico', icon: '🪨' },
+  { id: 'metal', label: 'Metal', icon: '⚙️' },
+  { id: 'paint', label: 'Pintura', icon: '🎨' },
+  { id: 'textile', label: 'Textiles / Telas', icon: '🧣' },
+  { id: 'iridescent', label: 'Iridiscentes', icon: '💿' },
+  { id: 'synthetic', label: 'Sintético / Fluidos', icon: '🔬' },
+  { id: 'ground', label: 'Suelo', icon: '🌍' },
 ] as const;
 
-export function generateMaterial(id:string,width=512,height=512):GeneratedMaps|null{
-  const mat=MATERIAL_LIBRARY.find(m=>m.id===id);
-  return mat?mat.generate(width,height):null;
+export function generateMaterial(id: string, width = 512, height = 512): GeneratedMaps | null {
+  const mat = MATERIAL_LIBRARY.find(m => m.id === id);
+  return mat ? mat.generate(width, height) : null;
 }
 
-/**
- * Generate 64x64 thumbnail DataURLs for every material.
- * Call once on startup to populate the picker grid.
- * Returns Map<materialId, albedoDataURL>
- */
-export function generateAllThumbnails():Map<string,string>{
-  const map=new Map<string,string>();
-  for(const mat of MATERIAL_LIBRARY){
+export function generateAllThumbnails(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const mat of MATERIAL_LIBRARY) {
     map.set(mat.id, mat.thumbnail ? mat.thumbnail() : _thumb(mat));
   }
   return map;
 }
 
 /**
- * Apply material defaults to a Three.js MeshPhysicalMaterial.
- * Usage:
- *   const mat = MATERIAL_LIBRARY.find(m => m.id === 'varnished_wood')!;
- *   applyMaterialDefaults(mat, threeMaterial, texture);
+ * Aplica la configuración avanzada PBR soportando textiles, iridiscencia y translúcidos
+ * asegurando el aislamiento completo de propiedades en Three.js.
  */
 export function applyMaterialDefaults(
   def: ProceduralMaterial,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   threeMat: any,
   maps: GeneratedMaps,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   THREE: any
 ): void {
   const d = def.defaults;
   const loader = new THREE.TextureLoader();
-
+  
   const load = (url: string, sRGB = false) => {
+    if (!url) return null;
     const t = loader.load(url);
     t.colorSpace = sRGB ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    t.repeat.set(d.tiling[0], d.tiling[1]);
+    const tileX = Array.isArray(d.tiling) ? d.tiling[0] : (d.tiling ?? 1);
+    const tileY = Array.isArray(d.tiling) ? d.tiling[1] : (d.tiling ?? 1);
+    t.repeat.set(tileX, tileY);
     return t;
   };
 
-  threeMat.map              = load(maps.albedo, true);
-  threeMat.normalMap        = load(maps.normal);
-  threeMat.roughnessMap     = load(maps.roughness);
-  threeMat.metalnessMap     = load(maps.metallic);
-  threeMat.aoMap            = load(maps.ao);
-  threeMat.displacementMap  = load(maps.displacement);
+  // 1. Asignación estándar de mapas PBR
+  threeMat.map = load(maps.albedo, true);
+  threeMat.normalMap = load(maps.normal);
+  threeMat.roughnessMap = load(maps.roughness);
+  threeMat.metalnessMap = load(maps.metallic);
+  threeMat.aoMap = load(maps.ao);
+  threeMat.displacementMap = load(maps.displacement);
 
-  threeMat.normalScale.setScalar(d.normalScale);
-  threeMat.roughness          = d.roughness;
-  threeMat.metalness          = d.metalness;
-  threeMat.displacementScale  = d.displacementScale;
-  threeMat.displacementBias   = d.displacementBias;
+  threeMat.roughness = d.roughness ?? 0.5;
+  threeMat.metalness = d.metalness ?? 0.0;
 
-  if(d.clearcoat !== undefined){
-    threeMat.clearcoat          = d.clearcoat;
-    threeMat.clearcoatRoughness = d.clearcoatRoughness ?? 0.1;
+  if (threeMat.normalScale && d.normalScale !== undefined) {
+    threeMat.normalScale.setScalar(d.normalScale);
   }
+  if (d.displacementScale !== undefined) {
+    threeMat.displacementScale = d.displacementScale;
+    threeMat.displacementBias = d.displacementBias ?? 0.0;
+  }
+
+  // 2. Clearcoat
+  if (d.clearcoat !== undefined) {
+    threeMat.clearcoat = d.clearcoat;
+    threeMat.clearcoatRoughness = d.clearcoatRoughness ?? 0.1;
+  } else {
+    threeMat.clearcoat = 0.0;
+    threeMat.clearcoatRoughness = 1.0;
+  }
+
+  // 3. CONFIGURACIÓN TEXTIL (TERCIOPELO / LANA / SEDA)
+  if (d.sheen !== undefined) {
+    threeMat.sheen = d.sheen;
+    threeMat.sheenRoughness = d.sheenRoughness ?? 0.5;
+    if (threeMat.sheenColor) {
+      threeMat.sheenColor.set(d.sheenColor || '#ffffff');
+    }
+  } else {
+    threeMat.sheen = 0.0;
+  }
+
+  // 4. CONFIGURACIÓN ÓPTICA (TORNASOL / IRIDISCENCIA)
+  if (d.iridescence !== undefined) {
+    threeMat.iridescence = d.iridescence;
+    threeMat.iridescenceIOR = d.iridescenceIOR ?? 1.3;
+    if (d.iridescenceThicknessRange) {
+      threeMat.iridescenceThicknessRange = d.iridescenceThicknessRange;
+    }
+  } else {
+    threeMat.iridescence = 0.0;
+  }
+
+  // 5. CONFIGURACIÓN TRANSLÚCIDA (HUESOS / CRISTALES)
+  if (d.transmission !== undefined) {
+    threeMat.transmission = d.transmission;
+    threeMat.ior = d.ior ?? 1.5;
+    threeMat.thickness = d.thickness ?? 0.0;
+    threeMat.transparent = true;
+  } else {
+    threeMat.transmission = 0.0;
+    threeMat.transparent = false;
+  }
+
+  // 6. Atenuar/Aumentar dinámicamente envMapIntensity según categoría
+  if (def.category === 'wood' || def.category === 'ground' || def.category === 'textile' || (def.category === 'paint' && def.id.includes('matte'))) {
+    threeMat.envMapIntensity = 0.25;
+  } else if (def.id === 'chrome' || def.id === 'gold' || def.id === 'gold_carbon_fiber') {
+    threeMat.envMapIntensity = 1.3;
+  } else {
+    threeMat.envMapIntensity = 1.0;
+  }
+
   threeMat.needsUpdate = true;
 }
