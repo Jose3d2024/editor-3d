@@ -130,7 +130,8 @@ export interface MaterialData {
   specularIntensity?: number;
   specularColor?: string;
   flipY?: boolean;
-  uvwMapping?: 'PLANAR' | 'BOX' | 'SPHERICAL' | 'CYLINDRICAL' | 'TRIPLANAR';
+  uvwMapping?: 'PLANAR' | 'BOX' | 'SPHERICAL' | 'CYLINDRICAL' | 'TRIPLANAR' | 'UV';
+  triplanarBlend?: number; // 0.0 (Duro) a 1.0 (Difuminado suave en biseles y esquinas)
   // ORM Specific Intensities (for custom shader)
   ormIntensityAO?: number;
   ormIntensityRoughness?: number;
@@ -144,6 +145,12 @@ export interface MaterialData {
   parallaxScale?: number;
   parallaxSteps?: number;
   useParallax?: boolean;
+  proceduralBaseId?: string;
+  filters?: {
+    rust: number;
+    scratches: number;
+    dirt: number;
+  };
 }
 
 export type LightType = 'POINT' | 'DIRECTIONAL' | 'SPOT' | 'RECTAREA' | 'AMBIENT';

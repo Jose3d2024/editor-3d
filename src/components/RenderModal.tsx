@@ -16,7 +16,11 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { setupSceneEnvironment, PRESET_HDRIS } from '../utils/environmentHelper';
 import { fileToDataURL } from '../utils/silhouettes';
 import { createBaseGeometry } from '../utils/csg';
+import { applyUVWMapping, generateUVs } from '../utils/modifiers';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
+import { injectSeamlessDisplacement } from '../utils/materialUtils';
+import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 
 interface RenderModalProps { onClose: () => void; }
 
@@ -64,11 +68,37 @@ function halton(index: number, base: number): number {
   return result;
 }
 
-/** Carga una textura y devuelve la promesa resuelta */
-function loadTex(loader: THREE.TextureLoader, url: string, isColor = false): Promise<THREE.Texture> {
+/** Carga una textura y le aplica la repetición, desplazamiento y rotación del proyecto */
+function loadTex(
+  loader: THREE.TextureLoader, 
+  url: string, 
+  isColor = false,
+  mData: any = {}
+): Promise<THREE.Texture> {
   return new Promise((res, rej) => loader.load(url, t => {
     t.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
-    t.flipY = false;
+    t.flipY = mData.flipY ?? true;
+
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    
+    if (mData.mapRepeat) {
+      const repX = Array.isArray(mData.mapRepeat) ? mData.mapRepeat[0] : mData.mapRepeat;
+      const repY = Array.isArray(mData.mapRepeat) ? mData.mapRepeat[1] : mData.mapRepeat;
+      t.repeat.set(repX, repY);
+    } else {
+      t.repeat.set(1, 1);
+    }
+
+    if (mData.mapOffset) {
+      const offX = Array.isArray(mData.mapOffset) ? mData.mapOffset[0] : mData.mapOffset;
+      const offY = Array.isArray(mData.mapOffset) ? mData.mapOffset[1] : mData.mapOffset;
+      t.offset.set(offX, offY);
+    }
+    if (mData.mapRotation !== undefined) {
+      t.rotation = (mData.mapRotation * Math.PI) / 180;
+    }
+
     res(t);
   }, undefined, rej));
 }
@@ -99,6 +129,147 @@ const blendShader = {
     }
   `,
 };
+
+// Shader para aplicar Tone Mapping y Gamma/sRGB al mostrar el buffer acumulado en pantalla
+const displayShader = {
+  uniforms: {
+    tTexture: { value: null as THREE.Texture | null },
+    exposure: { value: 1.2 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tTexture;
+    uniform float exposure;
+    varying vec2 vUv;
+
+    vec3 ACESFilmicToneMapping(vec3 color) {
+      color *= exposure;
+      float a = 2.51;
+      float b = 0.03;
+      float c = 2.43;
+      float d = 0.59;
+      float e = 0.14;
+      return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
+    }
+
+    vec3 linearToSRGB(vec3 color) {
+      vec3 sRGBLo = color * 12.92;
+      vec3 sRGBHi = 1.055 * pow(max(color, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+      vec3 isLo = step(color, vec3(0.0031308));
+      return mix(sRGBHi, sRGBLo, isLo);
+    }
+
+    void main() {
+      vec4 texColor = texture2D(tTexture, vUv);
+      vec3 mapped = ACESFilmicToneMapping(texColor.rgb);
+      mapped = linearToSRGB(mapped);
+      gl_FragColor = vec4(mapped, texColor.a);
+    }
+  `,
+};
+
+/** Sincroniza e inyecta la iluminación exacta del visor interactivo en la escena de renderizado */
+function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
+  // Siempre agregar iluminación ambiental y hemisférica base para asegurar visibilidad constante
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.4));
+
+  const visibleLights = projectLights ? projectLights.filter((l: any) => l.visible) : [];
+
+  if (visibleLights.length > 0) {
+    visibleLights.forEach((lData: any) => {
+      const color = lData.color || '#ffffff';
+      const intensity = lData.intensity ?? 1.0;
+      let light: THREE.Light | null = null;
+
+      const tipoLuzSeguro = (lData.type || '').toUpperCase();
+
+      switch (tipoLuzSeguro) {
+        case 'POINT':
+          light = new THREE.PointLight(color, intensity, lData.distance || 0, lData.decay || 2);
+          break;
+        case 'DIRECTIONAL':
+          light = new THREE.DirectionalLight(color, intensity);
+          break;
+        case 'SPOT':
+          light = new THREE.SpotLight(
+            color,
+            intensity,
+            lData.distance || 0,
+            lData.angle || Math.PI / 4,
+            lData.penumbra || 0.5,
+            lData.decay || 2
+          );
+          break;
+        case 'RECTAREA':
+          light = new THREE.RectAreaLight(color, intensity, lData.width || 1, lData.height || 1);
+          break;
+        case 'AMBIENT':
+          light = new THREE.AmbientLight(color, intensity);
+          break;
+      }
+
+      if (!light) return;
+
+      // Sincronizar posición y rotación transform
+      if (lData.transform?.position) {
+        light.position.fromArray(lData.transform.position);
+      } else if (lData.position) {
+        light.position.fromArray(lData.position);
+      }
+
+      if (lData.transform?.rotation) {
+        light.rotation.fromArray(lData.transform.rotation);
+      } else if (lData.rotation) {
+        light.rotation.fromArray(lData.rotation);
+      }
+
+      if (light instanceof THREE.DirectionalLight || light instanceof THREE.SpotLight) {
+        const target = new THREE.Object3D();
+        target.position.set(0, 0, -1);
+        light.add(target);
+        light.target = target;
+        scene.add(target);
+      }
+
+      light.castShadow = lData.castShadow ?? true;
+      const l = light as any;
+      if (l.shadow) {
+        l.shadow.bias = -0.0005;
+        l.shadow.mapSize.set(2048, 2048);
+        if (light instanceof THREE.DirectionalLight) {
+          l.shadow.camera.left = -20;
+          l.shadow.camera.right = 20;
+          l.shadow.camera.top = 20;
+          l.shadow.camera.bottom = -20;
+          l.shadow.camera.near = 0.1;
+          l.shadow.camera.far = 50;
+        } else if (light instanceof THREE.SpotLight || light instanceof THREE.PointLight) {
+          l.shadow.camera.near = 0.1;
+          l.shadow.camera.far = 50;
+        }
+      }
+
+      scene.add(light);
+    });
+  } else {
+    // Luz por defecto si no existen luces personalizadas
+    const sun = new THREE.DirectionalLight('#fffaf0', 2.5);
+    sun.position.set(5.1, 10, 7.5);
+    const target = new THREE.Object3D();
+    target.position.set(0, 0, 0);
+    sun.target = target;
+    scene.add(target);
+    sun.castShadow = true;
+    scene.add(sun);
+  }
+}
 
 export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
   const canvasRef     = useRef<HTMLCanvasElement>(null);
@@ -257,8 +428,17 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         }
       }
     } else if ((lastCameraState as any)?.position) {
-      camera.position.fromArray((lastCameraState as any).position);
-      camera.lookAt(new THREE.Vector3().fromArray((lastCameraState as any).target ?? [0, 0, 0]));
+      const pos = (lastCameraState as any).position;
+      const target = (lastCameraState as any).target ?? [0, 0, 0];
+      const posVec = new THREE.Vector3().fromArray(pos);
+      const targetVec = new THREE.Vector3().fromArray(target);
+      if (isNaN(posVec.x) || posVec.distanceTo(targetVec) < 0.001) {
+        camera.position.set(0, 2, 6);
+        camera.lookAt(0, 0, 0);
+      } else {
+        camera.position.copy(posVec);
+        camera.lookAt(targetVec);
+      }
     } else {
       camera.position.set(0, 2, 6);
       camera.lookAt(0, 0, 0);
@@ -273,53 +453,8 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     await setupSceneEnvironment(scene, renderer, project.environment);
 
-    // ── Luces de Estudio Físicas con Sombra Suave ──────────────────────────
-    const hasVisibleProjectLights = project.lights && project.lights.some((l: any) => l.visible);
-
-    if (hasVisibleProjectLights) {
-      project.lights.forEach((lData: any) => {
-        if (!lData.visible) return;
-        const color = lData.color || '#ffffff';
-        const intensity = lData.intensity || 1;
-        if (lData.type === 'POINT') {
-          const light = new THREE.PointLight(color, intensity, lData.distance || 0, lData.decay || 2);
-          light.position.fromArray(lData.transform.position);
-          light.castShadow = lData.castShadow ?? true;
-          scene.add(light);
-        } else if (lData.type === 'SPOT') {
-          const light = new THREE.SpotLight(color, intensity, lData.distance || 0, lData.angle || Math.PI / 4, lData.penumbra || 0.5, lData.decay || 2);
-          light.position.fromArray(lData.transform.position);
-          light.castShadow = lData.castShadow ?? true;
-          scene.add(light);
-        } else if (lData.type === 'DIRECTIONAL') {
-          const light = new THREE.DirectionalLight(color, intensity);
-          light.position.fromArray(lData.transform.position);
-          light.castShadow = lData.castShadow ?? true;
-          scene.add(light);
-        }
-      });
-    }
-
-    // Luz solar principal de estudio
-    const sun = new THREE.DirectionalLight('#fffaf0', hasVisibleProjectLights ? 3 : 5);
-    sun.position.set(6, 10, 6);
-    sun.target.position.set(0, 0, 0);
-    sun.target.updateMatrixWorld(true);
-    sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    sun.shadow.radius = 5;
-    sun.shadow.bias = -0.0001;
-    scene.add(sun);
-    scene.add(sun.target);
-
-    // Luz de relleno lateral
-    const fillLight = new THREE.DirectionalLight('#dce8ff', hasVisibleProjectLights ? 1.5 : 2.5);
-    fillLight.position.set(-6, 4, -6);
-    fillLight.target.position.set(0, 0, 0);
-    fillLight.target.updateMatrixWorld(true);
-    scene.add(fillLight);
-    scene.add(fillLight.target);
+    // ── Luces de Estudio Físicas Sincronizadas con la UI ────────────────────
+    setupProjectLightsInScene(scene, project.lights);
 
     // ── Plano de suelo con sombra suave física ────────────────────────────
     if (showGround) {
@@ -362,7 +497,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const mat = new THREE.MeshPhysicalMaterial({
         color: new THREE.Color(finalColorHex),
         metalness: mData.metalness ?? 0,
-        roughness: mData.roughness ?? 0.4,
+        roughness: mData.roughness ?? 0.75,
         transmission: mData.transmission ?? 0,
         ior: mData.ior ?? 1.5,
         thickness: mData.thickness ?? 0,
@@ -371,7 +506,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         emissive: new THREE.Color(mData.emissive && mData.emissive !== '#000000' ? mData.emissive : '#000000'),
         emissiveIntensity: mData.emissiveIntensity ?? 0,
         side: THREE.FrontSide,
-        envMapIntensity: 1.2,
+        envMapIntensity: 0.4,
+
+        // ── 🧣 INYECCIÓN EXTRAORDINARIA TEXTIL (ESTILO MIXOS CAPTURA) ──
+        sheen: mData.sheen ?? (obj.materialId?.includes('velvet') || mData.id?.includes('velvet') || mData.name?.toLowerCase().includes('terciopelo') ? 1.0 : 0.0),
+        sheenRoughness: mData.sheenRoughness ?? 0.4,
+        sheenColor: new THREE.Color(mData.sheenColor || '#ff9999'),
       });
 
       const loads: Promise<void>[] = [];
@@ -381,15 +521,33 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const metalUrl   = mData.mapMetalness || mData.metalnessMap;
       const aoUrl      = mData.mapAO        || mData.aoMap;
       const emissUrl   = mData.mapEmissive  || mData.emissiveMap;
+      const dispUrl    = mData.mapDisplacement || mData.displacementMap;
 
-      if (albedoUrl) loads.push(loadTex(texLoader, albedoUrl, true).then(t => { mat.map = t; }).catch(() => {}));
-      if (normalUrl) loads.push(loadTex(texLoader, normalUrl).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); }).catch(() => {}));
-      if (roughUrl)  loads.push(loadTex(texLoader, roughUrl).then(t => { mat.roughnessMap = t; }).catch(() => {}));
-      if (metalUrl)  loads.push(loadTex(texLoader, metalUrl).then(t => { mat.metalnessMap = t; }).catch(() => {}));
-      if (aoUrl)     loads.push(loadTex(texLoader, aoUrl).then(t => { mat.aoMap = t; }).catch(() => {}));
-      if (emissUrl)  loads.push(loadTex(texLoader, emissUrl, true).then(t => { mat.emissiveMap = t; }).catch(() => {}));
+      if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale;
+
+      if (albedoUrl) loads.push(loadTex(texLoader, albedoUrl, true, mData).then(t => { mat.map = t; }).catch(() => {}));
+      if (normalUrl) loads.push(loadTex(texLoader, normalUrl, false, mData).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); }).catch(() => {}));
+      if (roughUrl)  loads.push(loadTex(texLoader, roughUrl, false, mData).then(t => { mat.roughnessMap = t; }).catch(() => {}));
+      if (metalUrl)  loads.push(loadTex(texLoader, metalUrl, false, mData).then(t => { mat.metalnessMap = t; }).catch(() => {}));
+      if (aoUrl)     loads.push(loadTex(texLoader, aoUrl, false, mData).then(t => { mat.aoMap = t; }).catch(() => {}));
+      if (emissUrl)  loads.push(loadTex(texLoader, emissUrl, true, mData).then(t => { mat.emissiveMap = t; }).catch(() => {}));
+      if (dispUrl)   loads.push(loadTex(texLoader, dispUrl, false, mData).then(t => { mat.displacementMap = t; if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale; }).catch(() => {}));
 
       await Promise.all(loads);
+      injectSeamlessDisplacement(mat);
+
+      const nombreMat = (mData.name || '').toLowerCase();
+      const requiereTriplanar = nombreMat.includes('madera') || 
+                                nombreMat.includes('roble') || 
+                                nombreMat.includes('pino') ||
+                                nombreMat.includes('wood') || 
+                                nombreMat.includes('stone') ||
+                                mData.uvwMapping === 'TRIPLANAR';
+
+      if (requiereTriplanar) {
+        setupTriplanarMaterial(mat, mData);
+      }
+
       mat.needsUpdate = true;
       return mat;
     };
@@ -447,10 +605,28 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
       if (!mesh) {
         try {
-          const geo = createBaseGeometry(obj);
-          if (!geo.getAttribute('normal')) {
-            geo.computeVertexNormals();
+          // Resolve material mapping rules so render UVs match interactive viewport 1:1
+          const projectMaterials = project.materials || [];
+          const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
+          const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
+
+          let objCopy = { ...obj };
+          if (obj.vertices && obj.faces && obj.faces.length > 0) {
+            let meshData = { vertices: obj.vertices, faces: obj.faces };
+            if (mData.uvwMapping && mData.uvwMapping !== 'UV') {
+              meshData = { ...meshData, faces: meshData.faces.map((f: any) => ({ ...f, uvs: undefined })) };
+              meshData = applyUVWMapping(meshData, mData.uvwMapping);
+            } else if (!obj.faces.some((f: any) => f.uvs && f.uvs.length > 0)) {
+              meshData = generateUVs(meshData);
+            }
+            objCopy = { ...objCopy, faces: meshData.faces };
           }
+
+          let geo = createBaseGeometry(objCopy);
+          try {
+            geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
+          } catch (_) {}
+          geo.computeVertexNormals();
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
           m.castShadow = true; m.receiveShadow = true;
@@ -474,31 +650,51 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     scene.updateMatrixWorld(true);
 
+    // Desactivar Tone Mapping en el renderer para no aplicar doble o triple mapeo en los shaders
+    renderer.toneMapping = THREE.NoToneMapping;
+
     // ── Pipeline de Acumulación Temporal (Super-Sampling & Soft Shadows) ───
     const renderTargetParams: THREE.RenderTargetOptions = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
-      type: THREE.HalfFloatType,
+      type: THREE.UnsignedByteType,
     };
 
     let rtCurrent = new THREE.WebGLRenderTarget(w, h, renderTargetParams);
     let rtA       = new THREE.WebGLRenderTarget(w, h, renderTargetParams);
     let rtB       = new THREE.WebGLRenderTarget(w, h, renderTargetParams);
 
-    const quadMaterial = new THREE.ShaderMaterial({
-      uniforms: blendShader.uniforms,
+    const blendMaterial = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.clone(blendShader.uniforms),
       vertexShader: blendShader.vertexShader,
       fragmentShader: blendShader.fragmentShader,
       depthTest: false,
       depthWrite: false,
+      toneMapped: false,
+    });
+
+    const displayMaterial = new THREE.ShaderMaterial({
+      uniforms: THREE.UniformsUtils.clone(displayShader.uniforms),
+      vertexShader: displayShader.vertexShader,
+      fragmentShader: displayShader.fragmentShader,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
     });
 
     const quadGeo = new THREE.PlaneGeometry(2, 2);
-    const quadMesh = new THREE.Mesh(quadGeo, quadMaterial);
-    const quadScene = new THREE.Scene();
-    quadScene.add(quadMesh);
-    const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    
+    const blendMesh = new THREE.Mesh(quadGeo, blendMaterial);
+    const blendScene = new THREE.Scene();
+    blendScene.add(blendMesh);
+
+    const displayMesh = new THREE.Mesh(quadGeo, displayMaterial);
+    const displayScene = new THREE.Scene();
+    displayScene.add(displayMesh);
+
+    const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    quadCamera.position.set(0, 0, 1);
 
     let currentSample = 0;
     setIsRendering(true);
@@ -520,19 +716,36 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       renderer.clear();
       renderer.render(scene, camera);
 
+      // Si sólo es 1 muestra (borrador / vista previa), renderizar directo con Tone Mapping nativo
+      if (preset.samples <= 1) {
+        camera.clearViewOffset();
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = project.environment.exposure ?? 1.2;
+        renderer.setRenderTarget(null);
+        renderer.clear();
+        renderer.render(scene, camera);
+        setSamples(1);
+        setIsRendering(false);
+        setStatus('✓ Completado — 1 muestra');
+        return;
+      }
+
       // Mezclar la muestra nueva con el acumulado histórico (rtA -> rtB)
-      blendShader.uniforms.tNew.value = rtCurrent.texture;
-      blendShader.uniforms.tOld.value = currentSample === 1 ? rtCurrent.texture : rtA.texture;
-      blendShader.uniforms.blendWeight.value = 1.0 / currentSample;
+      blendMaterial.uniforms.tNew.value = rtCurrent.texture;
+      blendMaterial.uniforms.tOld.value = currentSample === 1 ? rtCurrent.texture : rtA.texture;
+      blendMaterial.uniforms.blendWeight.value = 1.0 / currentSample;
 
       renderer.setRenderTarget(rtB);
       renderer.clear();
-      renderer.render(quadScene, quadCamera);
+      renderer.render(blendScene, quadCamera);
 
-      // Dibujar imagen final acumulada en la pantalla con Tone Mapping
+      // Dibujar imagen final acumulada en la pantalla con Tone Mapping & Corrección sRGB
+      displayMaterial.uniforms.tTexture.value = rtB.texture;
+      displayMaterial.uniforms.exposure.value = project.environment.exposure ?? 1.2;
+
       renderer.setRenderTarget(null);
       renderer.clear();
-      renderer.render(quadScene, quadCamera);
+      renderer.render(displayScene, quadCamera);
 
       // Swap rtA y rtB
       const temp = rtA;
@@ -596,17 +809,8 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const scene = new THREE.Scene();
     await setupSceneEnvironment(scene, renderer, project.environment);
 
-    // Luces de Estudio
-    const sun = new THREE.DirectionalLight('#fffaf0', 4);
-    sun.position.set(6, 10, 6);
-    sun.castShadow = true;
-    sun.shadow.mapSize.width = 2048;
-    sun.shadow.mapSize.height = 2048;
-    scene.add(sun);
-
-    const fillLight = new THREE.DirectionalLight('#dce8ff', 2);
-    fillLight.position.set(-6, 4, -6);
-    scene.add(fillLight);
+    // Luces de Estudio Sincronizadas
+    setupProjectLightsInScene(scene, project.lights);
 
     // Plano de suelo si activado
     if (showGround) {
@@ -636,17 +840,42 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const mat = new THREE.MeshPhysicalMaterial({
         color: new THREE.Color(finalColorHex),
         metalness: mData.metalness ?? 0,
-        roughness: mData.roughness ?? 0.4,
+        roughness: mData.roughness ?? 0.75,
         transmission: mData.transmission ?? 0,
         opacity: mData.opacity ?? obj.opacity ?? 1,
         transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
         side: THREE.FrontSide,
+
+        // ── 🧣 INYECCIÓN EXTRAORDINARIA TEXTIL (ESTILO MIXOS CAPTURA) ──
+        sheen: mData.sheen ?? (obj.materialId?.includes('velvet') || mData.id?.includes('velvet') || mData.name?.toLowerCase().includes('terciopelo') ? 1.0 : 0.0),
+        sheenRoughness: mData.sheenRoughness ?? 0.4,
+        sheenColor: new THREE.Color(mData.sheenColor || '#ff9999'),
       });
 
       const loads: Promise<void>[] = [];
-      if (mData.mapAlbedo || mData.map) loads.push(loadTex(texLoader, mData.mapAlbedo || mData.map, true).then(t => { mat.map = t; }).catch(() => {}));
-      if (mData.mapNormal || mData.normalMap) loads.push(loadTex(texLoader, mData.mapNormal || mData.normalMap).then(t => { mat.normalMap = t; }).catch(() => {}));
+      if (mData.mapAlbedo || mData.map) loads.push(loadTex(texLoader, mData.mapAlbedo || mData.map, true, mData).then(t => { mat.map = t; }).catch(() => {}));
+      if (mData.mapNormal || mData.normalMap) loads.push(loadTex(texLoader, mData.mapNormal || mData.normalMap, false, mData).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); }).catch(() => {}));
+      if (mData.mapRoughness || mData.roughnessMap) loads.push(loadTex(texLoader, mData.mapRoughness || mData.roughnessMap, false, mData).then(t => { mat.roughnessMap = t; }).catch(() => {}));
+      if (mData.mapMetalness || mData.metalnessMap) loads.push(loadTex(texLoader, mData.mapMetalness || mData.metalnessMap, false, mData).then(t => { mat.metalnessMap = t; }).catch(() => {}));
+      if (mData.mapAO || mData.aoMap) loads.push(loadTex(texLoader, mData.mapAO || mData.aoMap, false, mData).then(t => { mat.aoMap = t; }).catch(() => {}));
+      if (mData.mapEmissive || mData.emissiveMap) loads.push(loadTex(texLoader, mData.mapEmissive || mData.emissiveMap, true, mData).then(t => { mat.emissiveMap = t; }).catch(() => {}));
+      if (mData.mapDisplacement || mData.displacementMap) loads.push(loadTex(texLoader, mData.mapDisplacement || mData.displacementMap, false, mData).then(t => { mat.displacementMap = t; if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale; }).catch(() => {}));
       await Promise.all(loads);
+      injectSeamlessDisplacement(mat);
+
+      const nombreMat = (mData.name || '').toLowerCase();
+      const requiereTriplanar = nombreMat.includes('madera') || 
+                                nombreMat.includes('roble') || 
+                                nombreMat.includes('pino') ||
+                                nombreMat.includes('wood') || 
+                                nombreMat.includes('stone') ||
+                                mData.uvwMapping === 'TRIPLANAR';
+
+      if (requiereTriplanar) {
+        setupTriplanarMaterial(mat, mData);
+      }
+
+      mat.needsUpdate = true;
       return mat;
     };
 
@@ -714,7 +943,26 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
       if (!mesh) {
         try {
-          const geo = createBaseGeometry(obj);
+          const projectMaterials = project.materials || [];
+          const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
+          const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
+
+          let objCopy = { ...obj };
+          if (obj.vertices && obj.faces && obj.faces.length > 0) {
+            let meshData = { vertices: obj.vertices, faces: obj.faces };
+            if (mData.uvwMapping && mData.uvwMapping !== 'UV') {
+              meshData = { ...meshData, faces: meshData.faces.map((f: any) => ({ ...f, uvs: undefined })) };
+              meshData = applyUVWMapping(meshData, mData.uvwMapping);
+            } else if (!obj.faces.some((f: any) => f.uvs && f.uvs.length > 0)) {
+              meshData = generateUVs(meshData);
+            }
+            objCopy = { ...objCopy, faces: meshData.faces };
+          }
+
+          let geo = createBaseGeometry(objCopy);
+          try {
+            geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
+          } catch (_) {}
           geo.computeVertexNormals();
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);

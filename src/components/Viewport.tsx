@@ -13,6 +13,7 @@ import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 import { loadOptimizedEnvironmentTexture } from '../utils/hdrLoader';
 import { setupSceneEnvironment } from '../utils/environmentHelper';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { MeshoptDecoder } from 'meshoptimizer';
 import { useStore } from '../store/useStore';
 import { performCSG, createPrimitiveMesh } from '../utils/csg';
@@ -1646,10 +1647,25 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         });
       }
 
+      // ── LA MEJORA MAESTRA: CREAR EL MATERIAL PBR BASE ──
       const mat = createPBRMaterial(finalMData);
-      if (finalMData.uvwMapping === 'TRIPLANAR' && viewMode === 'TEXTURED') {
+
+      // DETECTOR INTELIGENTE TRIPLANAR AUTOMÁTICO:
+      // Si estamos en vista texturizada, forzamos el mapeado triplanar para maderas y piedras,
+      // eliminando las costuras de forma masiva en el cubo biselado.
+      const nombreMat = (finalMData.name || '').toLowerCase();
+      const requiereTriplanar = nombreMat.includes('madera') || 
+                                nombreMat.includes('roble') || 
+                                nombreMat.includes('pino') ||
+                                nombreMat.includes('wood') || 
+                                nombreMat.includes('stone') ||
+                                finalMData.uvwMapping === 'TRIPLANAR';
+
+      if (requiereTriplanar && viewMode === 'TEXTURED') {
+        // Forzamos el uso de tu utilitario nativo sin costuras espacial
         setupTriplanarMaterial(mat, finalMData);
       }
+
       return mat;
     };
 
@@ -2127,9 +2143,13 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // Apply UVW Mapping overrides if specified
-      if (mData.uvwMapping && mData.uvwMapping !== 'PLANAR' && obj.vertices && obj.faces) {
-        meshData = { ...meshData, faces: meshData.faces.map(f => ({ ...f, uvs: undefined })) }; // Clear existing UVs for re-projection
-        meshData = applyUVWMapping(meshData, mData.uvwMapping);
+      if (mData.uvwMapping && obj.vertices && obj.faces) {
+        if (mData.uvwMapping === 'UV') {
+          meshData = generateUVs(meshData);
+        } else {
+          meshData = { ...meshData, faces: meshData.faces.map(f => ({ ...f, uvs: undefined })) }; // Clear existing UVs for re-projection
+          meshData = applyUVWMapping(meshData, mData.uvwMapping);
+        }
       }
 
       const indices: number[] = [];
@@ -2174,7 +2194,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       });
 
-      const geometry = new THREE.BufferGeometry();
+      let geometry = new THREE.BufferGeometry();
       geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPos, 3));
       if (hasUVs || (!hasUVs && obj.vertices && obj.faces)) {
         const uvAttr = new THREE.Float32BufferAttribute(finalUv, 2);
@@ -2182,7 +2202,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         geometry.setAttribute('uv2', uvAttr);
       }
       geometry.setIndex(indices);
-      computeSmoothNormalsByPosition(geometry, Math.PI / 3);
+      try {
+        geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
+      } catch (_) {}
+      geometry.computeVertexNormals();
       if (mData.useParallax) {
         geometry.computeTangents();
       }

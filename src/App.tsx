@@ -5,10 +5,33 @@ import { Timeline } from './components/Timeline';
 import { MultiViewport } from './components/MultiViewport';
 import { MeshProgressModal } from './components/MeshProgressModal';
 import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp, Film } from 'lucide-react';
+import { generateAllThumbnailsAsync } from './utils/proceduralTextures';
 
 export default function App() {
+  const [appReady, setAppReady] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState('Inicializando motor 3D...');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(true);
+
+  useEffect(() => {
+    const initApplication = async () => {
+      try {
+        setLoadingStatus('Cargando base de datos persistente...');
+        
+        // 1. Generar o recuperar instantáneamente de IndexedDB todas las miniaturas
+        // Al hacerlo aquí, la biblioteca se pre-carga al 100% en segundo plano
+        setLoadingStatus('Pre-calculando y optimizando Biblioteca de Materiales PBR procedimentales...');
+        await generateAllThumbnailsAsync();
+        
+        setLoadingStatus('Estabilizando viewports...');
+        setAppReady(true);
+      } catch (e) {
+        console.error("Error durante el arranque:", e);
+        setAppReady(true); // Evitar soft-lock en fallos
+      }
+    };
+    initApplication();
+  }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -23,6 +46,19 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  if (!appReady) {
+    return (
+      <div className="fixed inset-0 bg-[#0d0e15] flex flex-col items-center justify-center z-[9999]">
+        <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4" />
+        <h2 className="text-sm font-bold text-white tracking-wide uppercase">CSG Studio Editor</h2>
+        <p className="text-xs text-indigo-400 font-mono mt-1.5 animate-pulse">{loadingStatus}</p>
+        <div className="w-48 h-1 bg-zinc-800 rounded-full mt-4 overflow-hidden relative">
+          <div className="absolute top-0 bottom-0 left-0 bg-indigo-500 animate-pulse w-full" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden font-sans"

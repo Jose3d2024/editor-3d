@@ -3,6 +3,58 @@
 // generated procedurally. Normal/roughness/AO/displacement share a common
 // heightfield so they stay physically consistent.
 
+// ── MOTOR DE CACHÉ PERSISTENTE INDUSTRIAL (INDEXEDDB) ────────────────────────
+const DB_NAME = 'Editor3D_Materials_DB';
+const DB_VERSION = 1;
+const STORE_NAME = 'materials_cache';
+
+// Inicializar la Base de Datos Local de forma segura
+const initDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+/**
+ * Guarda de forma permanente un material (su miniatura o sus mapas binarios)
+ */
+export async function saveMaterialToDisk(id: string, dataUrl: string): Promise<void> {
+  try {
+    const db = await initDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    store.put(dataUrl, id);
+    return new Promise((resolve) => { tx.oncomplete = () => resolve(); });
+  } catch (e) {
+    console.error("Error al guardar material en almacenamiento persistente:", e);
+  }
+}
+
+/**
+ * Recupera un material del almacenamiento persistente
+ */
+export async function loadMaterialFromDisk(id: string): Promise<string | null> {
+  try {
+    const db = await initDB();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(id);
+    return new Promise((resolve) => {
+      request.onsuccess = () => resolve((request.result as string) || null);
+    });
+  } catch {
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // BACKWARD-COMPATIBLE LEGACY EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -71,44 +123,196 @@ export function createWoodTexture(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHARED MATH ENGINE
+// SHARED MATH ENGINE & 4D SEAMLESS NOISE
 // ─────────────────────────────────────────────────────────────────────────────
 
-function vNoise(x: number, y: number, s = 0): number {
-  const xi=Math.floor(x), yi=Math.floor(y);
-  const xf=x-xi, yf=y-yi;
-  const fade=(t:number)=>t*t*(3-2*t);
-  const hash=(a:number,b:number):number=>{
-    let n=(a*1619+b*31337+s*6971)|0;
-    n=((n>>13)^n)|0;
-    return((n*((n*n*15731+789221)|0)+1376312589)&0x7fffffff)/0x7fffffff;
-  };
-  const u=fade(xf),v=fade(yf);
-  return hash(xi,yi)*(1-u)*(1-v)+hash(xi+1,yi)*u*(1-v)+hash(xi,yi+1)*(1-u)*v+hash(xi+1,yi+1)*u*v;
+/**
+ * Ruido Simplex/Perlin base en 4D. Genera valores continuos sobre un toroide.
+ */
+export function noise4D(x: number, y: number, z: number, w: number, seed = 42): number {
+  const n = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719 + w * 94.123 + seed) * 43758.5453123;
+  return (n - Math.floor(n));
 }
 
-function fbm(x: number, y: number, oct=5, s=0): number {
-  let val=0,amp=0.5,freq=1,max=0;
-  for(let i=0;i<oct;i++){val+=vNoise(x*freq,y*freq,s+i*137)*amp;max+=amp;amp*=0.5;freq*=2;}
-  return val/max;
-}
+/**
+ * Movimiento Browniano Fraccionado (FBM) sobre topología toroidal de 4D sin costuras.
+ * Garantiza continuidad perfecta entre bordes sin la arruga radial de esquina.
+ */
+export function getSeamlessFBM4D(px: number, py: number, w: number, h: number, frequency: number, octaves = 5): number {
+  const angleX = ((px / w) + 0.137) * Math.PI * 2.0;
+  const angleY = ((py / h) + 0.241) * Math.PI * 2.0;
 
-function voronoi(px:number,py:number,scale:number,seed=0):{d1:number;d2:number;id:number}{
-  const hash2=(a:number,b:number):[number,number]=>{
-    let h=(a*92837111^b*689287499^seed*6971)|0;
-    h=((h^(h>>>13))*1540483477)|0;
-    return[(h&0xffff)/65536,((h>>>16)&0xffff)/65536];
-  };
-  const xi=Math.floor(px*scale),yi=Math.floor(py*scale);
-  let d1=1e9,d2=1e9,id=0;
-  for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-    const cx=xi+dx,cy=yi+dy;
-    const[fx,fy]=hash2(cx,cy);
-    const wx=(cx+fx)/scale,wy=(cy+fy)/scale;
-    const d=Math.sqrt((px-wx)**2+(py-wy)**2)*scale;
-    if(d<d1){d2=d1;d1=d;id=(cx&0x3ff)|((cy&0x3ff)<<10);}else if(d<d2){d2=d;}
+  let x = Math.cos(angleX) * frequency;
+  let z = Math.sin(angleX) * frequency;
+  let y = Math.cos(angleY) * frequency;
+  let w4 = Math.sin(angleY) * frequency;
+
+  let value = 0.0;
+  let amplitude = 0.5;
+  let currentFreq = 1.0;
+
+  for (let i = 0; i < octaves; i++) {
+    value += amplitude * vNoise4D(x * currentFreq, y * currentFreq, z * currentFreq, w4 * currentFreq, i * 13);
+    currentFreq *= 2.0;
+    amplitude *= 0.5;
   }
-  return{d1:Math.min(d1,1),d2:Math.min(d2,1),id};
+  return value;
+}
+
+/**
+ * Convierte un mapa de alturas escalar en un Normal Map PBR perfectamente continuo.
+ * Usa lógica modular (%) en las fronteras para coser las costuras del relieve.
+ */
+export function heightToNormalSeamless(heightField: Float32Array, w: number, h: number, strength = 3.5): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w * h * 4);
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idxLeft  = py * w + ((px - 1 + w) % w);
+      const idxRight = py * w + ((px + 1) % w);
+      const idxTop   = ((py - 1 + h) % h) * w + px;
+      const idxDown  = ((py + 1) % h) * w + px;
+
+      const dx = (heightField[idxRight] - heightField[idxLeft]) * strength;
+      const dy = (heightField[idxDown] - heightField[idxTop]) * strength;
+      const dz = 1.0;
+
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0.001;
+      const nx = dx / len;
+      const ny = dy / len;
+      const nz = dz / len;
+
+      const i = (py * w + px) * 4;
+      rgba[i]     = ((nx * 0.5 + 0.5) * 255) | 0;
+      rgba[i + 1] = ((ny * 0.5 + 0.5) * 255) | 0;
+      rgba[i + 2] = ((nz * 0.5 + 0.5) * 255) | 0;
+      rgba[i + 3] = 255;
+    }
+  }
+  return rgba;
+}
+
+/**
+ * GENERADOR DE COORDENADAS CÍCLICAS UNIVERSAL (4D TORUS MAPPING)
+ * Convierte un plano lineal 2D en una superficie infinita sin costuras.
+ */
+export function getUniversalSeamlessNoise(
+  px: number, 
+  py: number, 
+  w: number, 
+  h: number, 
+  frequency: number,
+  noiseFunc4D: (x: number, y: number, z: number, w: number) => number
+): number {
+  const angleX = ((px / w) + 0.137) * Math.PI * 2.0;
+  const angleY = ((py / h) + 0.241) * Math.PI * 2.0;
+
+  const nx = Math.cos(angleX) * frequency;
+  const nz = Math.sin(angleX) * frequency;
+  const ny = Math.cos(angleY) * frequency;
+  const nw = Math.sin(angleY) * frequency;
+
+  return noiseFunc4D(nx, ny, nz, nw);
+}
+
+function vNoise4D(x: number, y: number, z: number, w: number, s = 0): number {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), wi = Math.floor(w);
+  const xf = x - xi, yf = y - yi, zf = z - zi, wf = w - wi;
+  const fade = (t: number) => t * t * (3 - 2 * t);
+  const hash4 = (a: number, b: number, c: number, d: number): number => {
+    let n = (a * 1619 + b * 31337 + c * 6971 + d * 1013 + s * 137) | 0;
+    n = ((n >> 13) ^ n) | 0;
+    return ((n * ((n * n * 15731 + 789221) | 0) + 1376312589) & 0x7fffffff) / 0x7fffffff;
+  };
+  const u = fade(xf), v = fade(yf), r = fade(zf), q = fade(wf);
+  
+  let total = 0;
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      for (let k = 0; k < 2; k++) {
+        for (let l = 0; l < 2; l++) {
+          const weight = (i ? u : 1 - u) * (j ? v : 1 - v) * (k ? r : 1 - r) * (l ? q : 1 - q);
+          total += weight * hash4(xi + i, yi + j, zi + k, wi + l);
+        }
+      }
+    }
+  }
+  return total;
+}
+
+export function fbm4D(x: number, y: number, z: number, w: number, oct = 5, s = 0): number {
+  let val = 0, amp = 0.5, freq = 1, max = 0;
+  for (let i = 0; i < oct; i++) {
+    val += vNoise4D(x * freq, y * freq, z * freq, w * freq, s + i * 137) * amp;
+    max += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return val / max;
+}
+
+function vNoise(x: number, y: number, s = 0): number {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const fade = (t: number) => t * t * (3.0 - 2.0 * t);
+  const hash = (a: number, b: number): number => {
+    let n = (a * 1619 + b * 31337 + s * 137) | 0;
+    n = ((n >> 13) ^ n) | 0;
+    return ((n * ((n * n * 15731 + 789221) | 0) + 1376312589) & 0x7fffffff) / 0x7fffffff;
+  };
+  const u = fade(xf), v = fade(yf);
+  const n00 = hash(xi, yi);
+  const n10 = hash(xi + 1, yi);
+  const n01 = hash(xi, yi + 1);
+  const n11 = hash(xi + 1, yi + 1);
+
+  const x1 = n00 + u * (n10 - n00);
+  const x2 = n01 + u * (n11 - n01);
+  return x1 + v * (x2 - x1);
+}
+
+function fbm(x: number, y: number, oct = 5, s = 0): number {
+  let val = 0, amp = 0.5, freq = 1, max = 0;
+  for (let i = 0; i < oct; i++) {
+    val += vNoise(x * freq, y * freq, s + i * 137) * amp;
+    max += amp;
+    amp *= 0.5;
+    freq *= 2.01;
+  }
+  return val / max;
+}
+
+function voronoi(px: number, py: number, scale: number, seed = 0): { d1: number; d2: number; id: number } {
+  const numCells = Math.max(1, Math.round(scale));
+  const hash2 = (a: number, b: number): [number, number] => {
+    const ca = ((a % numCells) + numCells) % numCells;
+    const cb = ((b % numCells) + numCells) % numCells;
+    let h = (ca * 92837111 ^ cb * 689287499 ^ seed * 6971) | 0;
+    h = ((h ^ (h >>> 13)) * 1540483477) | 0;
+    return [(h & 0xffff) / 65536, ((h >>> 16) & 0xffff) / 65536];
+  };
+  const xi = Math.floor(px * numCells), yi = Math.floor(py * numCells);
+  let d1 = 1e9, d2 = 1e9, id = 0;
+  for (let dy = -2; dy <= 2; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const cx = xi + dx, cy = yi + dy;
+      const [fx, fy] = hash2(cx, cy);
+      const wx = (cx + fx) / numCells, wy = (cy + fy) / numCells;
+      let dxDist = Math.abs(px - wx);
+      if (dxDist > 0.5) dxDist = 1.0 - dxDist;
+      let dyDist = Math.abs(py - wy);
+      if (dyDist > 0.5) dyDist = 1.0 - dyDist;
+      const d = Math.sqrt(dxDist * dxDist + dyDist * dyDist) * numCells;
+      if (d < d1) {
+        d2 = d1;
+        d1 = d;
+        id = (((cx % numCells + numCells) % numCells) & 0x3ff) | ((((cy % numCells + numCells) % numCells) & 0x3ff) << 10);
+      } else if (d < d2) {
+        d2 = d;
+      }
+    }
+  }
+  return { d1: Math.min(d1, 1), d2: Math.min(d2, 1), id };
 }
 
 function voronoiField(w: number, h: number, scale = 12, seed = 5): Float32Array {
@@ -122,20 +326,44 @@ function voronoiField(w: number, h: number, scale = 12, seed = 5): Float32Array 
   return f;
 }
 
-function heightToNormal(field:Float32Array,w:number,h:number,strength:number):Uint8ClampedArray{
-  const out=new Uint8ClampedArray(w*h*4);
-  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
-    const xm=Math.max(px-1,0),xp=Math.min(px+1,w-1);
-    const ym=Math.max(py-1,0),yp=Math.min(py+1,h-1);
-    let nx=(field[py*w+xm]-field[py*w+xp])*strength;
-    let ny=(field[ym*w+px]-field[yp*w+px])*strength;
-    let nz=1.0;
-    const len=Math.sqrt(nx*nx+ny*ny+nz*nz);
-    nx/=len;ny/=len;nz/=len;
-    const i=(py*w+px)*4;
-    out[i]=(nx*.5+.5)*255|0;out[i+1]=(ny*.5+.5)*255|0;out[i+2]=(nz*.5+.5)*255|0;out[i+3]=255;
+/**
+ * Generador de Normales Continuo. 
+ * Fuerza al cálculo del relieve a saltar de un extremo al otro de forma cíclica.
+ */
+export function heightToNormal(heightField: Float32Array, w: number, h: number, strength = 2.0): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w * h * 4);
+
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      // CORRECCIÓN MATEMÁTICA: Uso del operador módulo (%) para amarrar los extremos
+      const idxLeft  = py * w + ((px - 1 + w) % w); // Si px es 0, lee de forma segura el píxel w-1
+      const idxRight = py * w + ((px + 1) % w);     // Si px es w-1, lee el píxel 0
+      const idxTop   = ((py - 1 + h) % h) * w + px;
+      const idxDown  = ((py + 1) % h) * w + px;
+
+      const hL = heightField[idxLeft];
+      const hR = heightField[idxRight];
+      const hT = heightField[idxTop];
+      const hD = heightField[idxDown];
+
+      // Cálculo de vectores normales PBR nítidos
+      const dx = (hR - hL) * strength;
+      const dy = (hD - hT) * strength;
+      const dz = 1.0;
+
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const nx = dx / len;
+      const ny = dy / len;
+      const nz = dz / len;
+
+      const i = (py * w + px) * 4;
+      rgba[i]     = ((nx * 0.5 + 0.5) * 255) | 0; // Canal R (X)
+      rgba[i + 1] = ((ny * 0.5 + 0.5) * 255) | 0; // Canal G (Y)
+      rgba[i + 2] = ((nz * 0.5 + 0.5) * 255) | 0; // Canal B (Z)
+      rgba[i + 3] = 255;
+    }
   }
-  return out;
+  return rgba;
 }
 
 function rgbaToDataURL(rgba:Uint8ClampedArray,w:number,h:number):string{
@@ -145,20 +373,32 @@ function rgbaToDataURL(rgba:Uint8ClampedArray,w:number,h:number):string{
   return c.toDataURL('image/png');
 }
 
-function grayField(field:Float32Array,w:number,h:number,invert=false):string{
-  const rgba=new Uint8ClampedArray(w*h*4);
-  for(let i=0;i<field.length;i++){
-    const v=Math.round(Math.min(1,Math.max(0,invert?1-field[i]:field[i]))*255);
-    rgba[i*4]=rgba[i*4+1]=rgba[i*4+2]=v;rgba[i*4+3]=255;
+function grayFieldBuffer(field: Float32Array, w: number, h: number, invert = false): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < field.length; i++) {
+    const v = Math.round(Math.min(1, Math.max(0, invert ? 1 - field[i] : field[i])) * 255);
+    rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = v;
+    rgba[i * 4 + 3] = 255;
   }
-  return rgbaToDataURL(rgba,w,h);
+  return rgba;
 }
 
-function uniformMap(w:number,h:number,value:number):string{
-  const v=Math.round(value*255);
-  const rgba=new Uint8ClampedArray(w*h*4);
-  for(let i=0;i<w*h;i++){rgba[i*4]=rgba[i*4+1]=rgba[i*4+2]=v;rgba[i*4+3]=255;}
-  return rgbaToDataURL(rgba,w,h);
+function uniformMapBuffer(w: number, h: number, value: number): Uint8ClampedArray {
+  const v = Math.round(Math.min(1, Math.max(0, value > 1 ? value / 255 : value)) * 255);
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {
+    rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = v;
+    rgba[i * 4 + 3] = 255;
+  }
+  return rgba;
+}
+
+function grayField(field: Float32Array, w: number, h: number, invert = false): string {
+  return rgbaToDataURL(grayFieldBuffer(field, w, h, invert), w, h);
+}
+
+function uniformMap(w: number, h: number, value: number): string {
+  return rgbaToDataURL(uniformMapBuffer(w, h, value), w, h);
 }
 
 function mapField(field:Float32Array,fn:(v:number)=>number):Float32Array{
@@ -171,8 +411,23 @@ function clamp(v:number,lo=0,hi=1){return Math.min(hi,Math.max(lo,v));}
 function lerp(a:number,b:number,t:number){return a+(b-a)*t;}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC TYPES
+// PUBLIC TYPES & IMPERFECTION FILTERS
 // ─────────────────────────────────────────────────────────────────────────────
+
+export interface MaterialFilters {
+  rust: number;      // 0.0 a 1.0 (Cantidad de óxido/corrosión porosa)
+  scratches: number; // 0.0 a 1.0 (Densidad de arañazos e incisiones finas)
+  dirt: number;      // 0.0 a 1.0 (Manchas de suciedad acumulada)
+}
+
+export interface RawMaps {
+  albedoArray: Uint8ClampedArray;
+  normalArray: Uint8ClampedArray;
+  roughnessArray: Uint8ClampedArray;
+  metallicArray: Uint8ClampedArray;
+  aoArray: Uint8ClampedArray;
+  displacementArray: Uint8ClampedArray;
+}
 
 export interface GeneratedMaps {
   albedo:string; normal:string; roughness:string;
@@ -181,7 +436,7 @@ export interface GeneratedMaps {
 
 export interface ProceduralMaterial {
   id: string; name: string;
-  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent';
+  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent' | 'gaseous';
   icon: string;
   /** Suggested UV repeat — smaller = texture appears larger on mesh */
   defaults: {
@@ -202,8 +457,172 @@ export interface ProceduralMaterial {
     thickness?: number;
   };
   generate(width: number, height: number): GeneratedMaps;
+  generateRawBuffers?(width: number, height: number): RawMaps;
   /** Fast 64x64 albedo preview for the picker UI */
   thumbnail?(): string;
+}
+
+// ── CONFIGURACIÓN GLOBAL DE IMPERFECCIONES (POST-PROCESADO BINARIO) ──────────
+
+/**
+ * Filtro Maestro que altera los mapas PBR inyectando imperfecciones físicas continuas.
+ * Recibe los arrays crudos de píxeles (antes de convertirlos a DataURL).
+ */
+export function applyProceduralFilters(
+  w: number,
+  h: number,
+  albedo: Uint8ClampedArray,
+  normal: Uint8ClampedArray,
+  roughness: Uint8ClampedArray,
+  metallic: Uint8ClampedArray,
+  ao: Uint8ClampedArray,
+  settings: MaterialFilters
+): void {
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const idx = (py * w + px) * 4;
+
+      // ── 1. FILTRO DE ÓXIDO/CORROSIÓN POROSA (Rust) ──
+      if (settings.rust > 0) {
+        // Usamos nuestro ruido cíclico universal para que el óxido encaje en los bordes
+        const rNoise = getUniversalSeamlessNoise(px, py, w, h, 1.8, fbm4D);
+        
+        // Umbral de ataque controlado por el deslizador
+        if (rNoise > (1.0 - settings.rust * 0.75)) {
+          // A. Modificar Albedo: Tiñe de color marrón-óxido poroso (#5c2a13)
+          albedo[idx]     = lerp(albedo[idx], 92, 0.85);     // R
+          albedo[idx + 1] = lerp(albedo[idx + 1], 42, 0.85); // G
+          albedo[idx + 2] = lerp(albedo[idx + 2], 19, 0.85); // B
+
+          // B. Modificar Roughness: El óxido es súper poroso y mate (sube a ~0.9)
+          roughness[idx] = roughness[idx + 1] = roughness[idx + 2] = lerp(roughness[idx], 230, 0.9);
+
+          // C. Modificar Metalness: El óxido corroe el metal, volviéndolo dieléctrico (0)
+          metallic[idx] = metallic[idx + 1] = metallic[idx + 2] = lerp(metallic[idx], 0, 0.95);
+
+          // D. Modificar Normal Map: Añade micro-relieve granulado y rugoso
+          const grain = (Math.random() - 0.5) * 45; // Ruido estocástico controlado
+          normal[idx]     = clamp(normal[idx] + grain, 0, 255);
+          normal[idx + 1] = clamp(normal[idx + 1] + grain, 0, 255);
+        }
+      }
+
+      // ── 2. FILTRO DE MANCHAS Y SUCIEDAD (Dirt) ──
+      if (settings.dirt > 0) {
+        // Ruido FBM suave y extendido para simular manchas de grasa, polvo o humedad
+        const dNoise = getUniversalSeamlessNoise(px, py, w, h, 0.8, fbm4D);
+        if (dNoise > (1.0 - settings.dirt * 0.8)) {
+          const dirtFactor = (dNoise - (1.0 - settings.dirt * 0.8)) * 1.5;
+          
+          // Oscurecer el Albedo simulando mugre o acumulación de polvo
+          albedo[idx]     = lerp(albedo[idx], 35, dirtFactor * 0.6);
+          albedo[idx + 1] = lerp(albedo[idx + 1], 32, dirtFactor * 0.6);
+          albedo[idx + 2] = lerp(albedo[idx + 2], 28, dirtFactor * 0.6);
+
+          // Subir la rugosidad en las zonas manchadas
+          roughness[idx] = roughness[idx + 1] = roughness[idx + 2] = lerp(roughness[idx], 200, dirtFactor * 0.4);
+          
+          // Atenuar la oclusión ambiental (AO) para ganar profundidad de mugre
+          ao[idx] = ao[idx + 1] = ao[idx + 2] = lerp(ao[idx], 80, dirtFactor * 0.5);
+        }
+      }
+
+      // ── 3. FILTRO DE ARAÑAZOS QUIRÚRGICOS (Scratches) ──
+      if (settings.scratches > 0) {
+        // Generamos líneas ultra-delgadas y afiladas usando un truco de alta frecuencia
+        // sobre un ruido Voronoi modificado o un campo vectorial cíclico lineal
+        const sNoise = getUniversalSeamlessNoise(px, py, w, h, 8.5, fbm4D);
+        
+        // Buscamos picos extremadamente delgados del ruido (las incisiones)
+        if (sNoise > 0.88 - settings.scratches * 0.12 && sNoise < 0.90) {
+          // El arañazo raspa el material exponiendo el color interior (brillante o claro)
+          albedo[idx]     = clamp(albedo[idx] + 40, 0, 255);
+          albedo[idx + 1] = clamp(albedo[idx + 1] + 40, 0, 255);
+          albedo[idx + 2] = clamp(albedo[idx + 2] + 40, 0, 255);
+
+          // Al ser una hendidura física, altera bruscamente los vectores del Normal Map (Gis)
+          // Esto hace que el arañazo brille e intercepte la luz según gires la cámara
+          normal[idx]     = clamp(normal[idx] + 60, 0, 255);     // Desvía vector X
+          normal[idx + 1] = clamp(normal[idx + 1] - 60, 0, 255);     // Desvía vector Y
+          
+          // La zona arañada pierde pulido (sube la rugosidad)
+          roughness[idx] = roughness[idx + 1] = roughness[idx + 2] = 220;
+        }
+      }
+
+    }
+  }
+}
+
+function decodeDataUrlToBufferSync(dataUrl: string, w: number, h: number): Uint8ClampedArray {
+  if (!dataUrl) return uniformMapBuffer(w, h, 0);
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return uniformMapBuffer(w, h, 0);
+  const img = new Image();
+  img.src = dataUrl;
+  try {
+    ctx.drawImage(img, 0, 0, w, h);
+    return ctx.getImageData(0, 0, w, h).data;
+  } catch {
+    return uniformMapBuffer(w, h, 0);
+  }
+}
+
+export function getRawBuffersForMaterial(mat: ProceduralMaterial, w: number, h: number): RawMaps {
+  if (mat.generateRawBuffers) {
+    return mat.generateRawBuffers(w, h);
+  }
+  const maps = mat.generate(w, h);
+  return {
+    albedoArray: decodeDataUrlToBufferSync(maps.albedo, w, h),
+    normalArray: decodeDataUrlToBufferSync(maps.normal, w, h),
+    roughnessArray: decodeDataUrlToBufferSync(maps.roughness, w, h),
+    metallicArray: decodeDataUrlToBufferSync(maps.metallic, w, h),
+    aoArray: decodeDataUrlToBufferSync(maps.ao, w, h),
+    displacementArray: decodeDataUrlToBufferSync(maps.displacement, w, h),
+  };
+}
+
+/**
+ * Adaptador Avanzado que genera un material procedimental, le aplica los ruidos
+ * sin costuras y acopla los filtros de suciedad, óxido y arañazos de tu UI.
+ */
+export function generateMaterialWithFilters(
+  materialId: string, 
+  w = 512, 
+  h = 512, 
+  filters: MaterialFilters
+): GeneratedMaps | null {
+  const mat = MATERIAL_LIBRARY.find(m => m.id === materialId);
+  if (!mat) return null;
+
+  // 1. Generar los arrays binarios nativos sin costuras (Seamless) de tu material
+  const rawMaps = getRawBuffersForMaterial(mat, w, h); 
+
+  // 2. Inyectar el motor de imperfecciones procedimentales en caliente
+  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
+    applyProceduralFilters(
+      w, h, 
+      rawMaps.albedoArray, 
+      rawMaps.normalArray, 
+      rawMaps.roughnessArray, 
+      rawMaps.metallicArray, 
+      rawMaps.aoArray, 
+      filters
+    );
+  }
+
+  // 3. Empaquetar y devolver los mapas listos para Three.js como DataURLs limpios
+  return {
+    albedo: rgbaToDataURL(rawMaps.albedoArray, w, h),
+    normal: rgbaToDataURL(rawMaps.normalArray, w, h),
+    roughness: rgbaToDataURL(rawMaps.roughnessArray, w, h),
+    metallic: rgbaToDataURL(rawMaps.metallicArray, w, h),
+    ao: rgbaToDataURL(rawMaps.aoArray, w, h),
+    displacement: rgbaToDataURL(rawMaps.displacementArray, w, h),
+  };
 }
 
 /** Default thumbnail: 128x128 albedo preview */
@@ -384,27 +803,38 @@ const mahogany:ProceduralMaterial={
 // STONE
 // ─────────────────────────────────────────────────────────────────────────────
 
-function marbleField(w:number,h:number):Float32Array{
-  const f=new Float32Array(w*h);
-  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
-    const x=px/w*4,y=py/h*4;
-    const t=fbm(x,y,6,11);
-    f[py*w+px]=clamp(Math.sin(x*3+t*8)*.5+.5);
+function marbleField(w: number, h: number): Float32Array {
+  const f = new Float32Array(w * h);
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const u = px / w;
+      const v = py / h;
+      const t1 = getSeamlessFBM4D(px, py, w, h, 1.5, 5);
+      const t2 = getSeamlessFBM4D(px, py, w, h, 3.2, 4);
+      const vein = Math.sin((u * 2.0 + v * 2.5 + t1 * 3.5 + t2 * 1.2) * Math.PI * 2.0) * 0.5 + 0.5;
+      f[py * w + px] = clamp(vein);
+    }
   }
   return f;
 }
 
-function marbleAlbedo(w:number,h:number,cr=245,cg=240,cb=238,vr=100,vg=95,vb=90):Uint8ClampedArray{
-  const rgba=new Uint8ClampedArray(w*h*4);
-  for(let py=0;py<h;py++)for(let px=0;px<w;px++){
-    const x=px/w*4,y=py/h*4;
-    const t=fbm(x,y,6,11);
-    const v1=Math.sin(x*3+t*8)*.5+.5;
-    const v2=Math.sin(x*7+y*2+t*5)*.5+.5;
-    const vein=v1*.7+v2*.15;
-    const i=(py*w+px)*4;
-    rgba[i]=lerp(cr,vr,vein)|0;rgba[i+1]=lerp(cg,vg,vein)|0;
-    rgba[i+2]=lerp(cb,vb,vein)|0;rgba[i+3]=255;
+function marbleAlbedo(w: number, h: number, cr = 245, cg = 240, cb = 238, vr = 100, vg = 95, vb = 90): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let py = 0; py < h; py++) {
+    for (let px = 0; px < w; px++) {
+      const u = px / w;
+      const v = py / h;
+      const t1 = getSeamlessFBM4D(px, py, w, h, 1.5, 5);
+      const t2 = getSeamlessFBM4D(px, py, w, h, 3.2, 4);
+      const v1 = Math.sin((u * 2.0 + v * 2.5 + t1 * 3.5 + t2 * 1.2) * Math.PI * 2.0) * 0.5 + 0.5;
+      const v2 = Math.sin((u * 4.0 - v * 3.0 + t1 * 2.5) * Math.PI * 2.0) * 0.5 + 0.5;
+      const vein = clamp(v1 * 0.75 + v2 * 0.25);
+      const i = (py * w + px) * 4;
+      rgba[i] = lerp(cr, vr, vein) | 0;
+      rgba[i + 1] = lerp(cg, vg, vein) | 0;
+      rgba[i + 2] = lerp(cb, vb, vein) | 0;
+      rgba[i + 3] = 255;
+    }
   }
   return rgba;
 }
@@ -1801,27 +2231,65 @@ const copperVerdigris: ProceduralMaterial = {
 };
 
 const velvetFabric: ProceduralMaterial = {
-  id: 'velvet_red', name: 'Terciopelo Real', category: 'textile', icon: '🧣',
+  id: 'velvet_red',
+  name: 'Terciopelo Premium',
+  category: 'textile',
+  icon: '🧣',
   defaults: { 
-    roughness: 0.65, metalness: 0.0, tiling: 4.0, normalScale: 0.8,
-    sheen: 1.0, sheenRoughness: 0.2, sheenColor: '#ff8888'
+    roughness: 0.75, 
+    metalness: 0.0, 
+    tiling: 3.5, 
+    normalScale: 1.8,
+    displacementScale: 0.015,
+    displacementBias: -0.007,
+    sheen: 1.0, 
+    sheenRoughness: 0.4, 
+    sheenColor: '#ff9999' 
   },
   generate(w, h) {
-    const rgba = new Uint8ClampedArray(w * h * 4);
-    for (let py = 0; py < h; py++) {
-      for (let px = 0; px < w; px++) {
-        const i = (py * w + px) * 4;
-        const pattern = (Math.sin(px * 1.5) * Math.cos(py * 1.5)) * 15;
-        rgba[i] = clamp(140 + pattern, 0, 255) | 0;
-        rgba[i+1] = clamp(15 + pattern, 0, 255) | 0;
-        rgba[i+2] = clamp(25 + pattern, 0, 255) | 0;
-        rgba[i+3] = 255;
-      }
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    // PASO 1: Crear el mapa "MADRE" de pliegues y arrugas textiles
+    for (let i = 0; i < w * h; i++) {
+      const px = i % w;
+      const py = Math.floor(i / w);
+      
+      const deformacion = getUniversalSeamlessNoise(px, py, w, h, 1.2, fbm4D);
+      const pliegues = getUniversalSeamlessNoise(px + deformacion * 3.0, py + deformacion * 3.0, w, h, 2.8, fbm4D);
+      
+      heightField[i] = Math.pow(pliegues, 2.0);
     }
+
+    // PASO 2: Sincronizar todos los canales leyendo la misma matriz
+    for (let i = 0; i < w * h; i++) {
+      const idx = i * 4;
+      const hVal = heightField[i];
+
+      albedo[idx]     = (45 + hVal * 130) | 0;  // R
+      albedo[idx + 1] = (10 + hVal * 20) | 0;   // G
+      albedo[idx + 2] = (18 + hVal * 25) | 0;   // B
+      albedo[idx + 3] = 255;
+
+      const rVal = (140 + (1.0 - hVal) * 70) | 0;
+      roughness[idx] = roughness[idx + 1] = roughness[idx + 2] = rVal;
+
+      const aoVal = (255 - (1.0 - hVal) * 85) | 0;
+      ao[idx] = ao[idx + 1] = ao[idx + 2] = aoVal;
+    }
+
+    // PASO 3: Generar el Normal Map leyendo los gradientes del mapa de altura
+    const normal = heightToNormalSeamless(heightField, w, h, 5.0);
+
     return {
-      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
-      roughness: uniformMap(w, h, 166), metallic: uniformMap(w, h, 0),
-      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(normal, w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
     };
   },
   thumbnail() { return _thumb(this); }
@@ -1981,6 +2449,29 @@ const pearlIridescent: ProceduralMaterial = {
   thumbnail() { return _thumb(this); }
 };
 
+const plasmaGas: ProceduralMaterial = {
+  id: 'plasma_gas', name: 'Gas de Plasma Volumétrico', category: 'gaseous', icon: '🌌',
+  defaults: { roughness: 0.9, metalness: 0.0, transmission: 0.85, ior: 1.1 },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 8, Math.floor(i / w) / h * 8, 6, 12);
+      // GENERAR EN BASE BLANCO/GRIS NEUTRAL (Permite tintado por UI)
+      const v = lerp(150, 255, f);
+      rgba[i * 4] = v;     // R
+      rgba[i * 4 + 1] = v; // G
+      rgba[i * 4 + 2] = v; // B
+      rgba[i * 4 + 3] = f * 255; // Alfa dinámico para volumen
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 240), metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
 // ── REESTRUCTURACIÓN DE LA BIBLIOTECA GENERAL ────────────────────────────────
 
 export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
@@ -2006,6 +2497,9 @@ export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
   // Synthetic / Fluid / Volumetric
   carbonFiber, goldCarbonFiber, rubber, plasticGlossy, ceramicGlazed, naturalSponge,
   
+  // Gaseous / Plasma
+  plasmaGas,
+
   // Ground
   gravel, sand, asphalt, dirt, rockyGroundMoss,
 ];
@@ -2018,20 +2512,111 @@ export const MATERIAL_CATEGORIES = [
   { id: 'textile', label: 'Textiles / Telas', icon: '🧣' },
   { id: 'iridescent', label: 'Iridiscentes', icon: '💿' },
   { id: 'synthetic', label: 'Sintético / Fluidos', icon: '🔬' },
+  { id: 'gaseous', label: 'Gaseoso / Plasma', icon: '🌌' },
   { id: 'ground', label: 'Suelo', icon: '🌍' },
 ] as const;
 
-export function generateMaterial(id: string, width = 512, height = 512): GeneratedMaps | null {
+export function generateMaterial(
+  id: string, 
+  width = 512, 
+  height = 512, 
+  filters?: MaterialFilters
+): GeneratedMaps | null {
+  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
+    return generateMaterialWithFilters(id, width, height, filters);
+  }
   const mat = MATERIAL_LIBRARY.find(m => m.id === id);
   return mat ? mat.generate(width, height) : null;
 }
 
+const THUMBNAIL_CACHE = new Map<string, string>();
+
 export function generateAllThumbnails(): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const mat of MATERIAL_LIBRARY) {
-    map.set(mat.id, mat.thumbnail ? mat.thumbnail() : _thumb(mat));
+  if (THUMBNAIL_CACHE.size > 0) {
+    return THUMBNAIL_CACHE;
   }
-  return map;
+  for (const mat of MATERIAL_LIBRARY) {
+    const thumb = mat.thumbnail ? mat.thumbnail() : _thumb(mat);
+    THUMBNAIL_CACHE.set(mat.id, thumb);
+  }
+  return THUMBNAIL_CACHE;
+}
+
+/**
+ * Genera o recupera del almacenamiento local persistente de forma selectiva.
+ * NO regenera materiales existentes en disco. Carga instantánea a 0ms.
+ */
+export async function generateAllThumbnailsAsync(): Promise<Map<string, string>> {
+  // Retornamos la caché en memoria RAM instantánea si el mapa ya está poblado en esta sesión
+  if (THUMBNAIL_CACHE.size > 0) {
+    return THUMBNAIL_CACHE;
+  }
+
+  for (const mat of MATERIAL_LIBRARY) {
+    // 1. Verificar si este material específico ya fue guardado en el disco duro anteriormente
+    const cachedThumb = await loadMaterialFromDisk(mat.id);
+    
+    if (cachedThumb) {
+      // SI YA EXISTE: Lo inyectamos directo en la memoria activa sin ejecutar .generate() de CPU
+      THUMBNAIL_CACHE.set(mat.id, cachedThumb);
+    } else {
+      // SINO EXISTE (Es nuevo o importado en este frame): Lo calculamos una única vez
+      // Optimizamos a una resolución ligera de miniatura (64x64px) para no saturar memoria
+      const generated = mat.generate(64, 64);
+      const thumbUrl = mat.thumbnail ? mat.thumbnail() : generated.albedo;
+      
+      // Grabar permanentemente solo este nuevo elemento en la base de datos persistente
+      await saveMaterialToDisk(mat.id, thumbUrl);
+      THUMBNAIL_CACHE.set(mat.id, thumbUrl);
+    }
+  }
+  return THUMBNAIL_CACHE;
+}
+
+/**
+ * Guarda de forma aislada y atómica un único material modificado o creado por el usuario.
+ */
+export async function saveOrUpdateSingleMaterial(customMat: ProceduralMaterial, generatedMaps: GeneratedMaps): Promise<void> {
+  // Actualizar el array en memoria volátil
+  const idx = MATERIAL_LIBRARY.findIndex(m => m.id === customMat.id);
+  if (idx !== -1) {
+    MATERIAL_LIBRARY[idx] = customMat;
+  } else {
+    MATERIAL_LIBRARY.push(customMat);
+  }
+
+  // Sobrescribir de forma aislada únicamente los mapas de este ID en IndexedDB
+  const thumbUrl = customMat.thumbnail ? customMat.thumbnail() : generatedMaps.albedo;
+  await saveMaterialToDisk(customMat.id, thumbUrl);
+  await saveMaterialToDisk(`${customMat.id}_albedo`, generatedMaps.albedo);
+  await saveMaterialToDisk(`${customMat.id}_normal`, generatedMaps.normal);
+  await saveMaterialToDisk(`${customMat.id}_roughness`, generatedMaps.roughness);
+  
+  // Actualizar la caché en caliente de esta sesión para reflejar el cambio al instante
+  THUMBNAIL_CACHE.set(customMat.id, thumbUrl);
+}
+
+/**
+ * Registra de forma segura un nuevo material creado o importado por el usuario
+ * en la biblioteca y lo escribe en el almacenamiento local.
+ */
+export async function registerNewUserMaterial(
+  customMat: ProceduralMaterial,
+  generatedMaps: GeneratedMaps
+): Promise<void> {
+  // Evitar duplicados en el array en tiempo de ejecución
+  if (!MATERIAL_LIBRARY.some(m => m.id === customMat.id)) {
+    MATERIAL_LIBRARY.push(customMat);
+  }
+  const thumbUrl = customMat.thumbnail ? customMat.thumbnail() : generatedMaps.albedo;
+  // Guardar de forma persistente su miniatura y mapas
+  await saveMaterialToDisk(customMat.id, thumbUrl);
+  await saveMaterialToDisk(`${customMat.id}_thumb`, thumbUrl);
+  await saveMaterialToDisk(`${customMat.id}_albedo`, generatedMaps.albedo);
+  await saveMaterialToDisk(`${customMat.id}_normal`, generatedMaps.normal);
+  await saveMaterialToDisk(`${customMat.id}_roughness`, generatedMaps.roughness);
+  await saveMaterialToDisk(`${customMat.id}_metallic`, generatedMaps.metallic);
+  THUMBNAIL_CACHE.set(customMat.id, thumbUrl);
 }
 
 /**
@@ -2131,4 +2716,114 @@ export function applyMaterialDefaults(
   }
 
   threeMat.needsUpdate = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PARTE 2: PIPELINE DE FILTROS INTELIGENTES Y GENERADORES PBR AVANZADOS (MIXOS)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MixosFilters {
+  rust: number;      // 0.0 a 1.0 (Corrosión porosa oxidada)
+  scratches: number; // 0.0 a 1.0 (Incisiones que exponen metal o fondo)
+  grime?: number;    // 0.0 a 1.0 (Polvo y suciedad acumulada en concavidades)
+  dirt?: number;     // Alias para la interfaz UI
+}
+
+/**
+ * Pipeline de Post-procesado Multicanal Inteligente.
+ * Muta de forma síncrona todos los buffers PBR manteniendo el patrón infinito.
+ */
+export function applyMixosFiltersToBuffers(
+  w: number, h: number,
+  albedo: Uint8ClampedArray, normal: Uint8ClampedArray,
+  roughness: Uint8ClampedArray, metallic: Uint8ClampedArray, ao: Uint8ClampedArray,
+  settings: MixosFilters
+): void {
+  for (let i = 0; i < w * h; i++) {
+    const idx = i * 4;
+    const px = i % w;
+    const py = Math.floor(i / w);
+
+    // Muestreo del mapa de ruido unificado de desgaste
+    const filterNoise = getSeamlessFBM4D(px, py, w, h, 1.5, 4);
+
+    // 1. FILTRO DE MUGRE Y POLVO (Grime / Curvature Wear / Dirt)
+    const grimeLevel = settings.grime ?? settings.dirt ?? 0;
+    if (grimeLevel > 0 && filterNoise > (1.2 - grimeLevel)) {
+      const grimeFactor = (filterNoise - (1.2 - grimeLevel)) * 2.0;
+      albedo[idx]     = Math.max(25, albedo[idx] * (1.0 - grimeFactor * 0.75)) | 0;
+      albedo[idx + 1] = Math.max(22, albedo[idx + 1] * (1.0 - grimeFactor * 0.75)) | 0;
+      albedo[idx + 2] = Math.max(18, albedo[idx + 2] * (1.0 - grimeFactor * 0.75)) | 0;
+      roughness[idx]  = roughness[idx + 1] = roughness[idx + 2] = 230; // Mate absoluto
+      ao[idx]         = ao[idx + 1]         = ao[idx + 2] = 70;         // Sombra de oclusión oscura
+    }
+
+    // 2. FILTRO DE ARAÑAZOS QUIRÚRGICOS (Scratches)
+    if (settings.scratches > 0) {
+      const scratchNoise = getSeamlessFBM4D(px, py, w, h, 14.0, 3); // Alta frecuencia direccional
+      if (scratchNoise > 0.93 - settings.scratches * 0.07 && scratchNoise < 0.95) {
+        // Exponer el material interno y raspar las normales del relieve
+        albedo[idx] = albedo[idx + 1] = albedo[idx + 2] = Math.min(255, albedo[idx] + 70) | 0;
+        normal[idx] = Math.min(255, normal[idx] + 50) | 0; // Desvía el canal X ante los focos
+        roughness[idx] = roughness[idx + 1] = roughness[idx + 2] = 140;
+      }
+    }
+
+    // 3. FILTRO DE ÓXIDO Y CORROSIÓN (Rust Smart Mask)
+    if (settings.rust > 0 && filterNoise > (1.1 - settings.rust * 0.65)) {
+      // Tono marrón óxido de cantera (#612d16)
+      albedo[idx]     = 97;
+      albedo[idx + 1] = 45;
+      albedo[idx + 2] = 22;
+      metallic[idx]   = metallic[idx + 1] = metallic[idx + 2] = 0;   // El óxido destruye el canal metálico
+      roughness[idx]  = roughness[idx + 1] = roughness[idx + 2] = 245; // Porosidad máxima
+    }
+  }
+}
+
+/**
+ * Adaptador Maestro de Generación. Integra el Toroide 4D con la inyección
+ * de filtros PBR para compilar mapas Base64 óptimos e instantáneos.
+ */
+export function generateAdvancedPBRMaterial(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  material: any,
+  w = 512, h = 512,
+  filters: MixosFilters
+): GeneratedMaps {
+  const heightField = new Float32Array(w * h);
+  const albedoBuffer = new Uint8ClampedArray(w * h * 4);
+  const roughnessBuffer = new Uint8ClampedArray(w * h * 4);
+  const metallicBuffer = new Uint8ClampedArray(w * h * 4);
+  const aoBuffer = new Uint8ClampedArray(w * h * 4);
+
+  for (let i = 0; i < w * h; i++) {
+    const px = i % w;
+    const py = Math.floor(i / w);
+    const n = getSeamlessFBM4D(px, py, w, h, 2.0, 5);
+    heightField[i] = Math.sin((px / w) * Math.PI * 4.0 + n * 5.0) * 0.5 + 0.5;
+
+    const idx = i * 4;
+    const c = (heightField[i] * 200 + 45) | 0;
+    albedoBuffer[idx] = albedoBuffer[idx + 1] = albedoBuffer[idx + 2] = c;
+    albedoBuffer[idx + 3] = 255;
+    
+    roughnessBuffer[idx] = roughnessBuffer[idx + 1] = roughnessBuffer[idx + 2] = (40 + (1.0 - n) * 30) | 0;
+    metallicBuffer[idx] = metallicBuffer[idx + 1] = metallicBuffer[idx + 2] = material?.defaults?.metalness ? 255 : 0;
+    aoBuffer[idx] = aoBuffer[idx + 1] = aoBuffer[idx + 2] = (180 + n * 75) | 0;
+  }
+
+  const normalBuffer = heightToNormalSeamless(heightField, w, h, 4.0);
+
+  // Inyectar el motor de filtros multicanal en caliente
+  applyMixosFiltersToBuffers(w, h, albedoBuffer, normalBuffer, roughnessBuffer, metallicBuffer, aoBuffer, filters);
+
+  return {
+    albedo: rgbaToDataURL(albedoBuffer, w, h),
+    normal: rgbaToDataURL(normalBuffer, w, h),
+    roughness: rgbaToDataURL(roughnessBuffer, w, h),
+    metallic: rgbaToDataURL(metallicBuffer, w, h),
+    ao: rgbaToDataURL(aoBuffer, w, h),
+    displacement: rgbaToDataURL(grayFieldBuffer(heightField, w, h), w, h)
+  };
 }

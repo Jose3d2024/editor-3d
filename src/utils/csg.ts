@@ -1,7 +1,8 @@
 import * as THREE from 'three';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CSG } from 'three-csg-ts';
 import { CSGObject, Transform, Keyframe } from '../types';
-import { generateUVs } from './modifiers';
+import { generateUVs, applyUVWMapping } from './modifiers';
 import { computeSmoothNormalsByPosition } from './meshUtils';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,14 +37,20 @@ function interpolateTransform(keyframes: Keyframe[], time: number, base: Transfo
 // Used for: viewport display, wireframe, EdgesGeometry, raycasting
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
+export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeometry {
   // If the object has explicit mesh data (new architecture), use it.
   if (obj.vertices && obj.faces) {
     let meshData = { vertices: obj.vertices, faces: obj.faces };
-    const hasUVs = obj.faces.some(f => f.uvs && f.uvs.length > 0);
+    const uvwMapping = mData?.uvwMapping;
     
-    if (!hasUVs) {
-      meshData = generateUVs(meshData);
+    if (uvwMapping && uvwMapping !== 'UV') {
+      meshData = { ...meshData, faces: meshData.faces.map(f => ({ ...f, uvs: undefined })) };
+      meshData = applyUVWMapping(meshData, uvwMapping);
+    } else {
+      const hasUVs = obj.faces.some(f => f.uvs && f.uvs.length > 0);
+      if (!hasUVs) {
+        meshData = generateUVs(meshData);
+      }
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -147,7 +154,15 @@ export function createBaseGeometry(obj: CSGObject): THREE.BufferGeometry {
       geo = new THREE.BoxGeometry(1, 1, 1);
   }
 
-  return geo;
+  // Soldar los vértices duplicados de las aristas compartidas para que al desplazarse por el mapa de relieve se muevan juntos.
+  try {
+    const merged = BufferGeometryUtils.mergeVertices(geo, 1e-4);
+    merged.computeVertexNormals();
+    return merged;
+  } catch (_) {
+    geo.computeVertexNormals();
+    return geo;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

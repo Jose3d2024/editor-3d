@@ -133,10 +133,17 @@ export function updateORMUniforms(material: THREE.Material, data: MaterialData) 
  * Creates a Three.js material from MaterialData.
  */
 export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial {
+  const isVelvet = Boolean(
+    (data.id && data.id.includes('velvet')) ||
+    (data.name && data.name.toLowerCase().includes('terciopelo')) ||
+    (data.name && data.name.toLowerCase().includes('velvet'))
+  );
+
   const isPhysical = 
     (data.transmission ?? 0) > 0 || 
     (data.clearcoat ?? 0) > 0 || 
     (data.sheen ?? 0) > 0 || 
+    isVelvet ||
     (data.iridescence ?? 0) > 0 ||
     (data.specularIntensity !== undefined && data.specularIntensity !== 1) ||
     (data.ior !== undefined && data.ior !== 1.5) ||
@@ -163,9 +170,13 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     if (data.attenuationColor) m.attenuationColor.set(data.attenuationColor);
     m.clearcoat = data.clearcoat ?? 0;
     m.clearcoatRoughness = data.clearcoatRoughness ?? 0;
-    m.sheen = data.sheen ?? 0;
-    m.sheenRoughness = data.sheenRoughness ?? 0;
-    if (data.sheenColor) m.sheenColor.set(data.sheenColor);
+    m.sheen = data.sheen ?? (isVelvet ? 1.0 : 0);
+    m.sheenRoughness = data.sheenRoughness ?? 0.4;
+    if (data.sheenColor) {
+      m.sheenColor.set(data.sheenColor);
+    } else if (isVelvet) {
+      m.sheenColor.set('#ff9999');
+    }
     m.iridescence = data.iridescence ?? 0;
     m.iridescenceIOR = data.iridescenceIOR ?? 1.3;
     if (data.iridescenceThicknessRange) m.iridescenceThicknessRange = data.iridescenceThicknessRange;
@@ -221,5 +232,58 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     if (data.clearcoatNormalScale) m.clearcoatNormalScale.set(data.clearcoatNormalScale, data.clearcoatNormalScale);
   }
 
+  injectSeamlessDisplacement(material);
+
   return material;
+}
+
+/**
+ * Injects custom seamless displacement logic to prevent mesh face splitting at hard edges and corners.
+ */
+export function injectSeamlessDisplacement(material: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial) {
+  const previousOnBeforeCompile = material.onBeforeCompile;
+
+  material.onBeforeCompile = (shader, renderer) => {
+    if (previousOnBeforeCompile) {
+      previousOnBeforeCompile(shader, renderer);
+    }
+
+    if (shader.vertexShader.includes('#include <displacementmap_vertex>')) {
+      const seamlessDisplacementCode = `
+        #ifdef USE_DISPLACEMENTMAP
+          vec3 smoothDispDir = length(position) > 0.0001 ? normalize(position) : normalize(objectNormal);
+
+          vec3 bNorm = pow(abs(normalize(normal)), vec3(4.0));
+          float totalNorm = bNorm.x + bNorm.y + bNorm.z + 0.00001;
+          bNorm /= totalNorm;
+
+          vec2 dispMapScale = vec2(1.0);
+          #ifdef TRIPLANAR_SCALE
+            dispMapScale = triplanarScale;
+          #endif
+
+          vec2 uvX = vec2(position.z * (normal.x < 0.0 ? -1.0 : 1.0), position.y);
+          vec2 uvY = vec2(position.x, position.z * (normal.y < 0.0 ? -1.0 : 1.0));
+          vec2 uvZ = vec2(position.x * (normal.z < 0.0 ? -1.0 : 1.0), position.y);
+
+          float hX = texture2D(displacementMap, uvX * dispMapScale).x;
+          float hY = texture2D(displacementMap, uvY * dispMapScale).x;
+          float hZ = texture2D(displacementMap, uvZ * dispMapScale).x;
+          float triHeight = hX * bNorm.x + hY * bNorm.y + hZ * bNorm.z;
+
+          float stdHeight = texture2D( displacementMap, vDisplacementMapUv ).x;
+          float finalHeight = mix(stdHeight, triHeight, 0.65);
+
+          transformed += smoothDispDir * ( finalHeight * displacementScale + displacementBias );
+        #endif
+      `;
+
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <displacementmap_vertex>',
+        seamlessDisplacementCode
+      );
+    }
+
+    material.userData.shader = shader;
+  };
 }
