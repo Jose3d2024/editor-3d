@@ -22,7 +22,8 @@ import {
   CheckCircle,
   X,
   Search,
-  Sparkles
+  Sparkles,
+  Grid
 } from 'lucide-react';
 import { createORMMap } from '../utils/materialUtils';
 import { applyUVWMapping, generateUVs } from '../utils/modifiers';
@@ -507,7 +508,7 @@ export const MaterialPanel: React.FC = () => {
         } else {
           meshData = applyUVWMapping(meshData as any, mapping);
         }
-        state.updateObject(obj.id, { faces: meshData.faces });
+        state.updateObject(obj.id, { vertices: meshData.vertices, faces: meshData.faces });
       }
     });
   }, [activeMaterial, selectedObjectId, selectedObjectIds]);
@@ -1073,18 +1074,30 @@ export const MaterialPanel: React.FC = () => {
           </div>
 
           {/* Botón Proyección UV Automática / Smart UV / Generar UV / Re-unir mapa */}
-          <div className="pt-1">
+          <div className="pt-1 flex gap-2">
             <button
               onClick={() => handleAutoUVProjection()}
-              className="w-full py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl text-[11px] font-bold transition-all flex items-center justify-center gap-2 shadow-sm active:scale-98"
+              className="flex-1 py-2 px-2 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98"
             >
-              <Zap size={13} className="text-indigo-400" />
-              <span>Proyección UV Automática (Generar / Re-unir Mapa)</span>
+              <Zap size={12} className="text-indigo-400" />
+              <span>Proyección UV Auto</span>
             </button>
-            <p className="text-[9px] text-zinc-500 mt-1 text-center">
-              Recalcula las coordenadas UV basándose en la forma actual del objeto y cubo redondeado.
-            </p>
+            <button
+              onClick={() => updateMaterial(activeMaterial.id, { uvDebug: !activeMaterial.uvDebug })}
+              className={`py-2 px-2.5 rounded-xl text-[10px] font-bold border transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98 ${
+                activeMaterial.uvDebug 
+                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-600/30' 
+                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/10'
+              }`}
+              title="Activar/Desactivar textura Checkerboard UV para este material"
+            >
+              <Grid size={12} />
+              <span>UV Debug: {activeMaterial.uvDebug ? 'ON' : 'OFF'}</span>
+            </button>
           </div>
+          <p className="text-[9px] text-zinc-500 mt-1 text-center">
+            Recalcula las coordenadas UV o visualiza la cuadrícula checkerboard de prueba.
+          </p>
 
           {/* Deslizador Suaviza la Transición: Blend (Mezcla) / Suavizado de Bordes */}
           {((activeMaterial.uvwMapping || 'BOX') === 'TRIPLANAR' || (activeMaterial.uvwMapping || 'BOX') === 'BOX') && (

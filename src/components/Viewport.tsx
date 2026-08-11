@@ -22,6 +22,7 @@ import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
+import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
@@ -1601,12 +1602,28 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
     const getMaterialForObject = (obj: CSGObject, mData: any) => {
       // Ensure mData has defaults from obj if not present
-      const finalMData = {
+      let finalMData = {
         ...mData,
         color: mData.color || obj.color || '#ffffff',
         opacity: mData.opacity ?? obj.opacity ?? 1,
         transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
       };
+
+      if (obj.uvDebug || mData.uvDebug) {
+        finalMData = {
+          ...finalMData,
+          color: '#ffffff',
+          map: getUVDebugTexture(),
+          normalMap: undefined,
+          roughnessMap: undefined,
+          metalnessMap: undefined,
+          aoMap: undefined,
+          displacementMap: undefined,
+          useParallax: false,
+          roughness: 0.2,
+          metalness: 0.0,
+        };
+      }
 
       if (finalMData.useParallax && viewMode === 'TEXTURED') {
         const loader = new THREE.TextureLoader();
@@ -1654,12 +1671,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       // Si estamos en vista texturizada, forzamos el mapeado triplanar para maderas y piedras,
       // eliminando las costuras de forma masiva en el cubo biselado.
       const nombreMat = (finalMData.name || '').toLowerCase();
-      const requiereTriplanar = nombreMat.includes('madera') || 
-                                nombreMat.includes('roble') || 
-                                nombreMat.includes('pino') ||
-                                nombreMat.includes('wood') || 
-                                nombreMat.includes('stone') ||
-                                finalMData.uvwMapping === 'TRIPLANAR';
+      const uvMapping = finalMData.uvwMapping || 'BOX';
+      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
+      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
       if (requiereTriplanar && viewMode === 'TEXTURED') {
         // Forzamos el uso de tu utilitario nativo sin costuras espacial
@@ -1698,7 +1712,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         } as any;
         
         let customMaterial: THREE.Material | null = null;
-        if (obj.materialId || Object.keys(obj.material || {}).length > 0 || (obj.color && obj.color !== '#ffffff') || (obj.opacity !== undefined && obj.opacity !== 1)) {
+        if (obj.uvDebug || obj.materialId || Object.keys(obj.material || {}).length > 0 || (obj.color && obj.color !== '#ffffff') || (obj.opacity !== undefined && obj.opacity !== 1)) {
             customMaterial = getMaterialForObject(obj, mData);
         }
 
@@ -2166,12 +2180,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         posArr.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
       });
 
+      const isSmooth = obj.smoothShading === true;
+
       meshData.faces?.forEach((face, fIdx) => {
         const faceIndices: number[] = [];
         face.indices.forEach((posIdx, i) => {
           const uv = face.uvs?.[i] || [0, 0];
           // Create a unique vertex for each position + UV combination to handle seams
-          const key = `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`;
+          const key = isSmooth
+            ? `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`
+            : `${posIdx}_f${fIdx}`;
           
           if (vertMap.has(key)) {
             faceIndices.push(vertMap.get(key)!);
@@ -2202,10 +2220,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         geometry.setAttribute('uv2', uvAttr);
       }
       geometry.setIndex(indices);
-      try {
-        geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
-      } catch (_) {}
-      geometry.computeVertexNormals();
+      if (isSmooth) {
+        computeSmoothNormalsByPosition(geometry, Math.PI / 3);
+      } else {
+        geometry.computeVertexNormals();
+      }
       if (mData.useParallax) {
         geometry.computeTangents();
       }
@@ -2280,7 +2299,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (facesSharingEdge.length === 2) {
           const n1 = faceNormals[facesSharingEdge[0]];
           const n2 = faceNormals[facesSharingEdge[1]];
-          if (n1.dot(n2) > 0.998) {
+          if (n1.dot(n2) > 0.9999) {
             return;
           }
         }

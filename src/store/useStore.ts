@@ -285,7 +285,6 @@ interface Store extends AppState {
   weldObject: (id: string, tolerance?: number) => Promise<void>;
   healObject: (id: string) => Promise<void>;
   fillHolesObject: (id: string) => Promise<void>;
-  shrinkWrapObject: (id: string, resolution?: number) => Promise<void>;
   separateLoosePartsObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   ungroupSelectedObject: (id: string) => Promise<{ success: boolean; message: string; count?: number }>;
   recenterPivotObject: (idInput?: string) => Promise<void>;
@@ -1965,97 +1964,6 @@ export const useStore = create<Store>()((set, get) => ({
       }));
     } catch (e) {
       console.error("Error en Tapar Huecos:", e);
-      set({ meshProcessing: null });
-    }
-  },
-
-  shrinkWrapObject: async (id, resolution = 3) => {
-    const { project } = get();
-    let obj = project.objects.find(o => o.id === id);
-    if (!obj) return;
-
-    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
-    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
-
-    set({
-      meshProcessing: {
-        active: true,
-        title: 'Remallado Envolvente (Shrink-Wrap)',
-        subtitle: 'Inicializando estructura y leyendo polígonos...',
-        progress: 5,
-        objectName: obj.name,
-        vertCount: initialVerts,
-        faceCount: initialFaces,
-      }
-    });
-    await new Promise(r => setTimeout(r, 40));
-
-    try {
-      let updatedObj = obj;
-      if (obj.meshData && obj.meshData.type === 'gltf') {
-        const { optimizeGLBModel } = await import('../utils/glb_processor');
-        updatedObj = await optimizeGLBModel(obj, resolution, async (prog, step) => {
-          set(s => ({
-            meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
-          }));
-          await new Promise(r => setTimeout(r, 5));
-        });
-        set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-        get().saveHistory();
-      } else {
-        if (obj.meshData) {
-          set(s => ({
-            meshProcessing: s.meshProcessing
-              ? { ...s.meshProcessing, subtitle: 'Convirtiendo modelo importado a malla CSG...', progress: 12 }
-              : null
-          }));
-          await new Promise(r => setTimeout(r, 20));
-          obj = await convertImportedToCSG(obj);
-        }
-
-        const { shrinkWrapMesh } = await import('../utils/modifiers');
-        const shrinkWrapped = await shrinkWrapMesh(obj, resolution, async (prog, step) => {
-          set(s => ({
-            meshProcessing: s.meshProcessing ? { ...s.meshProcessing, progress: prog, subtitle: step } : null
-          }));
-          await new Promise(r => setTimeout(r, 5));
-        });
-
-        updatedObj = {
-          ...obj,
-          type: 'MESH',
-          parameters: {},
-          meshData: undefined,
-          vertices: shrinkWrapped.vertices,
-          faces: shrinkWrapped.faces,
-          vertexOffsets: {},
-          stats: { vertices: shrinkWrapped.vertices.length, faces: shrinkWrapped.faces.length }
-        };
-
-        set({
-          project: {
-            ...get().project,
-            objects: get().project.objects.map(o => o.id === id ? updatedObj : o)
-          }
-        });
-        get().saveHistory();
-      }
-
-      const finalVerts = updatedObj.stats?.vertices ?? updatedObj.vertices?.length ?? 0;
-      const finalFaces = updatedObj.stats?.faces ?? updatedObj.faces?.length ?? 0;
-
-      set(s => ({
-        meshProcessing: s.meshProcessing ? {
-          ...s.meshProcessing,
-          progress: 100,
-          subtitle: '¡Remallado Envolvente completado con éxito!',
-          completed: true,
-          finalVertCount: finalVerts,
-          finalFaceCount: finalFaces,
-        } : null
-      }));
-    } catch (e) {
-      console.error("Error en Shrink-Wrap:", e);
       set({ meshProcessing: null });
     }
   },

@@ -336,7 +336,7 @@ export async function optimizeGLBModel(
       }
     });
 
-    if (onProgress) await onProgress(100, '¡Remallado finalizado preservando texturas y animación!');
+    if (onProgress) await onProgress(100, '¡Optimización finalizada preservando texturas y animación!');
 
     return {
       ...obj,

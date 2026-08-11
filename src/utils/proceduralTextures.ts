@@ -103,6 +103,135 @@ export function createCheckerTexture(
   return canvas.toDataURL('image/png');
 }
 
+let _cachedUVDebugTexture: string | null = null;
+
+export function getUVDebugTexture(): string {
+  if (_cachedUVDebugTexture) return _cachedUVDebugTexture;
+  _cachedUVDebugTexture = createUVDebugTexture(1024, 1024);
+  return _cachedUVDebugTexture;
+}
+
+export function createUVDebugTexture(width = 1024, height = 1024): string {
+  if (typeof document === 'undefined') return '';
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+
+  _cachedUVDebugTexture = null;
+
+  const cols = 8;
+  const rows = 8;
+  const cellW = width / cols;
+  const cellH = height / rows;
+
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, width, height);
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const isEven = (r + c) % 2 === 0;
+      const isRight = c >= cols / 2;
+      const isBottom = r >= rows / 2; // In 2D canvas, r >= 4 is bottom half (Rows 1-4)
+
+      let baseColor1 = '#f8fafc';
+      let baseColor2 = '#1e293b';
+
+      if (isBottom && !isRight) {
+        // Bottom-Left (Rows 1-4, Cols A-D): Pink/Magenta
+        baseColor1 = isEven ? '#fce7f3' : '#831843';
+        baseColor2 = isEven ? '#fbcfe8' : '#500724';
+      } else if (isBottom && isRight) {
+        // Bottom-Right (Rows 1-4, Cols E-H): Blue/Cyan
+        baseColor1 = isEven ? '#e0f2fe' : '#0c4a6e';
+        baseColor2 = isEven ? '#bae6fd' : '#082f49';
+      } else if (!isBottom && !isRight) {
+        // Top-Left (Rows 5-8, Cols A-D): Amber/Yellow
+        baseColor1 = isEven ? '#fef3c7' : '#78350f';
+        baseColor2 = isEven ? '#fde68a' : '#451a03';
+      } else {
+        // Top-Right (Rows 5-8, Cols E-H): Green
+        baseColor1 = isEven ? '#dcfce7' : '#064e3b';
+        baseColor2 = isEven ? '#bbf7d0' : '#022c22';
+      }
+
+      ctx.fillStyle = isEven ? baseColor1 : baseColor2;
+      ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
+
+      ctx.strokeStyle = isEven ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(c * cellW + 1, r * cellH + 1, cellW - 2, cellH - 2);
+
+      ctx.strokeStyle = isEven ? 'rgba(0,0,0,0.15)' : 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(c * cellW + cellW / 2, r * cellH);
+      ctx.lineTo(c * cellW + cellW / 2, r * cellH + cellH);
+      ctx.moveTo(c * cellW, r * cellH + cellH / 2);
+      ctx.lineTo(c * cellW + cellW, r * cellH + cellH / 2);
+      ctx.stroke();
+
+      const colLabel = String.fromCharCode(65 + c); // A..H
+      const rowLabel = (rows - r).toString(); // 8 at top (r=0), 1 at bottom (r=7)
+      const cellText = `${colLabel}${rowLabel}`;
+
+      ctx.fillStyle = isEven ? '#0f172a' : '#f8fafc';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cellText, c * cellW + cellW / 2, r * cellH + cellH / 2);
+    }
+  }
+
+  // U (+X) Red Arrow (Bottom-Left: Row 1, Col A)
+  const baseY = height - 35;
+  ctx.strokeStyle = '#ef4444';
+  ctx.fillStyle = '#ef4444';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(25, baseY);
+  ctx.lineTo(135, baseY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(135, baseY);
+  ctx.lineTo(120, baseY - 10);
+  ctx.lineTo(120, baseY + 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('U (+X)', 155, baseY);
+
+  // V (+Y) Green Arrow (Bottom-Left: Row 1, Col A)
+  ctx.strokeStyle = '#22c55e';
+  ctx.fillStyle = '#22c55e';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(35, baseY);
+  ctx.lineTo(35, baseY - 110);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(35, baseY - 110);
+  ctx.lineTo(25, baseY - 95);
+  ctx.lineTo(45, baseY - 95);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('V (+Y)', 50, baseY - 110);
+
+  ctx.strokeStyle = '#6366f1';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(3, 3, width - 6, height - 6);
+
+  const dataUrl = canvas.toDataURL('image/png');
+  _cachedUVDebugTexture = dataUrl;
+  return dataUrl;
+}
+
 export function createWoodTexture(
   width = 512, height = 512, baseColor = '#8b5a2b', ringColor = '#5c3a21'
 ): string {

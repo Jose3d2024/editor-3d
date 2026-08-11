@@ -584,240 +584,6 @@ function distSqToTriangle(
 }
 
 /**
- * ShrinkWrap Remesher (Pipeline de Voxelización + Marching Cubes + Proyección Shrinkwrap + Transferencia de Datos BVH)
- * Genera una piel uniforme sobre el volumen del objeto y proyecta matemáticamente los vértices
- * sobre la superficie original usando aceleración por BVH (three-mesh-bvh).
- * Preserva coordenadas UV y geometría continua.
- * 
- * @param resolution Nivel de detalle (1 = baja resolución/alta simplificación, 12 = alto detalle)
- * @param onProgress Callback opcional para reportar progreso y estado
- */
-export async function shrinkWrapMesh(
-  obj: CSGObject,
-  resolution: number = 3,
-  onProgress?: (progress: number, stepText: string) => Promise<void> | void
-): Promise<{ vertices: V3[]; faces: MeshFace[] }> {
-  if (!obj.vertices || obj.vertices.length === 0) return { vertices: [], faces: [] };
-
-  if (onProgress) await onProgress(10, 'Analizando volumen y estructura de la malla...');
-
-  // 1. Convertir CSGObject a Three.js BufferGeometry y soldar costuras
-  let origGeo = toThreeGeometry(obj);
-  try {
-    origGeo = BufferGeometryUtils.mergeVertices(origGeo, 1e-4);
-  } catch (e) {
-    // Continuar con geometría sin soldar si falla
-  }
-  origGeo.computeVertexNormals();
-
-  const initialVerts = origGeo.attributes.position ? origGeo.attributes.position.count : 0;
-  if (initialVerts <= 4) {
-    const res = fromThreeGeometry(origGeo);
-    origGeo.dispose();
-    if (onProgress) await onProgress(100, 'Remallado finalizado.');
-    return res;
-  }
-
-  // 2. Mapear resolución de control (1..12) a densidad de voxelización (28..80)
-  const clampedRes = Math.max(1, Math.min(12, resolution));
-  const gridRes = Math.max(28, Math.min(80, Math.round(28 + clampedRes * 4.4)));
-
-  if (onProgress) await onProgress(25, `Voxelizando objeto a resolución ${gridRes}x${gridRes}x${gridRes}...`);
-
-  const bbox = new THREE.Box3();
-  bbox.setFromBufferAttribute(origGeo.attributes.position as THREE.BufferAttribute);
-  bbox.expandByScalar(0.08); // Margen de seguridad para la piel
-  const size = new THREE.Vector3();
-  bbox.getSize(size);
-  if (size.x <= 0 || size.y <= 0 || size.z <= 0) {
-    size.set(Math.max(0.1, size.x), Math.max(0.1, size.y), Math.max(0.1, size.z));
-  }
-  const center = bbox.getCenter(new THREE.Vector3());
-
-  // Crear Isosuperficie con MarchingCubes
-  const dummyMat = new THREE.MeshBasicMaterial();
-  const mc = new MarchingCubes(gridRes, dummyMat, true, true, 300000);
-  mc.scale.copy(size);
-  mc.position.copy(center);
-  mc.init(gridRes);
-
-  const posOrig = origGeo.attributes.position;
-  const indexOrig = origGeo.index;
-  const ballRadius = Math.max(size.x, size.y, size.z) / (gridRes * 0.95);
-  const sampledKeys = new Set<string>();
-
-  const addMetaballAt = (vx: number, vy: number, vz: number) => {
-    const xLocal = (vx - bbox.min.x) / size.x;
-    const yLocal = (vy - bbox.min.y) / size.y;
-    const zLocal = (vz - bbox.min.z) / size.z;
-    if (xLocal >= 0 && xLocal <= 1 && yLocal >= 0 && yLocal <= 1 && zLocal >= 0 && zLocal <= 1) {
-      const key = `${Math.floor(xLocal * gridRes * 2)}_${Math.floor(yLocal * gridRes * 2)}_${Math.floor(zLocal * gridRes * 2)}`;
-      if (!sampledKeys.has(key)) {
-        sampledKeys.add(key);
-        mc.addBall(xLocal, yLocal, zLocal, ballRadius, 0.5);
-      }
-    }
-  };
-
-  // Muestrear vértices
-  for (let i = 0; i < posOrig.count; i++) {
-    addMetaballAt(posOrig.getX(i), posOrig.getY(i), posOrig.getZ(i));
-  }
-
-  // Muestrear aristas y centroides de caras para preservar tubos finos, cañones y detalles delgados
-  const numTris = indexOrig ? indexOrig.count / 3 : posOrig.count / 3;
-  const p0 = new THREE.Vector3(), p1 = new THREE.Vector3(), p2 = new THREE.Vector3();
-  const edgeStep = Math.max(size.x, size.y, size.z) / (gridRes * 1.5);
-
-  for (let t = 0; t < numTris; t++) {
-    let i0 = t * 3, i1 = t * 3 + 1, i2 = t * 3 + 2;
-    if (indexOrig) {
-      i0 = indexOrig.getX(i0);
-      i1 = indexOrig.getX(i1);
-      i2 = indexOrig.getX(i2);
-    }
-    p0.fromBufferAttribute(posOrig, i0);
-    p1.fromBufferAttribute(posOrig, i1);
-    p2.fromBufferAttribute(posOrig, i2);
-
-    // Centroide de la cara
-    addMetaballAt((p0.x + p1.x + p2.x) / 3, (p0.y + p1.y + p2.y) / 3, (p0.z + p1.z + p2.z) / 3);
-
-    // Muestreo de aristas
-    const sampleEdge = (pa: THREE.Vector3, pb: THREE.Vector3) => {
-      const d = pa.distanceTo(pb);
-      if (d > edgeStep) {
-        const steps = Math.min(8, Math.ceil(d / edgeStep));
-        for (let s = 1; s < steps; s++) {
-          const factor = s / steps;
-          addMetaballAt(pa.x + (pb.x - pa.x) * factor, pa.y + (pb.y - pa.y) * factor, pa.z + (pb.z - pa.z) * factor);
-        }
-      }
-    };
-
-    sampleEdge(p0, p1);
-    sampleEdge(p1, p2);
-    sampleEdge(p2, p0);
-  }
-
-  mc.update();
-
-  const drawCount = mc.geometry.drawRange.count;
-  if (!drawCount || drawCount === 0) {
-    // Si la voxelización no generó vértices, fallback seguro
-    const res = fromThreeGeometry(origGeo);
-    origGeo.dispose();
-    if (onProgress) await onProgress(100, 'Remallado preservado.');
-    return res;
-  }
-
-  // Extraer y escalar posiciones del MarchingCubes
-  const mcPositions = (mc.geometry.attributes.position.array as Float32Array).slice(0, drawCount * 3);
-  for (let i = 0; i < drawCount; i++) {
-    mcPositions[i * 3 + 0] = mcPositions[i * 3 + 0] * size.x + bbox.min.x;
-    mcPositions[i * 3 + 1] = mcPositions[i * 3 + 1] * size.y + bbox.min.y;
-    mcPositions[i * 3 + 2] = mcPositions[i * 3 + 2] * size.z + bbox.min.z;
-  }
-
-  const rawSkinGeo = new THREE.BufferGeometry();
-  rawSkinGeo.setAttribute('position', new THREE.BufferAttribute(mcPositions, 3));
-  let skinGeo = BufferGeometryUtils.mergeVertices(rawSkinGeo, 1e-4);
-  rawSkinGeo.dispose();
-
-  // 3. Proyección Shrinkwrap de alta precisión con BVH (closestPointToPoint)
-  if (onProgress) await onProgress(50, 'Acelerando proyecciones BVH sobre contornos finos...');
-
-  (origGeo as any).computeBoundsTree();
-  const origBvh = (origGeo as any).boundsTree;
-
-  const posSkin = skinGeo.attributes.position;
-  const skinCount = posSkin.count;
-  const pointSkin = new THREE.Vector3();
-
-  // Matriz de UVs proyectadas si aplica
-  const uvOrig = origGeo.attributes.uv;
-  const hasUVs = !!uvOrig;
-  const newUVs = hasUVs ? new Float32Array(skinCount * 2) : null;
-
-  const hitTarget = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 };
-  const triangle = new THREE.Triangle();
-  const tp0 = new THREE.Vector3(), tp1 = new THREE.Vector3(), tp2 = new THREE.Vector3();
-  const uv0 = new THREE.Vector2(), uv1 = new THREE.Vector2(), uv2 = new THREE.Vector2();
-  const bary = new THREE.Vector3();
-
-  const batchSize = 150;
-  for (let i = 0; i < skinCount; i++) {
-    pointSkin.fromBufferAttribute(posSkin, i);
-
-    if (origBvh) {
-      hitTarget.distance = Infinity;
-      hitTarget.faceIndex = -1;
-      origBvh.closestPointToPoint(pointSkin, hitTarget);
-
-      if (hitTarget.faceIndex >= 0 && hitTarget.distance !== Infinity) {
-        posSkin.setXYZ(i, hitTarget.point.x, hitTarget.point.y, hitTarget.point.z);
-
-        if (newUVs && uvOrig) {
-          const fIdx = hitTarget.faceIndex;
-          let i0 = fIdx * 3, i1 = fIdx * 3 + 1, i2 = fIdx * 3 + 2;
-          if (indexOrig) {
-            i0 = indexOrig.getX(i0);
-            i1 = indexOrig.getX(i1);
-            i2 = indexOrig.getX(i2);
-          }
-          tp0.fromBufferAttribute(posOrig, i0);
-          tp1.fromBufferAttribute(posOrig, i1);
-          tp2.fromBufferAttribute(posOrig, i2);
-          triangle.set(tp0, tp1, tp2);
-          triangle.getBarycoord(hitTarget.point, bary);
-
-          uv0.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i0);
-          uv1.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i1);
-          uv2.fromBufferAttribute(uvOrig as THREE.BufferAttribute, i2);
-
-          const u = bary.x * uv0.x + bary.y * uv1.x + bary.z * uv2.x;
-          const v = bary.x * uv0.y + bary.y * uv1.y + bary.z * uv2.y;
-
-          newUVs[i * 2 + 0] = u;
-          newUVs[i * 2 + 1] = v;
-        }
-      }
-    }
-
-    // Async chunking para mantener la interfaz fluida
-    if (i % batchSize === 0) {
-      if (onProgress) {
-        const prog = Math.min(92, 50 + Math.round((i / skinCount) * 42));
-        await onProgress(prog, `Proyectando piel sobre contornos (${i}/${skinCount})...`);
-      }
-      await new Promise(r => setTimeout(r, 0));
-    }
-  }
-
-  posSkin.needsUpdate = true;
-  skinGeo.computeVertexNormals();
-
-  if (newUVs) {
-    skinGeo.setAttribute('uv', new THREE.BufferAttribute(newUVs, 2));
-  }
-
-  // Liberar árboles BVH
-  (origGeo as any).disposeBoundsTree();
-
-  if (onProgress) await onProgress(96, 'Extrayendo topología envolvente...');
-  await new Promise(r => setTimeout(r, 10));
-
-  const result = fromThreeGeometry(skinGeo);
-
-  skinGeo.dispose();
-  origGeo.dispose();
-
-  if (onProgress) await onProgress(100, '¡Remallado Envolvente Shrink-Wrap completado!');
-
-  return result;
-}
-
-/**
  * Transfiere pesos de animación y coordenadas UV a la velocidad máxima admitida por la CPU.
  * Utiliza fraccionamiento de tareas (Time-Slicing) para mantener el editor a 60 FPS.
  */
@@ -1063,9 +829,9 @@ export function generateUVs(obj: { vertices: V3[]; faces: MeshFace[] }): { verti
     max[2] - min[2] || 1
   ];
 
-  const faces = obj.faces.map(face => {
-    if (face.uvs && face.uvs.length === face.indices.length) return face;
+  const maxSize = Math.max(size[0], size[1], size[2]) || 1;
 
+  const faces = obj.faces.map(face => {
     // Calculate normal once per face
     const v0 = new THREE.Vector3(...vertices[face.indices[0]]);
     const v1 = new THREE.Vector3(...vertices[face.indices[1]]);
@@ -1083,15 +849,15 @@ export function generateUVs(obj: { vertices: V3[]; faces: MeshFace[] }): { verti
       const [x, y, z] = vertices[vIdx];
       
       let u = 0, v = 0;
-      if (absX > absY && absX > absZ) {
-        u = (z - min[2]) / size[2];
-        v = (y - min[1]) / size[1];
-      } else if (absY > absX && absY > absZ) {
-        u = (x - min[0]) / size[0];
-        v = (z - min[2]) / size[2];
+      if (absY >= absX && absY >= absZ) {
+        u = (x - min[0]) / maxSize;
+        v = (z - min[2]) / maxSize;
+      } else if (absX >= absY && absX >= absZ) {
+        u = (z - min[2]) / maxSize;
+        v = (y - min[1]) / maxSize;
       } else {
-        u = (x - min[0]) / size[0];
-        v = (y - min[1]) / size[1];
+        u = (x - min[0]) / maxSize;
+        v = (y - min[1]) / maxSize;
       }
       return [u, v] as [number, number];
     });
@@ -1151,12 +917,12 @@ export function applyUVWMapping(obj: { vertices: V3[]; faces: MeshFace[] }, type
           const absY = Math.abs(normal.y);
           const absZ = Math.abs(normal.z);
           const maxSize = Math.max(size[0], size[1], size[2]) || 1;
-          if (absX > absY && absX > absZ) {
-            u = (z - min[2]) / maxSize;
-            v = (y - min[1]) / maxSize;
-          } else if (absY > absX && absY > absZ) {
+          if (absY >= absX && absY >= absZ) {
             u = (x - min[0]) / maxSize;
             v = (z - min[2]) / maxSize;
+          } else if (absX >= absY && absX >= absZ) {
+            u = (z - min[2]) / maxSize;
+            v = (y - min[1]) / maxSize;
           } else {
             u = (x - min[0]) / maxSize;
             v = (y - min[1]) / maxSize;
@@ -1705,11 +1471,11 @@ export function roundAnglesMesh(
     const result = fromThreeGeometry(roundedGeo);
     roundedGeo.dispose();
     baseGeo.dispose();
-    return result;
+    return generateUVs(result);
   }
 
   if (!inputVerts || inputVerts.length === 0 || radius <= 0) {
-    return { vertices: inputVerts || [], faces: inputFaces || [] };
+    return generateUVs({ vertices: inputVerts || [], faces: inputFaces || [] });
   }
 
   const segs = Math.max(1, Math.round(segments));
@@ -1751,7 +1517,7 @@ export function roundAnglesMesh(
   });
 
   if (origFaces.length === 0) {
-    return { vertices: inputVerts, faces: inputFaces };
+    return generateUVs({ vertices: inputVerts, faces: inputFaces });
   }
 
   // Calculate minimum edge length across all faces to clamp radius safely
@@ -2310,10 +2076,10 @@ export function roundAnglesMesh(
   const geometriaFinalizada = fromThreeGeometry(temporalGeo);
   temporalGeo.dispose();
 
-  return {
+  return applyUVWMapping({
     vertices: geometriaFinalizada.vertices,
     faces: geometriaFinalizada.faces
-  };
+  }, 'BOX');
 }
 
 export function bevelMesh(
@@ -2371,7 +2137,7 @@ export function bevelMesh(
     }
   }
 
-  return { vertices: newVerts, faces: newFaces };
+  return applyUVWMapping({ vertices: newVerts, faces: newFaces }, 'BOX');
 }
 
 // ─── PathDeform ───────────────────────────────────────────────────────────────

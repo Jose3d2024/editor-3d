@@ -95,19 +95,26 @@ export interface MaterialData {
   name: string;
   color: string;
   map?: string; // Albedo
+  mapAlbedo?: string;
   roughness: number;
   roughnessMap?: string;
+  mapRoughness?: string;
   metalness: number;
   metalnessMap?: string;
+  mapMetalness?: string;
   normalMap?: string;
+  mapNormal?: string;
   normalScale?: number;
   displacementMap?: string;
+  mapDisplacement?: string;
   displacementScale?: number;
   displacementBias?: number;
   aoMap?: string;
+  mapAO?: string;
   aoMapIntensity?: number;
   emissive: string;
   emissiveMap?: string;
+  mapEmissive?: string;
   emissiveIntensity: number;
   opacity: number;
   alphaMap?: string;
@@ -146,6 +153,7 @@ export interface MaterialData {
   parallaxSteps?: number;
   useParallax?: boolean;
   proceduralBaseId?: string;
+  uvDebug?: boolean;
   filters?: {
     rust: number;
     scratches: number;
@@ -191,6 +199,7 @@ export interface CSGObject {
 
   mirrorAxis?: 'none' | 'x' | 'y' | 'z';
   smoothShading?: boolean;
+  uvDebug?: boolean;
   color:    string;
   opacity?: number;
   visible:  boolean;

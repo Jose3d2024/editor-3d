@@ -32,7 +32,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   Image as ImageIcon, Upload, Download, FileDown,
-  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split,
+  Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split, Grid,
   ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route
 } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
@@ -285,8 +285,24 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     case 'SPHERE':
       return (
         <Section title="Parámetros" defaultOpen>
-          <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
-            min={3} max={256} step={1} slider/>
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Tipo de Esfera</span>
+            <select
+              value={p.sphereType || 'UV'}
+              onChange={e => up({ sphereType: e.target.value as 'UV' | 'ICO' })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="UV">Esfera UV (UVSphere)</option>
+              <option value="ICO">Icoesfera (IcoSphere)</option>
+            </select>
+          </div>
+          {(p.sphereType || 'UV') === 'UV' ? (
+            <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
+              min={3} max={256} step={1} slider/>
+          ) : (
+            <NumRow label="Subdivisiones (Detalle)" value={p.detail ?? 2} onChange={v => up({ detail: Math.max(0, Math.min(5, Math.round(v))) })}
+              min={0} max={5} step={1} slider/>
+          )}
         </Section>
       );
     case 'CYLINDER':
@@ -894,7 +910,7 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
 
 
 const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
-  const { smoothObject, roundAnglesObject, subdivideObject, optimizeObject, updateObject, fillHolesObject, capSelectedFacesObject, repairObject, weldObject, healObject, separateLoosePartsObject, shrinkWrapObject, editMode, selectedGLTFMeshes, setSelectedGLTFMeshes, isolateGLTFSelection, setIsolateGLTFSelection } = useStore();
+  const { smoothObject, roundAnglesObject, subdivideObject, optimizeObject, updateObject, fillHolesObject, capSelectedFacesObject, repairObject, weldObject, healObject, separateLoosePartsObject, editMode, selectedGLTFMeshes, setSelectedGLTFMeshes, isolateGLTFSelection, setIsolateGLTFSelection } = useStore();
   const [smoothFactor, setSmoothFactor] = useState(0.5);
   const [smoothIters, setSmoothIters] = useState(1);
   const [roundRadius, setRoundRadius] = useState(0.08);
@@ -902,8 +918,6 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [roundAngleThreshold, setRoundAngleThreshold] = useState(35);
   const [optimizeRatio, setOptimizeRatio] = useState(0.3);
   const [weldTolerance, setWeldTolerance] = useState(0.001);
-  const [shrinkResolution, setShrinkResolution] = useState(3);
-  const [isShrinkWrapping, setIsShrinkWrapping] = useState(false);
   const [isHealing, setIsHealing] = useState(false);
   const [isSeparating, setIsSeparating] = useState(false);
   const [separateMsg, setSeparateMsg] = useState<string | null>(null);
@@ -924,12 +938,6 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     }
     return list;
   }, [obj.meshData?.meshes, meshSortMode, meshSearch]);
-
-  const handleShrinkWrap = async () => {
-    setIsShrinkWrapping(true);
-    await shrinkWrapObject(obj.id, shrinkResolution);
-    setIsShrinkWrapping(false);
-  };
 
   const handleSeparateLooseParts = async () => {
     setIsSeparating(true);
@@ -984,6 +992,31 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   return (
     <Section title="Malla" icon={<Wand2 size={12}/>} defaultOpen={false}>
       <div className="space-y-2">
+        <div className="p-2 bg-indigo-950/40 border border-indigo-500/30 rounded-lg space-y-1">
+          <div className="flex items-center justify-between">
+            <button
+              onClick={() => updateObject(obj.id, { uvDebug: !obj.uvDebug })}
+              className={`w-full py-1.5 px-2 rounded text-[10px] font-bold flex items-center justify-between transition-all ${
+                obj.uvDebug 
+                  ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm shadow-indigo-950' 
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+              }`}
+              title="Aplica una textura de cuadrícula checkerboard UV para identificar estiramientos o distorsiones de coordenadas"
+            >
+              <span className="flex items-center gap-1.5">
+                <Grid size={12} className={obj.uvDebug ? 'text-white' : 'text-indigo-400'} />
+                <span>Show UV Debug (Checkerboard)</span>
+              </span>
+              <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-black/30">
+                {obj.uvDebug ? 'ON' : 'OFF'}
+              </span>
+            </button>
+          </div>
+          <p className="text-[9px] text-zinc-400 leading-tight">
+            Visualiza el mapa de coordenadas UV para detectar incoherencias entre el visor y el render.
+          </p>
+        </div>
+
         <div className="flex gap-1">
           <button onClick={() => updateObject(obj.id, { smoothShading: !obj.smoothShading })}
             className={`flex-1 py-1 rounded text-[10px] font-bold ${obj.smoothShading ? 'bg-indigo-600' : 'bg-zinc-800'}`}>
@@ -1192,29 +1225,6 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           </button>
         </div>
 
-        <div className="space-y-1 pt-2 border-t border-white/5">
-          <NumRow 
-            label="Detalle Envolvente" 
-            value={shrinkResolution} 
-            min={1} 
-            max={12} 
-            step={1} 
-            onChange={setShrinkResolution} 
-            slider 
-          />
-          <button 
-            onClick={handleShrinkWrap} 
-            disabled={isShrinkWrapping}
-            className={`w-full py-1.5 rounded text-[10px] font-bold text-white transition-all shadow cursor-pointer ${
-              isShrinkWrapping 
-                ? 'bg-emerald-900/60 animate-pulse border border-emerald-500/40' 
-                : 'bg-gradient-to-r from-emerald-700 to-teal-700 hover:from-emerald-600 hover:to-teal-600 shadow-teal-950/30'
-            }`}
-            title="Contrae una caja segmentada simple hasta que toque la superficie exterior del objeto, manteniendo ángulos y caras planas"
-          >
-            {isShrinkWrapping ? 'Ejecutando Shrink-Wrap...' : 'Remallado Envolvente (Shrink-Wrap)'}
-          </button>
-        </div>
         <div className="grid grid-cols-2 gap-1">
           <button onClick={() => fillHolesObject(obj.id)} className="py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-colors" title="Cierra todos los huecos abiertos">
             <Wand2 size={10}/> Tapar Huecos

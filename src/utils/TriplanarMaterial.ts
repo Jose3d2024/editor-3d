@@ -9,35 +9,43 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
     }
 
     // ── 1. EXTRAER EL VALOR EXACTO Y PURO DE TU SLIDER DE INTERFAZ ──
-    let sliderVal = 1.0;
-    if (typeof mData?.mapRepeat === 'number') {
-      sliderVal = mData.mapRepeat;
-    } else if (Array.isArray(mData?.mapRepeat)) {
-      sliderVal = mData.mapRepeat[0] ?? 1.0;
+    let tileX = 1.0;
+    let tileY = 1.0;
+    if (Array.isArray(mData?.tiling)) {
+      tileX = mData.tiling[0] ?? 1.0;
+      tileY = mData.tiling[1] ?? 1.0;
     } else if (typeof mData?.tiling === 'number') {
-      sliderVal = mData.tiling;
+      tileX = mData.tiling;
+      tileY = mData.tiling;
+    } else if (Array.isArray(mData?.mapRepeat)) {
+      tileX = mData.mapRepeat[0] ?? 1.0;
+      tileY = mData.mapRepeat[1] ?? 1.0;
+    } else if (typeof mData?.mapRepeat === 'number') {
+      tileX = mData.mapRepeat;
+      tileY = mData.mapRepeat;
     } else if (typeof mData?.triplanarScale === 'number') {
-      sliderVal = mData.triplanarScale;
+      tileX = mData.triplanarScale;
+      tileY = mData.triplanarScale;
     }
+    const sliderVal = tileX;
+    const scaleVec = new THREE.Vector2(tileX, tileY);
 
-    // Adaptador de ajuste de frecuencia óptima para el ruido estocástico
-    const finalScaleFactor = sliderVal * 0.5; 
-
-    // Suavizado de bordes / Blend (0.0 = duro, 0.5 = normal, 1.0 = ultra suave)
+    // Suavizado de bordes / Blend (0.0 = corte duro, 0.5 = equilibrado, 1.0 = difuminado ultra suave)
     const rawBlendVal = typeof mData?.triplanarBlend === 'number' ? mData.triplanarBlend : 0.5;
     const blendClamped = Math.min(1.0, Math.max(0.0, rawBlendVal));
-    // Mapear 0.0 -> exponente 32 (duro), 0.5 -> exponente 8, 1.0 -> exponente 1.2 (difuminado suave)
-    const blendExponent = Math.max(1.0, 32.0 * Math.pow(1.0 - blendClamped, 2.0));
 
-    // Crear el Vector2 de escala para las proyecciones de coordenadas
-    const scaleVec = Array.isArray(mData?.mapRepeat)
-      ? new THREE.Vector2(mData.mapRepeat[0] * 0.5, mData.mapRepeat[1] * 0.5)
-      : new THREE.Vector2(finalScaleFactor, finalScaleFactor);
+    // Actualización directa de uniforms si el shader ya existe en userData
+    const existingShader = (material as any).userData?.triplanarShader;
+    if (existingShader && existingShader.uniforms) {
+      if (existingShader.uniforms.uMixosScale) existingShader.uniforms.uMixosScale.value = sliderVal;
+      if (existingShader.uniforms.triplanarScale) existingShader.uniforms.triplanarScale.value.copy(scaleVec);
+      if (existingShader.uniforms.uTriplanarBlend) existingShader.uniforms.uTriplanarBlend.value = blendClamped;
+    }
 
     // ── 2. ASIGNAR LOS UNIFORMS VIVOS A LA GPU ──
-    shader.uniforms.uMixosScale = { value: finalScaleFactor };
+    shader.uniforms.uMixosScale = { value: sliderVal };
     shader.uniforms.triplanarScale = { value: scaleVec };
-    shader.uniforms.uTriplanarBlend = { value: blendExponent };
+    shader.uniforms.uTriplanarBlend = { value: blendClamped };
     (material as any).userData.triplanarShader = shader;
     
     // Vertex shader modifications
@@ -67,7 +75,7 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
       `
     );
 
-    // Fragment shader modifications: Stochastic Hexagonal Anti-Tiling Triplanar Mapping
+    // Fragment shader modifications: Stochastic Triplanar Mapping with Smooth Edge Blend
     const mixosAntiTilingCode = `
       varying vec3 vLocalPosition;
       varying vec3 vLocalNormal;
@@ -77,75 +85,43 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
       uniform vec2 triplanarScale;
       uniform float uTriplanarBlend;
 
-      vec2 mixosHash2D(vec2 p) {
-        vec2 k = p + vec2(123.456, 789.012);
-        float h1 = fract(sin(dot(k, vec2(12.9898, 78.233))) * 43758.5453123);
-        float h2 = fract(sin(dot(k, vec2(37.7190, 51.621))) * 28193.1847123);
-        return vec2(h1, h2);
-      }
-
-      vec4 sampleMixosSeamless(sampler2D tex, vec2 uv, bool isNormalMap) {
-        // Offset UV so origin (0,0) is not at a grid boundary line
-        vec2 p = uv + vec2(17.31, 29.43);
-
-        // Skew to triangular/hexagonal lattice
-        vec2 skewUV = mat2(1.0, 0.0, 0.57735, 1.1547) * p;
-        vec2 fl = floor(skewUV);
-        vec2 fr = fract(skewUV);
+      vec3 getTriplanarWeights(vec3 normal, float blendFactor) {
+        vec3 norm = length(normal) > 0.0001 ? normalize(normal) : vec3(0.0, 1.0, 0.0);
+        vec3 absN = abs(norm);
         
-        // Barycentric weights
-        vec3 w = vec3(fr.x, fr.y, 1.0 - fr.x - fr.y);
-        if (w.z < 0.0) {
-          w = vec3(1.0 - fr.x, 1.0 - fr.y, fr.x + fr.y - 1.0);
+        // Corte duro (0% blend): 100% al eje dominante sin mezclar
+        if (blendFactor <= 0.01) {
+          if (absN.x >= absN.y && absN.x >= absN.z) return vec3(1.0, 0.0, 0.0);
+          if (absN.y >= absN.x && absN.y >= absN.z) return vec3(0.0, 1.0, 0.0);
+          return vec3(0.0, 0.0, 1.0);
         }
         
-        // Smooth Hermite cubic weights to eliminate harsh grid boundaries
-        w = w * w * (3.0 - 2.0 * w);
-        float totalW = w.x + w.y + w.z;
-        w /= totalW;
-
-        vec2 cell1 = fl;
-        vec2 cell2 = fl + vec2(1.0, 0.0);
-        vec2 cell3 = fl + vec2(0.0, 1.0);
-
-        // Non-separable 2D hash
-        vec2 h1 = mixosHash2D(cell1);
-        vec2 h2 = mixosHash2D(cell2);
-        vec2 h3 = mixosHash2D(cell3);
-
-        // Direction-preserving translation offsets (prevents swirling wood grain)
-        vec2 uv1 = p + h1 * 19.31;
-        vec2 uv2 = p + h2 * 27.13;
-        vec2 uv3 = p + h3 * 31.87;
-
-        vec4 c1 = texture2D(tex, uv1);
-        vec4 c2 = texture2D(tex, uv2);
-        vec4 c3 = texture2D(tex, uv3);
-
-        if (isNormalMap) {
-          vec3 n1 = c1.xyz * 2.0 - 1.0;
-          vec3 n2 = c2.xyz * 2.0 - 1.0;
-          vec3 n3 = c3.xyz * 2.0 - 1.0;
-          vec3 norm = normalize(n1 * w.x + n2 * w.y + n3 * w.z);
-          return vec4(norm * 0.5 + 0.5, c1.w * w.x + c2.w * w.y + c3.w * w.z);
-        }
-
-        return c1 * w.x + c2 * w.y + c3 * w.z;
+        // Transición progresiva de suavizado (0% -> 100%)
+        float expVal = mix(64.0, 1.0, pow(blendFactor, 0.5));
+        vec3 blend = pow(absN, vec3(expVal));
+        float total = blend.x + blend.y + blend.z + 0.00001;
+        return blend / total;
       }
 
       vec4 sampleMixosTriplanar(sampler2D tex, vec3 pos, vec3 normal, vec2 scale, bool isNormalMap) {
-        vec3 blend = pow(abs(normal), vec3(uTriplanarBlend));
-        float total = blend.x + blend.y + blend.z + 0.00001;
-        blend /= total;
+        vec3 blend = getTriplanarWeights(normal, uTriplanarBlend);
         
-        vec2 uvX = pos.zy;
-        vec2 uvY = pos.xz;
-        vec2 uvZ = pos.xy;
+        vec2 uvX = vec2(normal.x < 0.0 ? -pos.z : pos.z, pos.y);
+        vec2 uvY = vec2(pos.x, normal.y < 0.0 ? -pos.z : pos.z);
+        vec2 uvZ = vec2(normal.z < 0.0 ? -pos.x : pos.x, pos.y);
 
-        vec4 cx = sampleMixosSeamless(tex, uvX * scale, isNormalMap);
-        vec4 cy = sampleMixosSeamless(tex, uvY * scale, isNormalMap);
-        vec4 cz = sampleMixosSeamless(tex, uvZ * scale, isNormalMap);
-        
+        vec4 cx = texture2D(tex, uvX * scale);
+        vec4 cy = texture2D(tex, uvY * scale);
+        vec4 cz = texture2D(tex, uvZ * scale);
+
+        if (isNormalMap) {
+          vec3 n1 = cx.xyz * 2.0 - 1.0;
+          vec3 n2 = cy.xyz * 2.0 - 1.0;
+          vec3 n3 = cz.xyz * 2.0 - 1.0;
+          vec3 normBlend = normalize(n1 * blend.x + n2 * blend.y + n3 * blend.z);
+          return vec4(normBlend * 0.5 + 0.5, (cx.w * blend.x + cy.w * blend.y + cz.w * blend.z));
+        }
+
         return cx * blend.x + cy * blend.y + cz * blend.z;
       }
 

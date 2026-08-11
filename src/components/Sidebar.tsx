@@ -6,7 +6,7 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   CheckCircle, AlertTriangle, Wrench, Wand2, Maximize2,
-  Move, RotateCw, Download, FileDown, Split
+  Move, RotateCw, Download, FileDown, Split, Grid
 } from 'lucide-react';
 import { CSGOperation, PrimitiveType } from '../types';
 import { validateMesh } from '../utils/modifiers';
@@ -556,6 +556,30 @@ export const Sidebar: React.FC = () => {
             {/* Modificadores de Malla */}
             <Section title="Modificadores de Malla" icon={Wand2} defaultOpen={false}>
               <div className="p-3 space-y-3">
+                {/* Show UV Debug Toggle */}
+                <div className="p-2 bg-indigo-950/40 border border-indigo-500/30 rounded-lg space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-2 text-[10px] font-bold text-indigo-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedObject?.uvDebug ?? false}
+                        onChange={e => selectedObjectId && updateObject(selectedObjectId, { uvDebug: e.target.checked })}
+                        className="rounded bg-zinc-900 border-zinc-700 text-indigo-500 focus:ring-indigo-500/50"
+                      />
+                      <span className="flex items-center gap-1">
+                        <Grid size={11} className="text-indigo-400" />
+                        <span>Show UV Debug</span>
+                      </span>
+                    </label>
+                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${selectedObject?.uvDebug ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-zinc-400'}`}>
+                      {selectedObject?.uvDebug ? 'ON' : 'OFF'}
+                    </span>
+                  </div>
+                  <p className="text-[9px] text-zinc-400 leading-tight">
+                    Aplica una textura de damero UV con cuadrantes y coordenadas U/V para visualizar distorsiones e inconsistencias.
+                  </p>
+                </div>
+
                 <div className="space-y-2">
                   <p className="text-[9px] text-zinc-500 leading-relaxed">Sombreado Suave (Shade Smooth) — Difumina visualmente los bordes sin añadir geometría.</p>
                   <label className="flex items-center gap-2 text-[10px] text-zinc-300 cursor-pointer">

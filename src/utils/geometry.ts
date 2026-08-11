@@ -386,8 +386,15 @@ export function generatePrimitive(type: PT, params: Record<string, any>): Primit
       return extractAndMergeQuads(new THREE.BoxGeometry(1, 1, 1, N, N, N));
     }
     case 'SPHERE': {
-      const S = Math.max(3, Math.round(p.segments ?? 16));
-      return extractAndMergeQuads(new THREE.SphereGeometry(0.5, S, Math.max(2, Math.round(S / 2))));
+      const sphereType = p.sphereType || 'UV';
+      if (sphereType === 'ICO') {
+        const detail = Math.max(0, Math.min(5, Math.round(p.detail ?? 2)));
+        return extractAndMergeQuads(new THREE.IcosahedronGeometry(0.5, detail));
+      } else {
+        const S = Math.max(3, Math.round(p.segments ?? 32));
+        const H = Math.max(2, Math.round(p.heightSegments ?? Math.round(S / 2)));
+        return extractAndMergeQuads(new THREE.SphereGeometry(0.5, S, H));
+      }
     }
     case 'CYLINDER': {
       const S = Math.max(3, Math.round(p.segments ?? 16));

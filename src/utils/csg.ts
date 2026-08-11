@@ -59,11 +59,15 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
     const finalPositions: number[] = [];
     const vertMap = new Map<string, number>();
 
-    meshData.faces.forEach(face => {
+    const isSmooth = obj.smoothShading === true;
+
+    meshData.faces.forEach((face, fIdx) => {
       const faceIndices: number[] = [];
       face.indices.forEach((posIdx, i) => {
         const uv = face.uvs?.[i] || [0, 0];
-        const key = `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`;
+        const key = isSmooth
+          ? `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`
+          : `${posIdx}_f${fIdx}`;
         if (vertMap.has(key)) {
           faceIndices.push(vertMap.get(key)!);
         } else {
@@ -84,7 +88,11 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUvs, 2));
     geometry.setIndex(indices);
-    computeSmoothNormalsByPosition(geometry, Math.PI / 3);
+    if (isSmooth) {
+      computeSmoothNormalsByPosition(geometry, Math.PI / 3);
+    } else {
+      geometry.computeVertexNormals();
+    }
     return geometry;
   }
 
@@ -99,11 +107,18 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
         Math.max(1, Math.round(p.segments ?? 1)),
         Math.max(1, Math.round(p.segments ?? 1)));
       break;
-    case 'SPHERE':
-      geo = new THREE.SphereGeometry(0.5,
-        Math.max(3, Math.round(p.segments ?? 16)),
-        Math.max(2, Math.round((p.segments ?? 16) / 2)));
+    case 'SPHERE': {
+      const sphereType = p.sphereType || 'UV';
+      if (sphereType === 'ICO') {
+        const detail = Math.max(0, Math.min(5, Math.round(p.detail ?? 2)));
+        geo = new THREE.IcosahedronGeometry(0.5, detail);
+      } else {
+        const S = Math.max(3, Math.round(p.segments ?? 32));
+        const H = Math.max(2, Math.round(p.heightSegments ?? Math.round(S / 2)));
+        geo = new THREE.SphereGeometry(0.5, S, H);
+      }
       break;
+    }
     case 'CYLINDER':
       geo = new THREE.CylinderGeometry(0.5, 0.5, 1, Math.max(3, Math.round(p.segments ?? 16)));
       break;

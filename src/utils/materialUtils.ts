@@ -184,6 +184,14 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     if (data.specularColor) m.specularColor.set(data.specularColor);
   }
 
+  const albedoUrl = data.map || data.mapAlbedo;
+  const normalUrl = data.normalMap || data.mapNormal;
+  const roughnessUrl = data.roughnessMap || data.mapRoughness;
+  const metalnessUrl = data.metalnessMap || data.mapMetalness;
+  const aoUrl = data.aoMap || data.mapAO;
+  const emissiveUrl = data.emissiveMap || data.mapEmissive;
+  const displacementUrl = data.displacementMap || data.mapDisplacement;
+
   const loader = new THREE.TextureLoader();
   const loadTexture = (url: string | undefined, colorSpace: THREE.ColorSpace = THREE.NoColorSpace) => {
     if (!url) return null;
@@ -196,14 +204,22 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     tex.flipY = data.flipY ?? true;
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
-    if (data.mapRepeat) tex.repeat.set(data.mapRepeat[0], data.mapRepeat[1]);
-    if (data.mapOffset) tex.offset.set(data.mapOffset[0], data.mapOffset[1]);
+    if (data.mapRepeat) {
+      const repX = Array.isArray(data.mapRepeat) ? data.mapRepeat[0] : data.mapRepeat;
+      const repY = Array.isArray(data.mapRepeat) ? data.mapRepeat[1] : data.mapRepeat;
+      tex.repeat.set(repX, repY);
+    }
+    if (data.mapOffset) {
+      const offX = Array.isArray(data.mapOffset) ? data.mapOffset[0] : data.mapOffset;
+      const offY = Array.isArray(data.mapOffset) ? data.mapOffset[1] : data.mapOffset;
+      tex.offset.set(offX, offY);
+    }
     if (data.mapRotation) tex.rotation = (data.mapRotation * Math.PI) / 180;
     return tex;
   };
 
-  material.map = loadTexture(data.map, THREE.SRGBColorSpace);
-  material.normalMap = loadTexture(data.normalMap);
+  material.map = loadTexture(albedoUrl, THREE.SRGBColorSpace);
+  material.normalMap = loadTexture(normalUrl);
   if (data.normalScale) material.normalScale.set(data.normalScale, data.normalScale);
   
   if (data.useORM && data.ormMap) {
@@ -214,15 +230,15 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     material.aoMapIntensity = data.aoMapIntensity ?? 1.0;
     injectORMControls(material, data);
   } else {
-    material.roughnessMap = loadTexture(data.roughnessMap);
-    material.metalnessMap = loadTexture(data.metalnessMap);
-    material.aoMap = loadTexture(data.aoMap);
+    material.roughnessMap = loadTexture(roughnessUrl);
+    material.metalnessMap = loadTexture(metalnessUrl);
+    material.aoMap = loadTexture(aoUrl);
     material.aoMapIntensity = data.aoMapIntensity ?? 1.0;
   }
 
-  material.emissiveMap = loadTexture(data.emissiveMap, THREE.SRGBColorSpace);
+  material.emissiveMap = loadTexture(emissiveUrl, THREE.SRGBColorSpace);
   material.alphaMap = loadTexture(data.alphaMap);
-  material.displacementMap = loadTexture(data.displacementMap);
+  material.displacementMap = loadTexture(displacementUrl);
   material.displacementScale = data.displacementScale ?? 0;
   material.displacementBias = data.displacementBias ?? 0;
 

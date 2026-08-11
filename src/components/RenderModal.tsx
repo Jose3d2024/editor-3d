@@ -16,11 +16,13 @@ import { MeshoptDecoder } from 'meshoptimizer';
 import { setupSceneEnvironment, PRESET_HDRIS } from '../utils/environmentHelper';
 import { fileToDataURL } from '../utils/silhouettes';
 import { createBaseGeometry } from '../utils/csg';
+import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { applyUVWMapping, generateUVs } from '../utils/modifiers';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
-import { injectSeamlessDisplacement } from '../utils/materialUtils';
+import { createPBRMaterial, injectSeamlessDisplacement } from '../utils/materialUtils';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
+import { getUVDebugTexture } from '../utils/proceduralTextures';
 
 interface RenderModalProps { onClose: () => void; }
 
@@ -98,6 +100,9 @@ function loadTex(
     if (mData.mapRotation !== undefined) {
       t.rotation = (mData.mapRotation * Math.PI) / 180;
     }
+
+    t.anisotropy = 16;
+    t.needsUpdate = true;
 
     res(t);
   }, undefined, rej));
@@ -481,7 +486,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     setStatus('Cargando materiales PBR...');
     const texLoader = new THREE.TextureLoader();
 
-    const loadMaterial = async (obj: any): Promise<THREE.MeshPhysicalMaterial> => {
+    const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
       const mData: any = {
@@ -494,58 +499,37 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         ? rawColor
         : (obj.color && obj.color !== '#000000' ? obj.color : '#cccccc');
 
-      const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(finalColorHex),
-        metalness: mData.metalness ?? 0,
-        roughness: mData.roughness ?? 0.75,
-        transmission: mData.transmission ?? 0,
-        ior: mData.ior ?? 1.5,
-        thickness: mData.thickness ?? 0,
+      let finalMData = {
+        ...mData,
+        color: finalColorHex,
         opacity: mData.opacity ?? obj.opacity ?? 1,
-        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1 || (mData.transmission ?? 0) > 0,
-        emissive: new THREE.Color(mData.emissive && mData.emissive !== '#000000' ? mData.emissive : '#000000'),
-        emissiveIntensity: mData.emissiveIntensity ?? 0,
-        side: THREE.FrontSide,
-        envMapIntensity: 0.4,
+      };
 
-        // ── 🧣 INYECCIÓN EXTRAORDINARIA TEXTIL (ESTILO MIXOS CAPTURA) ──
-        sheen: mData.sheen ?? (obj.materialId?.includes('velvet') || mData.id?.includes('velvet') || mData.name?.toLowerCase().includes('terciopelo') ? 1.0 : 0.0),
-        sheenRoughness: mData.sheenRoughness ?? 0.4,
-        sheenColor: new THREE.Color(mData.sheenColor || '#ff9999'),
-      });
+      if (obj.uvDebug || mData.uvDebug) {
+        finalMData = {
+          ...finalMData,
+          color: '#ffffff',
+          map: getUVDebugTexture(),
+          normalMap: undefined,
+          roughnessMap: undefined,
+          metalnessMap: undefined,
+          aoMap: undefined,
+          displacementMap: undefined,
+          useParallax: false,
+          roughness: 0.2,
+          metalness: 0.0,
+        };
+      }
 
-      const loads: Promise<void>[] = [];
-      const albedoUrl  = mData.mapAlbedo    || mData.map;
-      const normalUrl  = mData.mapNormal    || mData.normalMap;
-      const roughUrl   = mData.mapRoughness || mData.roughnessMap;
-      const metalUrl   = mData.mapMetalness || mData.metalnessMap;
-      const aoUrl      = mData.mapAO        || mData.aoMap;
-      const emissUrl   = mData.mapEmissive  || mData.emissiveMap;
-      const dispUrl    = mData.mapDisplacement || mData.displacementMap;
+      const mat = createPBRMaterial(finalMData);
 
-      if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale;
-
-      if (albedoUrl) loads.push(loadTex(texLoader, albedoUrl, true, mData).then(t => { mat.map = t; }).catch(() => {}));
-      if (normalUrl) loads.push(loadTex(texLoader, normalUrl, false, mData).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); }).catch(() => {}));
-      if (roughUrl)  loads.push(loadTex(texLoader, roughUrl, false, mData).then(t => { mat.roughnessMap = t; }).catch(() => {}));
-      if (metalUrl)  loads.push(loadTex(texLoader, metalUrl, false, mData).then(t => { mat.metalnessMap = t; }).catch(() => {}));
-      if (aoUrl)     loads.push(loadTex(texLoader, aoUrl, false, mData).then(t => { mat.aoMap = t; }).catch(() => {}));
-      if (emissUrl)  loads.push(loadTex(texLoader, emissUrl, true, mData).then(t => { mat.emissiveMap = t; }).catch(() => {}));
-      if (dispUrl)   loads.push(loadTex(texLoader, dispUrl, false, mData).then(t => { mat.displacementMap = t; if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale; }).catch(() => {}));
-
-      await Promise.all(loads);
-      injectSeamlessDisplacement(mat);
-
-      const nombreMat = (mData.name || '').toLowerCase();
-      const requiereTriplanar = nombreMat.includes('madera') || 
-                                nombreMat.includes('roble') || 
-                                nombreMat.includes('pino') ||
-                                nombreMat.includes('wood') || 
-                                nombreMat.includes('stone') ||
-                                mData.uvwMapping === 'TRIPLANAR';
+      const nombreMat = (finalMData.name || '').toLowerCase();
+      const uvMapping = finalMData.uvwMapping || 'BOX';
+      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
+      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
       if (requiereTriplanar) {
-        setupTriplanarMaterial(mat, mData);
+        setupTriplanarMaterial(mat, finalMData);
       }
 
       mat.needsUpdate = true;
@@ -610,23 +594,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          let objCopy = { ...obj };
-          if (obj.vertices && obj.faces && obj.faces.length > 0) {
-            let meshData = { vertices: obj.vertices, faces: obj.faces };
-            if (mData.uvwMapping && mData.uvwMapping !== 'UV') {
-              meshData = { ...meshData, faces: meshData.faces.map((f: any) => ({ ...f, uvs: undefined })) };
-              meshData = applyUVWMapping(meshData, mData.uvwMapping);
-            } else if (!obj.faces.some((f: any) => f.uvs && f.uvs.length > 0)) {
-              meshData = generateUVs(meshData);
-            }
-            objCopy = { ...objCopy, faces: meshData.faces };
+          let geo = createBaseGeometry(obj, mData);
+          if (obj.smoothShading === false) {
+            geo.computeVertexNormals();
+          } else if (obj.smoothShading === true) {
+            computeSmoothNormalsByPosition(geo, Math.PI / 3);
           }
-
-          let geo = createBaseGeometry(objCopy);
-          try {
-            geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
-          } catch (_) {}
-          geo.computeVertexNormals();
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
           m.castShadow = true; m.receiveShadow = true;
@@ -829,7 +802,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     const texLoader = new THREE.TextureLoader();
 
-    const loadMaterial = async (obj: any): Promise<THREE.MeshPhysicalMaterial> => {
+    const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
       const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
@@ -837,42 +810,37 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const finalColorHex = (typeof rawColor === 'string' && rawColor.trim() !== '' && rawColor !== '#000000')
         ? rawColor : (obj.color && obj.color !== '#000000' ? obj.color : '#cccccc');
 
-      const mat = new THREE.MeshPhysicalMaterial({
-        color: new THREE.Color(finalColorHex),
-        metalness: mData.metalness ?? 0,
-        roughness: mData.roughness ?? 0.75,
-        transmission: mData.transmission ?? 0,
+      let finalMData = {
+        ...mData,
+        color: finalColorHex,
         opacity: mData.opacity ?? obj.opacity ?? 1,
-        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
-        side: THREE.FrontSide,
+      };
 
-        // ── 🧣 INYECCIÓN EXTRAORDINARIA TEXTIL (ESTILO MIXOS CAPTURA) ──
-        sheen: mData.sheen ?? (obj.materialId?.includes('velvet') || mData.id?.includes('velvet') || mData.name?.toLowerCase().includes('terciopelo') ? 1.0 : 0.0),
-        sheenRoughness: mData.sheenRoughness ?? 0.4,
-        sheenColor: new THREE.Color(mData.sheenColor || '#ff9999'),
-      });
+      if (obj.uvDebug || mData.uvDebug) {
+        finalMData = {
+          ...finalMData,
+          color: '#ffffff',
+          map: getUVDebugTexture(),
+          normalMap: undefined,
+          roughnessMap: undefined,
+          metalnessMap: undefined,
+          aoMap: undefined,
+          displacementMap: undefined,
+          useParallax: false,
+          roughness: 0.2,
+          metalness: 0.0,
+        };
+      }
 
-      const loads: Promise<void>[] = [];
-      if (mData.mapAlbedo || mData.map) loads.push(loadTex(texLoader, mData.mapAlbedo || mData.map, true, mData).then(t => { mat.map = t; }).catch(() => {}));
-      if (mData.mapNormal || mData.normalMap) loads.push(loadTex(texLoader, mData.mapNormal || mData.normalMap, false, mData).then(t => { mat.normalMap = t; if (mData.normalScale) mat.normalScale.set(mData.normalScale, mData.normalScale); }).catch(() => {}));
-      if (mData.mapRoughness || mData.roughnessMap) loads.push(loadTex(texLoader, mData.mapRoughness || mData.roughnessMap, false, mData).then(t => { mat.roughnessMap = t; }).catch(() => {}));
-      if (mData.mapMetalness || mData.metalnessMap) loads.push(loadTex(texLoader, mData.mapMetalness || mData.metalnessMap, false, mData).then(t => { mat.metalnessMap = t; }).catch(() => {}));
-      if (mData.mapAO || mData.aoMap) loads.push(loadTex(texLoader, mData.mapAO || mData.aoMap, false, mData).then(t => { mat.aoMap = t; }).catch(() => {}));
-      if (mData.mapEmissive || mData.emissiveMap) loads.push(loadTex(texLoader, mData.mapEmissive || mData.emissiveMap, true, mData).then(t => { mat.emissiveMap = t; }).catch(() => {}));
-      if (mData.mapDisplacement || mData.displacementMap) loads.push(loadTex(texLoader, mData.mapDisplacement || mData.displacementMap, false, mData).then(t => { mat.displacementMap = t; if (mData.displacementScale !== undefined) mat.displacementScale = mData.displacementScale; }).catch(() => {}));
-      await Promise.all(loads);
-      injectSeamlessDisplacement(mat);
+      const mat = createPBRMaterial(finalMData);
 
-      const nombreMat = (mData.name || '').toLowerCase();
-      const requiereTriplanar = nombreMat.includes('madera') || 
-                                nombreMat.includes('roble') || 
-                                nombreMat.includes('pino') ||
-                                nombreMat.includes('wood') || 
-                                nombreMat.includes('stone') ||
-                                mData.uvwMapping === 'TRIPLANAR';
+      const nombreMat = (finalMData.name || '').toLowerCase();
+      const uvMapping = finalMData.uvwMapping || 'BOX';
+      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
+      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
       if (requiereTriplanar) {
-        setupTriplanarMaterial(mat, mData);
+        setupTriplanarMaterial(mat, finalMData);
       }
 
       mat.needsUpdate = true;
@@ -947,23 +915,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          let objCopy = { ...obj };
-          if (obj.vertices && obj.faces && obj.faces.length > 0) {
-            let meshData = { vertices: obj.vertices, faces: obj.faces };
-            if (mData.uvwMapping && mData.uvwMapping !== 'UV') {
-              meshData = { ...meshData, faces: meshData.faces.map((f: any) => ({ ...f, uvs: undefined })) };
-              meshData = applyUVWMapping(meshData, mData.uvwMapping);
-            } else if (!obj.faces.some((f: any) => f.uvs && f.uvs.length > 0)) {
-              meshData = generateUVs(meshData);
-            }
-            objCopy = { ...objCopy, faces: meshData.faces };
+          let geo = createBaseGeometry(obj, mData);
+          if (obj.smoothShading === false) {
+            geo.computeVertexNormals();
+          } else if (obj.smoothShading === true) {
+            computeSmoothNormalsByPosition(geo, Math.PI / 3);
           }
-
-          let geo = createBaseGeometry(objCopy);
-          try {
-            geo = BufferGeometryUtils.mergeVertices(geo, 1e-4);
-          } catch (_) {}
-          geo.computeVertexNormals();
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
           m.castShadow = true; m.receiveShadow = true;
