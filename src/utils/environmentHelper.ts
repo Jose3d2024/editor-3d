@@ -122,27 +122,36 @@ export async function setupSceneEnvironment(
     }
   }
 
-  if (!envTexture) {
+  let bgMode: BackgroundMode = env.backgroundMode ?? (env.backgroundVisible ? 'HDRI' : 'GRADIENT');
+  if (env.backgroundVisible === false && bgMode === 'HDRI') {
+    bgMode = 'GRADIENT';
+  }
+
+  // Create synthetic studio HDRI canvas only if background mode is HDRI
+  if (!envTexture && bgMode === 'HDRI') {
     envTexture = createStudioEquirectangularCanvas('softbox');
   }
 
-  const pmremTexture = pmremGenerator.fromEquirectangular(envTexture).texture;
-  scene.environment = pmremTexture;
+  let pmremTexture: THREE.Texture | null = null;
+  const currentIntensity = env.intensity ?? 1.2;
 
-  // Environment Lighting Intensity and Exposure
-  scene.environmentIntensity = env.intensity ?? 1.2;
+  // Crucial: Only apply HDRI image-based lighting (scene.environment) if background mode is explicitly 'HDRI'.
+  // For 'GRADIENT', 'COLOR', or 'TRANSPARENT', environment lighting is 0 so deleting all lights produces total darkness.
+  if (bgMode === 'HDRI' && envTexture && currentIntensity > 0) {
+    pmremTexture = pmremGenerator.fromEquirectangular(envTexture).texture;
+    scene.environment = pmremTexture;
+    scene.environmentIntensity = currentIntensity;
+  } else {
+    scene.environment = null;
+    scene.environmentIntensity = 0;
+  }
+
   renderer.toneMappingExposure = env.exposure ?? 1.1;
 
   // Rotations
   const rotRad = ((env.rotation ?? 0) * Math.PI) / 180;
   scene.environmentRotation.set(0, rotRad, 0);
   scene.backgroundRotation.set(0, rotRad, 0);
-
-  // Background Handling according to backgroundMode or backgroundVisible
-  let bgMode: BackgroundMode = env.backgroundMode ?? (env.backgroundVisible ? 'HDRI' : 'GRADIENT');
-  if (env.backgroundVisible === false) {
-    bgMode = 'GRADIENT';
-  }
 
   let bgTexture: THREE.Texture | null = null;
 
@@ -152,7 +161,7 @@ export async function setupSceneEnvironment(
       envTexture.generateMipmaps = true;
       envTexture.needsUpdate = true;
       scene.background = envTexture;
-    } else {
+    } else if (pmremTexture) {
       scene.background = pmremTexture;
     }
     scene.backgroundBlurriness = env.backgroundBlur ?? 0;

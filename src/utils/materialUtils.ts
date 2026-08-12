@@ -193,8 +193,10 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
   const displacementUrl = data.displacementMap || data.mapDisplacement;
 
   const loader = new THREE.TextureLoader();
-  const loadTexture = (url: string | undefined, colorSpace: THREE.ColorSpace = THREE.NoColorSpace) => {
+  const loadTexture = (url: any, colorSpace: THREE.ColorSpace = THREE.NoColorSpace) => {
     if (!url) return null;
+    if (url instanceof THREE.Texture) return url;
+    if (typeof url !== 'string') return null;
     const tex = loader.load(url, (loadedTex) => {
       loadedTex.flipY = data.flipY ?? true;
       loadedTex.needsUpdate = true;

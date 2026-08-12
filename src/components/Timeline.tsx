@@ -7,11 +7,11 @@ import {
 import { motion } from 'framer-motion';
 
 // ── Constantes de layout ───────────────────────────────────────────────────
-const ROW_H        = 32;   // px por fila de objeto
-const HEADER_H     = 44;   // px cabecera de controles
-const LABEL_W      = 160;  // px columna de nombres
-const MIN_TRACK_H  = 80;   // altura mínima del área de tracks
-const MAX_ROWS     = 6;    // filas visibles antes de scroll
+const ROW_H        = 22;   // px por fila de objeto
+const HEADER_H     = 30;   // px cabecera de controles
+const LABEL_W      = 130;  // px columna de nombres
+const MIN_TRACK_H  = 36;   // altura mínima del área de tracks
+const MAX_ROWS     = 3;    // filas visibles antes de scroll
 
 // ── Colores por operación ──────────────────────────────────────────────────
 const OP_COLOR: Record<string, string> = {
@@ -231,7 +231,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
   const trackRef = useRef<HTMLDivElement>(null);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const visibleCount = Math.min(Math.max(animableItems.length, 1), MAX_ROWS);
-  const trackAreaH = Math.max(MIN_TRACK_H, visibleCount * ROW_H + 8);
+  const trackAreaH = visibleCount * ROW_H + 16;
 
   // ── Drag & Click en el track para mover playhead ──────────────────────────
   const isDraggingRef = useRef(false);
@@ -284,24 +284,24 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
       
       {/* ══════════════ CONTROLES DE TRANSPORTE Y ACCIONES ══════════════ */}
       <div
-        className="flex items-center justify-between px-3 sm:px-4 flex-shrink-0 border-b border-white/5 bg-zinc-900/60"
+        className="flex items-center justify-between px-2 sm:px-3 flex-shrink-0 border-b border-white/5 bg-zinc-900/60"
         style={{ height: HEADER_H }}
       >
         {/* Izquierda: transporte */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-1 sm:gap-1.5">
           {/* Ir al inicio */}
           <button
             onClick={() => setCurrentTime(0)}
-            className="p-1.5 rounded-lg transition-all text-zinc-500 hover:text-zinc-200 hover:bg-white/5"
+            className="p-1 rounded-md transition-all text-zinc-500 hover:text-zinc-200 hover:bg-white/5"
             title="Ir al inicio (0s)"
           >
-            <SkipBack size={14} />
+            <SkipBack size={12} />
           </button>
 
           {/* Play/Pause */}
           <button
             onClick={() => setIsPlaying(!isPlaying)}
-            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all flex-shrink-0 shadow-lg ${
+            className={`w-6 h-6 flex items-center justify-center rounded-full transition-all flex-shrink-0 shadow-md ${
               isPlaying 
                 ? 'bg-indigo-600 text-white shadow-indigo-500/20 scale-105' 
                 : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
@@ -309,87 +309,87 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
             title={isPlaying ? 'Pausar' : 'Reproducir'}
           >
             {isPlaying
-              ? <Pause size={14} fill="currentColor" />
-              : <Play  size={14} fill="currentColor" className="ml-0.5" />
+              ? <Pause size={12} fill="currentColor" />
+              : <Play  size={12} fill="currentColor" className="ml-0.5" />
             }
           </button>
 
           {/* Stop */}
           <button
             onClick={() => { setIsPlaying(false); setCurrentTime(0); }}
-            className="p-1.5 rounded-lg transition-all text-zinc-500 hover:text-zinc-200 hover:bg-white/5"
+            className="p-1 rounded-md transition-all text-zinc-500 hover:text-zinc-200 hover:bg-white/5"
             title="Detener"
           >
-            <Square size={13} fill="currentColor" />
+            <Square size={11} fill="currentColor" />
           </button>
 
           {/* Loop / Bucle */}
           <button
             onClick={() => setIsLooping(!isLooping)}
-            className={`p-1.5 rounded-lg transition-all ${
+            className={`p-1 rounded-md transition-all ${
               isLooping
                 ? 'text-indigo-400 bg-indigo-500/20 font-bold'
                 : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
             }`}
             title={isLooping ? 'Bucle activado' : 'Bucle desactivado'}
           >
-            <Repeat size={13} />
+            <Repeat size={11} />
           </button>
 
-          <div className="w-px h-4 bg-white/10 mx-0.5" />
+          <div className="w-px h-3.5 bg-white/10 mx-0.5" />
 
           {/* Auto-Key REC */}
           <button
             onClick={() => setIsRecording(!isRecording)}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all border ${
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-bold transition-all border ${
               isRecording
-                ? 'bg-rose-600 text-white border-rose-400 shadow-lg shadow-rose-500/20'
+                ? 'bg-rose-600 text-white border-rose-400 shadow-sm shadow-rose-500/20'
                 : 'bg-zinc-800/60 text-zinc-400 border-white/5 hover:bg-zinc-700 hover:text-zinc-200'
             }`}
             title={isRecording ? 'Detener Auto-Key' : 'Auto-Key: graba keyframe al mover'}
           >
-            <Circle size={10} fill={isRecording ? 'currentColor' : 'none'} />
+            <Circle size={8} fill={isRecording ? 'currentColor' : 'none'} />
             <span className="hidden sm:inline">REC</span>
           </button>
 
-          <div className="w-px h-4 bg-white/10 mx-0.5" />
+          <div className="w-px h-3.5 bg-white/10 mx-0.5" />
 
           {/* Keyframe individual de objeto seleccionado */}
           <button
             onClick={() => selectedObjectId && addKeyframe(selectedObjectId, currentTime)}
             disabled={!selectedObjectId}
-            className="p-1.5 rounded-lg transition-all text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-20"
+            className="p-1 rounded-md transition-all text-zinc-400 hover:text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-20"
             title={selectedObjectId ? `Keyframe objeto en ${fmt(currentTime)}s` : 'Selecciona un objeto para añadir keyframe'}
           >
-            <Key size={14} />
+            <Key size={12} />
           </button>
 
           {/* Botón Insertar Keyframe General (+K) */}
           <button
             onClick={handleInsertKeyframeAll}
             title="Insertar fotogramas clave en todos los objetos y cámaras visibles (+K)"
-            className="flex items-center gap-1.5 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white text-[11px] font-bold px-2.5 py-1 rounded-lg shadow-md transition-all hover:scale-105 active:scale-95"
+            className="flex items-center gap-1 bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-md shadow-sm transition-all hover:scale-105 active:scale-95"
           >
-            <Sparkles size={12} className="text-cyan-200" />
+            <Sparkles size={11} className="text-cyan-200" />
             <span className="hidden md:inline">Keyframe General</span>
-            <span className="text-[9px] bg-black/30 font-mono px-1 rounded text-cyan-200">+K</span>
+            <span className="text-[8.5px] bg-black/30 font-mono px-1 rounded text-cyan-200">+K</span>
           </button>
 
           {/* Clear keyframes for selected object */}
           <button
             onClick={() => selectedObjectId && clearAllKeyframes(selectedObjectId)}
             disabled={!selectedObjectId}
-            className="p-1.5 rounded-lg transition-all text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 disabled:opacity-20"
+            className="p-1 rounded-md transition-all text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 disabled:opacity-20"
             title="Borrar todos los keyframes del objeto seleccionado"
           >
-            <Trash2 size={13} />
+            <Trash2 size={11} />
           </button>
         </div>
 
         {/* Centro: Tiempo */}
-        <div className="flex items-center gap-2 font-mono text-[11px] bg-zinc-900/80 px-3 py-1 rounded-full border border-white/5 shadow-inner">
-          <Clock size={12} className="text-cyan-400" />
-          <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5 font-mono text-[10px] bg-zinc-900/80 px-2.5 py-0.5 rounded-full border border-white/5 shadow-inner">
+          <Clock size={11} className="text-cyan-400" />
+          <div className="flex items-center gap-0.5">
             <span className="text-zinc-100 font-bold">{fmt(currentTime)}s</span>
             <span className="text-zinc-600">/</span>
             <span className="text-zinc-400">{duration}s</span>
@@ -401,11 +401,11 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
           {onToggleCollapse && (
             <button
               onClick={onToggleCollapse}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-all border border-white/10 shadow-sm active:scale-95"
+              className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-all border border-white/10 shadow-xs active:scale-95"
               title="Minimizar línea de tiempo"
             >
-              <span className="text-[10px] font-bold">Minimizar</span>
-              <ChevronDown size={14} />
+              <span className="text-[9.5px] font-bold">Minimizar</span>
+              <ChevronDown size={12} />
             </button>
           )}
         </div>
@@ -414,13 +414,13 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
       {/* ══════════════ ÁREA DE TRACKS Y CANALES ══════════════ */}
       <div
         className="flex flex-col overflow-hidden"
-        style={{ height: trackAreaH + 24 }}
+        style={{ height: trackAreaH }}
       >
         {/* Ruler de tiempo + track clickeable */}
-        <div className="flex flex-shrink-0 bg-zinc-950/60" style={{ height: 20 }}>
+        <div className="flex flex-shrink-0 bg-zinc-950/60" style={{ height: 16 }}>
           {/* Spacer del label */}
-          <div className="flex-shrink-0 border-r border-white/5 px-3 flex items-center" style={{ width: LABEL_W }}>
-            <span className="text-[9px] font-bold uppercase text-zinc-500 tracking-wider">Canales</span>
+          <div className="flex-shrink-0 border-r border-white/5 px-2 flex items-center" style={{ width: LABEL_W }}>
+            <span className="text-[8px] font-bold uppercase text-zinc-500 tracking-wider">Canales</span>
           </div>
           {/* Ruler */}
           <div
@@ -435,8 +435,8 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                 className="absolute top-0 flex flex-col items-center pointer-events-none"
                 style={{ left: `${duration > 0 ? (t / duration) * 100 : 0}%`, transform: 'translateX(-50%)' }}
               >
-                <div className="w-px h-2 bg-white/10" />
-                <span className="text-[8px] font-mono text-zinc-500 mt-0.5">{t}s</span>
+                <div className="w-px h-1.5 bg-white/10" />
+                <span className="text-[7.5px] font-mono text-zinc-500 mt-0">{t}s</span>
               </div>
             ))}
             {/* Playhead en ruler */}
@@ -444,7 +444,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
               className="absolute top-0 bottom-0 w-px pointer-events-none z-10 bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]"
               style={{ left: `${pct}%` }}
             >
-              <div className="absolute top-0 -left-[4px] w-2 h-2 bg-cyan-400 transform rotate-45 rounded-xs" />
+              <div className="absolute top-0 -left-[3px] w-1.5 h-1.5 bg-cyan-400 transform rotate-45 rounded-xs" />
             </div>
           </div>
         </div>
@@ -455,9 +455,9 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
           className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar"
         >
           {animableItems.length === 0 ? (
-            <div className="flex items-center justify-center h-full gap-3 text-zinc-600">
-              <Layers size={16} className="opacity-20" />
-              <span className="text-[11px] font-medium italic">Añade objetos o cámaras a la escena para comenzar a animar</span>
+            <div className="flex items-center justify-center h-full gap-2 text-zinc-600 py-1">
+              <Layers size={13} className="opacity-20" />
+              <span className="text-[10px] font-medium italic">Añade objetos o cámaras a la escena para comenzar a animar</span>
             </div>
           ) : (
             animableItems.map((item) => {
@@ -475,7 +475,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                 >
                   {/* ── Label de Canal ── */}
                   <div
-                    className={`flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer transition-all border-r border-white/5 ${
+                    className={`flex items-center gap-1.5 px-2 flex-shrink-0 cursor-pointer transition-all border-r border-white/5 ${
                       isSelected ? 'bg-cyan-500/10' : 'hover:bg-white/[0.02]'
                     }`}
                     style={{ width: LABEL_W }}
@@ -484,11 +484,11 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                       else selectCamera(item.id);
                     }}
                   >
-                    <span className="text-xs flex-shrink-0">
+                    <span className="text-[10px] flex-shrink-0">
                       {item.type === 'camera' ? '📹' : '📦'}
                     </span>
                     <span
-                      className={`text-[11px] truncate flex-1 transition-colors ${
+                      className={`text-[10px] truncate flex-1 transition-colors ${
                         isSelected ? 'text-cyan-200 font-bold' : 'text-zinc-400 group-hover/row:text-zinc-200'
                       }`}
                     >
@@ -496,7 +496,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                     </span>
                     {keyframes.length > 0 && (
                       <span
-                        className={`text-[8px] font-bold flex-shrink-0 px-1.5 py-0.5 rounded-full ${
+                        className={`text-[7.5px] font-bold flex-shrink-0 px-1 py-0 rounded-full ${
                           isSelected ? 'bg-cyan-500/20 text-cyan-300' : 'bg-white/5 text-zinc-500'
                         }`}
                       >
@@ -525,7 +525,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                           style={{
                             left: `${l}%`,
                             width: `${w}%`,
-                            height: 4,
+                            height: 3,
                             background: isSelected ? item.color : 'rgba(255,255,255,0.1)',
                           }}
                         />
@@ -556,14 +556,14 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
                           }`}
                           style={{
                             left: `${kfPct}%`,
-                            width: 10,
-                            height: 10,
-                            borderRadius: 2,
+                            width: 8,
+                            height: 8,
+                            borderRadius: 1.5,
                             background: isDragging ? '#ffffff' : (isAtCurrent ? '#ffffff' : item.color),
-                            border: `2px solid ${isDragging ? '#22d3ee' : (isAtCurrent ? '#22d3ee' : '#18181b')}`,
+                            border: `1.5px solid ${isDragging ? '#22d3ee' : (isAtCurrent ? '#22d3ee' : '#18181b')}`,
                             boxShadow: isAtCurrent || isDragging
-                              ? '0 0 10px rgba(34,211,238,0.9)'
-                              : `0 0 4px ${item.color}66`,
+                              ? '0 0 8px rgba(34,211,238,0.9)'
+                              : `0 0 3px ${item.color}66`,
                           }}
                           title={`Keyframe: ${kf.time.toFixed(2)}s\n• Arrastra para mover\n• Clic secundario para borrar`}
                         />
@@ -613,16 +613,16 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
 
       {/* ── Pie con Ayuda / Tips ── */}
       <div
-        className="flex items-center justify-between px-3 sm:px-4 py-1 flex-shrink-0 border-t border-white/5 bg-zinc-950/60"
+        className="flex items-center justify-between px-2.5 py-0.5 flex-shrink-0 border-t border-white/5 bg-zinc-950/60"
       >
-        <span className="text-[9px] font-medium text-zinc-500 italic">
+        <span className="text-[8.5px] font-medium text-zinc-500 italic">
           Arrastra los diamantes ◆ para ajustar tiempos · +K graba la escena completa · Clic secundario para borrar
         </span>
         {isRecording && (
           <motion.span 
             animate={{ opacity: [1, 0.4, 1] }}
             transition={{ duration: 1.5, repeat: Infinity }}
-            className="text-[9px] font-bold text-rose-400 tracking-widest uppercase"
+            className="text-[8.5px] font-bold text-rose-400 tracking-widest uppercase"
           >
             ● Grabando Movimiento
           </motion.span>

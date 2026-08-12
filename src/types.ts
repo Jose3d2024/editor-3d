@@ -285,6 +285,23 @@ export interface EnvironmentSettings {
 }
 
 export type ViewportType   = 'PERSPECTIVE' | 'TOP' | 'BOTTOM' | 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT';
+export type ViewportLayoutPreset = 
+  | 'QUAD' 
+  | 'SINGLE' 
+  | 'TOP_1_BOTTOM_2' 
+  | 'TOP_2_BOTTOM_1' 
+  | 'LEFT_1_RIGHT_2' 
+  | 'RIGHT_1_LEFT_2' 
+  | 'SPLIT_H' 
+  | 'SPLIT_V';
+
+export interface ViewportConfigState {
+  preset: ViewportLayoutPreset;
+  splitX: number; // 0.15 to 0.85 (default 0.5)
+  splitY: number; // 0.15 to 0.85 (default 0.5)
+  customResizeMode: boolean;
+  snapStep: number; // e.g. 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
+}
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
 export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
@@ -361,6 +378,12 @@ export interface AppState {
   maximizedViewport: ViewportType | null;
   lastCameraState?:  CameraState;
   viewportCameras:   ViewportCameraState;
+  viewportConfig:    ViewportConfigState;
+  setViewportPreset: (preset: ViewportLayoutPreset) => void;
+  setViewportSplits: (splitX: number, splitY: number) => void;
+  setCustomResizeMode: (active: boolean) => void;
+  setSnapStep: (step: number) => void;
+  resetViewportSplits: () => void;
   history:      Project[];
   historyIndex: number;
 }

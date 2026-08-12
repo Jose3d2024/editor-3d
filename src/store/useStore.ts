@@ -392,6 +392,13 @@ export const useStore = create<Store>()((set, get) => ({
   isolateGLTFSelection: false,
   maximizedViewport: null,
   viewportCameras: {},
+  viewportConfig: {
+    preset: 'QUAD',
+    splitX: 0.5,
+    splitY: 0.5,
+    customResizeMode: false,
+    snapStep: 0.5,
+  },
   clipboard: null,
 
   resetProject: () => {
@@ -609,6 +616,26 @@ export const useStore = create<Store>()((set, get) => ({
   setMaximizedViewport: (viewport) => set({ maximizedViewport: viewport }),
   setViewportCamera: (viewport, cameraState) => set((state) => ({
     viewportCameras: { ...state.viewportCameras, [viewport]: cameraState }
+  })),
+  setViewportPreset: (preset) => set((state) => ({
+    viewportConfig: { ...state.viewportConfig, preset },
+    maximizedViewport: null
+  })),
+  setViewportSplits: (splitX, splitY) => set((state) => ({
+    viewportConfig: {
+      ...state.viewportConfig,
+      splitX: Math.max(0.15, Math.min(0.85, splitX)),
+      splitY: Math.max(0.15, Math.min(0.85, splitY)),
+    }
+  })),
+  setCustomResizeMode: (active) => set((state) => ({
+    viewportConfig: { ...state.viewportConfig, customResizeMode: active }
+  })),
+  setSnapStep: (step) => set((state) => ({
+    viewportConfig: { ...state.viewportConfig, snapStep: step }
+  })),
+  resetViewportSplits: () => set((state) => ({
+    viewportConfig: { ...state.viewportConfig, splitX: 0.5, splitY: 0.5 }
   })),
   addSelectedVertexIndices: (indices) => {
     set({ selectedVertexIndices: Array.from(new Set([...get().selectedVertexIndices, ...indices])) });

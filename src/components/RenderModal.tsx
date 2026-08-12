@@ -70,42 +70,43 @@ function halton(index: number, base: number): number {
   return result;
 }
 
-/** Carga una textura y le aplica la repetición, desplazamiento y rotación del proyecto */
-function loadTex(
-  loader: THREE.TextureLoader, 
-  url: string, 
-  isColor = false,
-  mData: any = {}
-): Promise<THREE.Texture> {
-  return new Promise((res, rej) => loader.load(url, t => {
-    t.colorSpace = isColor ? THREE.SRGBColorSpace : THREE.LinearSRGBColorSpace;
-    t.flipY = mData.flipY ?? true;
-
-    t.wrapS = THREE.RepeatWrapping;
-    t.wrapT = THREE.RepeatWrapping;
-    
-    if (mData.mapRepeat) {
-      const repX = Array.isArray(mData.mapRepeat) ? mData.mapRepeat[0] : mData.mapRepeat;
-      const repY = Array.isArray(mData.mapRepeat) ? mData.mapRepeat[1] : mData.mapRepeat;
-      t.repeat.set(repX, repY);
-    } else {
-      t.repeat.set(1, 1);
+/** Espera a que todas las imágenes de las texturas asignadas al material carguen físicamente */
+function waitForMaterialTextures(mat: THREE.Material): Promise<void> {
+  const textures: THREE.Texture[] = [];
+  const anyMat = mat as any;
+  const keys = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'displacementMap', 'alphaMap', 'clearcoatNormalMap', 'bumpMap'];
+  for (const k of keys) {
+    if (anyMat[k] && anyMat[k].isTexture) {
+      textures.push(anyMat[k]);
     }
+  }
+  if (textures.length === 0) return Promise.resolve();
 
-    if (mData.mapOffset) {
-      const offX = Array.isArray(mData.mapOffset) ? mData.mapOffset[0] : mData.mapOffset;
-      const offY = Array.isArray(mData.mapOffset) ? mData.mapOffset[1] : mData.mapOffset;
-      t.offset.set(offX, offY);
-    }
-    if (mData.mapRotation !== undefined) {
-      t.rotation = (mData.mapRotation * Math.PI) / 180;
-    }
+  const promises = textures.map(tex => {
+    return new Promise<void>((resolve) => {
+      const img = tex.image as any;
+      if (!img) {
+        const check = setInterval(() => {
+          const currentImg = tex.image as any;
+          if (currentImg && (currentImg.complete || currentImg.width > 0)) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 20);
+        setTimeout(() => { clearInterval(check); resolve(); }, 3000);
+      } else if (img.complete || img.width > 0) {
+        resolve();
+      } else if (typeof img.addEventListener === 'function') {
+        img.addEventListener('load', () => resolve(), { once: true });
+        img.addEventListener('error', () => resolve(), { once: true });
+        setTimeout(() => resolve(), 3000);
+      } else {
+        resolve();
+      }
+    });
+  });
 
-    t.anisotropy = 16;
-    t.needsUpdate = true;
-
-    res(t);
-  }, undefined, rej));
+  return Promise.all(promises).then(() => {});
 }
 
 // Shader para acumular muestras temporalmente (Super-Sampling Anti-Aliasing & Soft Shadows)
@@ -181,9 +182,8 @@ const displayShader = {
 
 /** Sincroniza e inyecta la iluminación exacta del visor interactivo en la escena de renderizado */
 function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
-  // Siempre agregar iluminación ambiental y hemisférica base para asegurar visibilidad constante
-  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.4));
+  // Nota de diseño: En el "Estudio de Renderizado Profesional" se desactivan las luces por defecto de edición.
+  // El renderizador final usa únicamente las luces reales (focos, paneles, HDRI) colocadas a mano por el usuario.
 
   const visibleLights = projectLights ? projectLights.filter((l: any) => l.visible) : [];
 
@@ -263,16 +263,6 @@ function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
 
       scene.add(light);
     });
-  } else {
-    // Luz por defecto si no existen luces personalizadas
-    const sun = new THREE.DirectionalLight('#fffaf0', 2.5);
-    sun.position.set(5.1, 10, 7.5);
-    const target = new THREE.Object3D();
-    target.position.set(0, 0, 0);
-    sun.target = target;
-    scene.add(target);
-    sun.castShadow = true;
-    scene.add(sun);
   }
 }
 
@@ -484,7 +474,6 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
     // ── Cargar materiales y objetos ────────────────────────────────────────
     setStatus('Cargando materiales PBR...');
-    const texLoader = new THREE.TextureLoader();
 
     const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
@@ -494,15 +483,11 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         ...(obj.material || {}),
       };
 
-      const rawColor = mData.colorBase || mData.color || obj.color || '#cccccc';
-      const finalColorHex = (typeof rawColor === 'string' && rawColor.trim() !== '' && rawColor !== '#000000' && rawColor !== '#000')
-        ? rawColor
-        : (obj.color && obj.color !== '#000000' ? obj.color : '#cccccc');
-
       let finalMData = {
         ...mData,
-        color: finalColorHex,
+        color: mData.color || obj.color || '#ffffff',
         opacity: mData.opacity ?? obj.opacity ?? 1,
+        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
       };
 
       if (obj.uvDebug || mData.uvDebug) {
@@ -521,16 +506,20 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         };
       }
 
+      // Crear el material PBR unificado con las mismas reglas que el Viewport
       const mat = createPBRMaterial(finalMData);
 
+      // Aplicar mapeado Triplanar solo si la proyección es explícitamente TRIPLANAR o tiene mezcla triplanar
       const nombreMat = (finalMData.name || '').toLowerCase();
       const uvMapping = finalMData.uvwMapping || 'BOX';
-      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
-      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
+      const requiereTriplanar = uvMapping === 'TRIPLANAR' || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
       if (requiereTriplanar) {
         setupTriplanarMaterial(mat, finalMData);
       }
+
+      // Esperar la carga física completa de las imágenes de las texturas
+      await waitForMaterialTextures(mat);
 
       mat.needsUpdate = true;
       return mat;
@@ -589,23 +578,18 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
       if (!mesh) {
         try {
-          // Resolve material mapping rules so render UVs match interactive viewport 1:1
           const projectMaterials = project.materials || [];
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          let geo = createBaseGeometry(obj, mData);
-          if (obj.smoothShading === false) {
-            geo.computeVertexNormals();
-          } else if (obj.smoothShading === true) {
-            computeSmoothNormalsByPosition(geo, Math.PI / 3);
-          }
+          const geo = createBaseGeometry(obj, mData);
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
-          m.castShadow = true; m.receiveShadow = true;
+          m.castShadow = true;
+          m.receiveShadow = true;
           mesh = m;
         } catch (e) {
-          console.error(`[Render] Error al crear geometría base para ${obj.name}:`, e);
+          console.error(`[Render] Error al crear geometría sincronizada para ${obj.name}:`, e);
         }
       }
 
@@ -805,15 +789,16 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
-      const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
-      const rawColor = mData.colorBase || mData.color || obj.color || '#cccccc';
-      const finalColorHex = (typeof rawColor === 'string' && rawColor.trim() !== '' && rawColor !== '#000000')
-        ? rawColor : (obj.color && obj.color !== '#000000' ? obj.color : '#cccccc');
+      const mData: any = {
+        ...(refMat || {}),
+        ...(obj.material || {}),
+      };
 
       let finalMData = {
         ...mData,
-        color: finalColorHex,
+        color: mData.color || obj.color || '#ffffff',
         opacity: mData.opacity ?? obj.opacity ?? 1,
+        transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
       };
 
       if (obj.uvDebug || mData.uvDebug) {
@@ -832,16 +817,20 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         };
       }
 
+      // Crear el material PBR unificado con las mismas reglas que el Viewport
       const mat = createPBRMaterial(finalMData);
 
+      // Aplicar mapeado Triplanar si corresponde
       const nombreMat = (finalMData.name || '').toLowerCase();
       const uvMapping = finalMData.uvwMapping || 'BOX';
-      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
-      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
+      const requiereTriplanar = uvMapping === 'TRIPLANAR' || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
       if (requiereTriplanar) {
         setupTriplanarMaterial(mat, finalMData);
       }
+
+      // Esperar la carga física completa de las imágenes de las texturas
+      await waitForMaterialTextures(mat);
 
       mat.needsUpdate = true;
       return mat;
@@ -915,17 +904,15 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          let geo = createBaseGeometry(obj, mData);
-          if (obj.smoothShading === false) {
-            geo.computeVertexNormals();
-          } else if (obj.smoothShading === true) {
-            computeSmoothNormalsByPosition(geo, Math.PI / 3);
-          }
+          const geo = createBaseGeometry(obj, mData);
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
-          m.castShadow = true; m.receiveShadow = true;
+          m.castShadow = true;
+          m.receiveShadow = true;
           mesh = m;
-        } catch (_) {}
+        } catch (e) {
+          console.error(`[Render Video] Error al crear geometría sincronizada para ${obj.name}:`, e);
+        }
       }
 
       if (mesh) {

@@ -767,16 +767,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     scene.add(primitivesGroupRef.current);
     scene.add(siluetaGroupRef.current);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.3));
-    
-    const dl1 = new THREE.DirectionalLight(0xffffff, 0.7);
-    dl1.position.set(5, 10, 7.5);
-    scene.add(dl1);
-
-    const dl2 = new THREE.DirectionalLight(0xffffff, 0.3);
-    dl2.position.set(-5, -5, -5);
-    scene.add(dl2);
+    // Luz de Edición por Defecto (Visor en tiempo real):
+    // Luz ambiental suave para trabajar en el visor
+    const editorAmbient = new THREE.AmbientLight(0xffffff, 0.35);
+    scene.add(editorAmbient);
 
     const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
     grid.name = 'scene-grid';
@@ -828,6 +822,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       camera.layers.enable(1);
     }
 
+    // Luz Direccional vinculada a la cámara (Headlight de edición que se mueve con la cámara)
+    const editorHeadlight = new THREE.DirectionalLight(0xffffff, 0.65);
+    editorHeadlight.position.set(0.5, 1.5, 2);
+    camera.add(editorHeadlight);
+    scene.add(camera);
+
     const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false, powerPreference:'high-performance', preserveDrawingBuffer:true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
@@ -844,12 +844,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     }
     rendererRef.current = renderer;
 
-    // Initial environment setup - default room environment while project environment useEffect loads
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    const initialRoomEnv = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = initialRoomEnv;
     scene.background = new THREE.Color(0x1a1a1a);
-    pmremGenerator.dispose();
 
     // ALL viewports get OrbitControls — perspective, orthographic, and camera views get full rotate+pan+zoom
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -1672,11 +1667,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       // eliminando las costuras de forma masiva en el cubo biselado.
       const nombreMat = (finalMData.name || '').toLowerCase();
       const uvMapping = finalMData.uvwMapping || 'BOX';
-      const isExplicitNonTriplanar = uvMapping === 'PLANAR' || uvMapping === 'UV' || uvMapping === 'SPHERICAL' || uvMapping === 'CYLINDRICAL';
-      const requiereTriplanar = !isExplicitNonTriplanar || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
+      const requiereTriplanar = uvMapping === 'TRIPLANAR' || nombreMat.includes('triplanar') || typeof finalMData.triplanarBlend === 'number';
 
-      if (requiereTriplanar && viewMode === 'TEXTURED') {
-        // Forzamos el uso de tu utilitario nativo sin costuras espacial
+      if (requiereTriplanar) {
         setupTriplanarMaterial(mat, finalMData);
       }
 
@@ -5068,9 +5061,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           </button>
 
           {showViewDropdown && (
-            <div className="absolute top-full left-0 pt-1 min-w-[140px] z-50">
-              <div className="bg-zinc-900/95 backdrop-blur-md border border-white/20 rounded-md shadow-2xl overflow-hidden py-1">
-                <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10">
+            <div className="absolute top-full left-0 pt-1 min-w-[150px] z-[100] max-h-[220px] sm:max-h-[260px]">
+              <div className="bg-zinc-900/98 backdrop-blur-md border border-white/20 rounded-md shadow-2xl overflow-y-auto max-h-[210px] sm:max-h-[250px] py-1 custom-scrollbar scrollbar-thin scrollbar-thumb-zinc-700">
+                <div className="px-3 py-1 text-[9px] font-bold text-zinc-400 uppercase tracking-wider border-b border-white/10 sticky top-0 bg-zinc-900 z-10">
                   Visores 3D
                 </div>
                 {(['PERSPECTIVE', 'TOP', 'BOTTOM', 'FRONT', 'BACK', 'LEFT', 'RIGHT'] as ViewportType[]).map(v => (

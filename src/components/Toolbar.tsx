@@ -6,7 +6,7 @@ import {
   Download, Code, Maximize2, Disc, Square, Hexagon,
   MousePointer2, Dot, Move, RotateCw, Maximize, Spline, Layers3, Layers,
   Copy, Clipboard, FlipHorizontal, Image as ImageIcon,
-  ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid,
+  ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
   Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split
 } from 'lucide-react';
@@ -20,7 +20,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { performCSG } from '../utils/csg';
 import * as THREE from 'three';
-import type { CSGObject, MeshFace, V3 } from '../types';
+import type { CSGObject, MeshFace, V3, ViewportLayoutPreset } from '../types';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
 import {
@@ -424,11 +424,15 @@ export const Toolbar: React.FC = () => {
     extrudeShape, gridSnapEnabled, setGridSnapEnabled,
     moveReferenceMode, setMoveReferenceMode,
     maximizedViewport, setMaximizedViewport,
+    viewportConfig, setViewportPreset, setViewportSplits,
+    setCustomResizeMode, setSnapStep, resetViewportSplits,
   } = useStore();
 
   const [isFloating,       setIsFloating]       = useState(false);
   const [showMirror,       setShowMirror]        = useState(false);
   const [showRef,          setShowRef]           = useState(false);
+  const [showViewportConfig, setShowViewportConfig] = useState(false);
+  const viewportConfigRef = useRef<HTMLDivElement>(null);
   const [showOpacity,      setShowOpacity]       = useState(false);
   const [globalOpacity,    setGlobalOpacity]     = useState(1);
   const [extrudeDist,      setExtrudeDist]       = useState(0.3);
@@ -1683,23 +1687,277 @@ export const Toolbar: React.FC = () => {
           </div>
           <Sep/>
 
-          {/* Snap & Grid */}
-          <div className="flex items-center gap-1">
-            <button onClick={()=>setGridSnapEnabled(!gridSnapEnabled)}
-              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[11px] font-semibold transition-all ${gridSnapEnabled?'bg-indigo-600 text-white shadow-lg':'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}>
-              <Magnet size={14}/><span className="hidden sm:inline">Snap</span>
+          {/* Configuración Visores Tab */}
+          <div className="relative" ref={viewportConfigRef}>
+            <button
+              onClick={() => setShowViewportConfig(v => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-[11px] font-bold transition-all border cursor-pointer ${
+                showViewportConfig
+                  ? 'bg-indigo-600 text-white border-indigo-400 shadow-lg'
+                  : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
+              }`}
+              title="Configuración de Visores, Layouts, Rejilla y Snap"
+            >
+              <LayoutGrid size={14} className="text-indigo-400" />
+              <span className="hidden sm:inline">Configuración Visores</span>
+              <span className="sm:hidden">Visores</span>
+              <ChevronDown size={10} className={`transition-transform ${showViewportConfig ? 'rotate-180' : ''}`} />
             </button>
-            <button onClick={()=>useStore.getState().setShowGrid(project.showGrid !== false ? false : true)}
-              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[11px] font-semibold transition-all ${project.showGrid !== false ? 'bg-zinc-700 text-white' : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'}`}
-              title="Mostrar/Ocultar Rejilla">
-              <Grid size={14}/><span className="hidden sm:inline">Grid</span>
-            </button>
-          </div>
-          <div className="flex items-center gap-0.5 ml-1">
-            <button onClick={()=>selectedObjectId&&useStore.getState().alignToGrid(selectedObjectId)} disabled={!hasSel}
-              className="p-1.5 bg-zinc-900 hover:bg-zinc-800 rounded text-zinc-400 hover:text-indigo-400 disabled:opacity-30 transition-colors" title="Alinear a rejilla"><Magnet size={15}/></button>
-            <button onClick={()=>selectedObjectId&&useStore.getState().alignToGround(selectedObjectId)} disabled={!hasSel}
-              className="p-1.5 bg-zinc-900 hover:bg-zinc-800 rounded text-zinc-400 hover:text-emerald-400 disabled:opacity-30 transition-colors" title="Alinear al suelo Y=0"><AlignStartVertical size={15}/></button>
+
+            <AnimatePresence>
+              {showViewportConfig && (
+                <motion.div
+                  initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="fixed z-[200] mt-1 bg-zinc-900/98 border border-zinc-700 rounded-xl shadow-2xl p-4 w-[360px] text-zinc-200 space-y-4 backdrop-blur-md"
+                  style={{
+                    top: viewportConfigRef.current?.getBoundingClientRect().bottom,
+                    left: Math.min(
+                      viewportConfigRef.current?.getBoundingClientRect().left ?? 0,
+                      window.innerWidth - 370
+                    ),
+                  }}
+                >
+                  {/* Header */}
+                  <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-2">
+                      <LayoutGrid size={16} className="text-indigo-400" />
+                      <span className="text-xs font-bold text-white uppercase tracking-wider">Configuración de Visores</span>
+                    </div>
+                    <button onClick={() => setShowViewportConfig(false)} className="text-zinc-500 hover:text-zinc-300 cursor-pointer">
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  {/* Sección 1: Layouts / Disposiciones */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Disposición de Visores</span>
+                      <span className="text-[10px] font-mono text-indigo-400 font-semibold">{viewportConfig?.preset || 'QUAD'}</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5 max-h-[190px] overflow-y-auto pr-1 custom-scrollbar">
+                      {[
+                        { id: 'QUAD', label: '4 Vistas', desc: 'Cuadrícula 2x2' },
+                        { id: 'SINGLE', label: 'Vista Única', desc: 'Visor grande' },
+                        { id: 'TOP_1_BOTTOM_2', label: '1 Arriba / 2 Abajo', desc: '1 Horiz + 2 Abajo' },
+                        { id: 'TOP_2_BOTTOM_1', label: '2 Arriba / 1 Abajo', desc: '2 Arriba + 1 Horiz' },
+                        { id: 'LEFT_1_RIGHT_2', label: '1 Izq / 2 Der', desc: '1 Vert + 2 Derecha' },
+                        { id: 'RIGHT_1_LEFT_2', label: '2 Izq / 1 Der', desc: '2 Izquierda + 1 Vert' },
+                        { id: 'SPLIT_H', label: '2 Horizontales', desc: 'Arriba / Abajo' },
+                        { id: 'SPLIT_V', label: '2 Verticales', desc: 'Izquierda / Derecha' },
+                      ].map((item) => {
+                        const isSelected = (viewportConfig?.preset || 'QUAD') === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setViewportPreset(item.id as ViewportLayoutPreset);
+                            }}
+                            className={`flex items-center gap-2 p-1.5 rounded-lg border text-left transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-indigo-950/80 border-indigo-500 text-white shadow-md'
+                                : 'bg-zinc-800/60 border-white/5 text-zinc-300 hover:bg-zinc-800 hover:border-zinc-600'
+                            }`}
+                          >
+                            {/* Diagram */}
+                            {(() => {
+                              const active = isSelected;
+                              const main = active ? 'bg-indigo-500' : 'bg-zinc-500';
+                              const sub = active ? 'bg-indigo-950 border border-indigo-500/40' : 'bg-zinc-900 border border-zinc-700';
+
+                              if (item.id === 'QUAD') return (
+                                <div className="w-6 h-5 p-0.5 grid grid-cols-2 grid-rows-2 gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`${main} rounded-[1px]`} /><div className={`${sub} rounded-[1px]`} />
+                                  <div className={`${sub} rounded-[1px]`} /><div className={`${sub} rounded-[1px]`} />
+                                </div>
+                              );
+                              if (item.id === 'SINGLE') return (
+                                <div className="w-6 h-5 p-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`w-full h-full ${main} rounded-[1px]`} />
+                                </div>
+                              );
+                              if (item.id === 'TOP_1_BOTTOM_2') return (
+                                <div className="w-6 h-5 p-0.5 flex flex-col gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`w-full h-1/2 ${main} rounded-[1px]`} />
+                                  <div className="w-full h-1/2 flex gap-0.5"><div className={`w-1/2 h-full ${sub} rounded-[1px]`} /><div className={`w-1/2 h-full ${sub} rounded-[1px]`} /></div>
+                                </div>
+                              );
+                              if (item.id === 'TOP_2_BOTTOM_1') return (
+                                <div className="w-6 h-5 p-0.5 flex flex-col gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className="w-full h-1/2 flex gap-0.5"><div className={`w-1/2 h-full ${sub} rounded-[1px]`} /><div className={`w-1/2 h-full ${sub} rounded-[1px]`} /></div>
+                                  <div className={`w-full h-1/2 ${main} rounded-[1px]`} />
+                                </div>
+                              );
+                              if (item.id === 'LEFT_1_RIGHT_2') return (
+                                <div className="w-6 h-5 p-0.5 flex gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`w-1/2 h-full ${main} rounded-[1px]`} />
+                                  <div className="w-1/2 h-full flex flex-col gap-0.5"><div className={`w-full h-1/2 ${sub} rounded-[1px]`} /><div className={`w-full h-1/2 ${sub} rounded-[1px]`} /></div>
+                                </div>
+                              );
+                              if (item.id === 'RIGHT_1_LEFT_2') return (
+                                <div className="w-6 h-5 p-0.5 flex gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className="w-1/2 h-full flex flex-col gap-0.5"><div className={`w-full h-1/2 ${sub} rounded-[1px]`} /><div className={`w-full h-1/2 ${sub} rounded-[1px]`} /></div>
+                                  <div className={`w-1/2 h-full ${main} rounded-[1px]`} />
+                                </div>
+                              );
+                              if (item.id === 'SPLIT_H') return (
+                                <div className="w-6 h-5 p-0.5 flex flex-col gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`w-full h-1/2 ${main} rounded-[1px]`} />
+                                  <div className={`w-full h-1/2 ${sub} rounded-[1px]`} />
+                                </div>
+                              );
+                              return (
+                                <div className="w-6 h-5 p-0.5 flex gap-0.5 rounded bg-zinc-950 border border-zinc-700 shrink-0">
+                                  <div className={`w-1/2 h-full ${main} rounded-[1px]`} />
+                                  <div className={`w-1/2 h-full ${sub} rounded-[1px]`} />
+                                </div>
+                              );
+                            })()}
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[10px] font-bold truncate leading-tight">{item.label}</p>
+                              <p className="text-[8px] text-zinc-400 truncate leading-tight">{item.desc}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Sección 2: Personalizar Tamaño (Drag Redimensionar) */}
+                  <div className="bg-zinc-950/70 p-2.5 rounded-lg border border-white/5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                        <Move size={13} className="text-amber-400" />
+                        Redimensionar Visores
+                      </span>
+                      <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${viewportConfig?.customResizeMode ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-zinc-800 text-zinc-400'}`}>
+                        {viewportConfig?.customResizeMode ? 'Edición Activa' : 'Fijado'}
+                      </span>
+                    </div>
+
+                    <p className="text-[10px] text-zinc-400 leading-tight">
+                      Activa para arrastrar desde el centro o divisores y ajustar el tamaño de cada visor. Al terminar, queda fijado.
+                    </p>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setCustomResizeMode(!viewportConfig?.customResizeMode)}
+                        className={`flex-1 py-1.5 px-2 rounded text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow ${
+                          viewportConfig?.customResizeMode
+                            ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-900/40 animate-pulse'
+                            : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/40'
+                        }`}
+                      >
+                        {viewportConfig?.customResizeMode ? <Check size={12} /> : <Move size={12} />}
+                        {viewportConfig?.customResizeMode ? 'Fijar Tamaño Final' : 'Personalizar Tamaño'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => resetViewportSplits()}
+                        className="py-1.5 px-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-medium transition-colors border border-white/10 cursor-pointer"
+                        title="Restablecer divisiones a 50/50"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Sección 3: Rejilla (Grid) & Snap */}
+                  <div className="space-y-2 border-t border-white/10 pt-3">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Rejilla y Ajustes (Grid & Snap)</span>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {/* Snap Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => setGridSnapEnabled(!gridSnapEnabled)}
+                        className={`flex items-center justify-between p-2 rounded-lg border transition-all text-xs font-semibold cursor-pointer ${
+                          gridSnapEnabled
+                            ? 'bg-indigo-950/80 border-indigo-500/50 text-indigo-200 shadow'
+                            : 'bg-zinc-800/80 border-white/5 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <Magnet size={14} className={gridSnapEnabled ? 'text-indigo-400' : 'text-zinc-500'} />
+                          <span>Snap</span>
+                        </div>
+                        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${gridSnapEnabled ? 'bg-indigo-500 text-white' : 'bg-zinc-700 text-zinc-400'}`}>
+                          {gridSnapEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+
+                      {/* Grid Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => useStore.getState().setShowGrid(project.showGrid !== false ? false : true)}
+                        className={`flex items-center justify-between p-2 rounded-lg border transition-all text-xs font-semibold cursor-pointer ${
+                          project.showGrid !== false
+                            ? 'bg-indigo-950/80 border-indigo-500/50 text-indigo-200 shadow'
+                            : 'bg-zinc-800/80 border-white/5 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <Grid size={14} className={project.showGrid !== false ? 'text-indigo-400' : 'text-zinc-500'} />
+                          <span>Rejilla Grid</span>
+                        </div>
+                        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${project.showGrid !== false ? 'bg-indigo-500 text-white' : 'bg-zinc-700 text-zinc-400'}`}>
+                          {project.showGrid !== false ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* Snap Step Selector */}
+                    <div className="flex items-center justify-between bg-zinc-950/50 p-2 rounded-lg border border-white/5">
+                      <span className="text-[10px] text-zinc-400 font-medium">Distancia Snap:</span>
+                      <div className="flex items-center gap-1">
+                        {[0.1, 0.25, 0.5, 1.0, 2.0].map((step) => (
+                          <button
+                            key={step}
+                            type="button"
+                            onClick={() => setSnapStep(step)}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-mono transition-colors cursor-pointer ${
+                              (viewportConfig?.snapStep ?? 0.5) === step
+                                ? 'bg-indigo-600 text-white font-bold'
+                                : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                            }`}
+                          >
+                            {step}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Alignment Actions */}
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => selectedObjectId && useStore.getState().alignToGrid(selectedObjectId)}
+                        disabled={!hasSel}
+                        className="flex items-center justify-center gap-1.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-200 rounded text-[10px] font-medium transition-colors border border-white/5 cursor-pointer"
+                      >
+                        <Magnet size={12} className="text-indigo-400" />
+                        Alinear a Rejilla
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => selectedObjectId && useStore.getState().alignToGround(selectedObjectId)}
+                        disabled={!hasSel}
+                        className="flex items-center justify-center gap-1.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 text-zinc-200 rounded text-[10px] font-medium transition-colors border border-white/5 cursor-pointer"
+                      >
+                        <AlignStartVertical size={12} className="text-emerald-400" />
+                        Alinear al Suelo Y=0
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
           <Sep/>
 

@@ -63,7 +63,8 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
 
     meshData.faces.forEach((face, fIdx) => {
       const faceIndices: number[] = [];
-      face.indices.forEach((posIdx, i) => {
+      const rawIndices = face.indices || ((face as any).a !== undefined ? [(face as any).a, (face as any).b, (face as any).c] : []);
+      rawIndices.forEach((posIdx, i) => {
         const uv = face.uvs?.[i] || [0, 0];
         const key = isSmooth
           ? `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`
@@ -72,9 +73,13 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
           faceIndices.push(vertMap.get(key)!);
         } else {
           const newIdx = finalPositions.length / 3;
-          const v = meshData.vertices[posIdx];
+          const vRaw = meshData.vertices[posIdx];
+          if (!vRaw) return;
+          const vx = Array.isArray(vRaw) ? vRaw[0] : (vRaw as any).x ?? 0;
+          const vy = Array.isArray(vRaw) ? vRaw[1] : (vRaw as any).y ?? 0;
+          const vz = Array.isArray(vRaw) ? vRaw[2] : (vRaw as any).z ?? 0;
           const off = obj.vertexOffsets?.[posIdx] || [0, 0, 0];
-          finalPositions.push(v[0] + off[0], v[1] + off[1], v[2] + off[2]);
+          finalPositions.push(vx + off[0], vy + off[1], vz + off[2]);
           finalUvs.push(...uv);
           vertMap.set(key, newIdx);
           faceIndices.push(newIdx);
@@ -86,7 +91,9 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
     });
 
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPositions, 3));
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUvs, 2));
+    const uvAttr = new THREE.Float32BufferAttribute(finalUvs, 2);
+    geometry.setAttribute('uv', uvAttr);
+    geometry.setAttribute('uv2', uvAttr);
     geometry.setIndex(indices);
     if (isSmooth) {
       computeSmoothNormalsByPosition(geometry, Math.PI / 3);
