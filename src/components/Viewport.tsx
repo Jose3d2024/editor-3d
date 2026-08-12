@@ -94,7 +94,7 @@ const computeGizmoLayout = (
   if (projected.z > 1 || projected.z < -1) return null;
   const cx = (projected.x * 0.5 + 0.5) * w;
   const cy = (-projected.y * 0.5 + 0.5) * h;
-  const AXIS_LEN = Math.min(w, h) * 0.16;
+  const AXIS_LEN = Math.max(75, Math.min(Math.min(w, h) * 0.20, 120));
 
   const eyeDir = camera.position.clone().sub(gizmoPos).normalize();
 
@@ -111,9 +111,9 @@ const computeGizmoLayout = (
   }
 
   const axes = [
-    { axis: 'X', vec: vX, color: '#ff3333' },
-    { axis: 'Y', vec: vY, color: '#33ff33' },
-    { axis: 'Z', vec: vZ, color: '#4488ff' }
+    { axis: 'X', vec: vX, color: '#ef4444' },
+    { axis: 'Y', vec: vY, color: '#22c55e' },
+    { axis: 'Z', vec: vZ, color: '#3b82f6' }
   ];
 
   const dirs: Record<string, { nx: number; ny: number; color: string; sign: number; dot: number; worldDir: THREE.Vector3 }> = {};
@@ -141,13 +141,13 @@ const computeGizmoLayout = (
   const rotArcs: Record<string, { pts: { x: number; y: number }[]; handlePt: { x: number; y: number }; arcColor: string; sphereColor: string }> = {};
 
   const arcConfigs = [
-    { rotAxis: 'Z', norm: vZ, color: '#44aaff', sphereColor: '#55ccff' },
-    { rotAxis: 'X', norm: vX, color: '#44ff77', sphereColor: '#66ff88' },
-    { rotAxis: 'Y', norm: vY, color: '#ff44aa', sphereColor: '#ff66bb' }
+    { rotAxis: 'Z', norm: vZ, color: '#3b82f6', sphereColor: '#60a5fa' },
+    { rotAxis: 'X', norm: vX, color: '#ef4444', sphereColor: '#f87171' },
+    { rotAxis: 'Y', norm: vY, color: '#22c55e', sphereColor: '#4ade80' }
   ];
 
   const dist = camera.position.distanceTo(gizmoPos);
-  const radius3D = Math.max(0.1, dist * 0.12 * 0.85);
+  const radius3D = Math.max(0.15, dist * 0.12 * 1.15);
 
   for (const { rotAxis, norm, color, sphereColor } of arcConfigs) {
     let projEye = eyeDir.clone().sub(norm.clone().multiplyScalar(eyeDir.dot(norm)));
@@ -3174,17 +3174,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const distCenter = Math.sqrt((mx - cx)**2 + (my - cy)**2);
 
-      // 1. Center FREE handle
-      if (distCenter < 16) return 'FREE';
+      // 1. Center FREE handle (small clean dot)
+      if (distCenter < 8) return 'FREE';
 
       // 2. Check Scale Cubes
       if (transformMode === 'scale' || transformMode === 'universal') {
+        const scaleDistRatio = transformMode === 'universal' ? 1.05 : 0.9;
         for (const axis of ['X', 'Y', 'Z']) {
           const d = dirs[axis];
           if (!d) continue;
-          const cubeX = cx + d.nx * 0.85;
-          const cubeY = cy + d.ny * 0.85;
-          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 14) {
+          const cubeX = cx + d.nx * scaleDistRatio;
+          const cubeY = cy + d.ny * scaleDistRatio;
+          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 15) {
             return `SCALE_${axis}`;
           }
         }
@@ -3195,11 +3196,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         for (const rotAxis of ['Z', 'X', 'Y']) {
           const arc = rotArcs[rotAxis];
           if (!arc) continue;
-          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 16) {
+          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 15) {
             return `ROT_${rotAxis}`;
           }
           for (const p of arc.pts) {
-            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 12) {
+            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 11) {
               return `ROT_${rotAxis}`;
             }
           }
@@ -3207,15 +3208,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // 4. Check Axis Translation Arrows / Shafts
-      for (const axis of ['X', 'Y', 'Z']) {
-        const d = dirs[axis];
-        if (!d) continue;
-        const tipX = cx + d.nx, tipY = cy + d.ny;
-        const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
-        if (!bLen) continue;
-        const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
-        const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
-        if (dist < 18) return axis;
+      if (transformMode === 'translate' || transformMode === 'universal') {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const tipX = cx + d.nx, tipY = cy + d.ny;
+          const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
+          if (!bLen) continue;
+          const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
+          const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
+          if (dist < 12) return axis;
+        }
       }
 
       // 5. Check 2D Translation Planes
@@ -3224,11 +3227,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return false;
           const poly = [
-            {x: cx + d1.nx*0.15, y: cy + d1.ny*0.15},
-            {x: cx + d1.nx*0.4, y: cy + d1.ny*0.4},
-            {x: cx + (d1.nx + d2.nx)*0.4, y: cy + (d1.ny + d2.ny)*0.4},
-            {x: cx + d2.nx*0.4, y: cy + d2.ny*0.4},
-            {x: cx + d2.nx*0.15, y: cy + d2.ny*0.15}
+            {x: cx + d1.nx*0.2, y: cy + d1.ny*0.2},
+            {x: cx + d1.nx*0.42, y: cy + d1.ny*0.42},
+            {x: cx + (d1.nx + d2.nx)*0.42, y: cy + (d1.ny + d2.ny)*0.42},
+            {x: cx + d2.nx*0.42, y: cy + d2.ny*0.42},
+            {x: cx + d2.nx*0.2, y: cy + d2.ny*0.2}
           ];
           let inside = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -3246,7 +3249,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
       // 6. Outer View Ring
       const OUTER_R = AXIS_LEN * 1.15;
-      if (Math.abs(distCenter - OUTER_R) < 12) {
+      if (Math.abs(distCenter - OUTER_R) < 10) {
         return transformMode === 'scale' ? 'SCALE_UNIFORM' : 'ROT_VIEW';
       }
 
@@ -3429,16 +3432,55 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             gizmoStateRef.current.startScale=[..._interp.scale];
           }
 
-          // Store start transforms for all selected objects
+          // Store handle world direction & start transforms for all selected objects
+          const cam = cameraRef.current;
+          let visVecX = new THREE.Vector3(1, 0, 0);
+          let visVecY = new THREE.Vector3(0, 1, 0);
+          let visVecZ = new THREE.Vector3(0, 0, 1);
+
+          if (transformSpace === 'local' && selObj && selObj.transform) {
+            const euler = new THREE.Euler(selObj.transform.rotation[0], selObj.transform.rotation[1], selObj.transform.rotation[2], 'XYZ');
+            const q = new THREE.Quaternion().setFromEuler(euler);
+            visVecX.applyQuaternion(q);
+            visVecY.applyQuaternion(q);
+            visVecZ.applyQuaternion(q);
+          }
+
+          if (cam) {
+            const eyeDir = cam.position.clone().sub(gizmoWorldPos).normalize();
+            if (eyeDir.dot(visVecX) < -0.05) visVecX.negate();
+            if (eyeDir.dot(visVecY) < -0.05) visVecY.negate();
+            if (eyeDir.dot(visVecZ) < -0.05) visVecZ.negate();
+          }
+
+          const handleWorldDir = { X: visVecX, Y: visVecY, Z: visVecZ };
+
           const startTransforms: Record<string, any> = {};
           selectedObjectIds.forEach(id => {
             const o = projectRef.current.objects.find(obj => obj.id === id);
             if (o) {
               const interp = getInterpolatedTransform(o, currentTime);
+
+              const localSize: [number, number, number] = [1, 1, 1];
+              const mesh = primitivesGroupRef.current?.children.find((ch: any) => ch.userData.id === id) as THREE.Mesh | undefined;
+              if (mesh && mesh.geometry) {
+                if (!mesh.geometry.boundingBox) {
+                  mesh.geometry.computeBoundingBox();
+                }
+                if (mesh.geometry.boundingBox) {
+                  const box = mesh.geometry.boundingBox;
+                  localSize[0] = Math.max(0.001, box.max.x - box.min.x);
+                  localSize[1] = Math.max(0.001, box.max.y - box.min.y);
+                  localSize[2] = Math.max(0.001, box.max.z - box.min.z);
+                }
+              }
+
               startTransforms[id] = {
                 position: [...interp.position],
                 rotation: [...interp.rotation],
-                scale: [...interp.scale]
+                scale: [...interp.scale],
+                localSize,
+                handleWorldDir
               };
             }
           });
@@ -3863,13 +3905,43 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const start = gs.startTransforms[id];
               if (!start) return {};
               const s = [...start.scale] as [number,number,number];
+              const newScaleX = Math.max(0.01, s[0] * scaleX);
+              const newScaleY = Math.max(0.01, s[1] * scaleY);
+              const newScaleZ = Math.max(0.01, s[2] * scaleZ);
+
+              let newPosition = [...start.position] as [number, number, number];
+
+              if (scaleAxis !== 'UNIFORM' && scaleAxis !== 'FREE' && start.localSize && start.handleWorldDir) {
+                const shift = new THREE.Vector3(0, 0, 0);
+
+                if (scaleAxis === 'X' || scaleAxis === 'XY' || scaleAxis === 'XZ') {
+                  const deltaScaleX = newScaleX - s[0];
+                  shift.addScaledVector(start.handleWorldDir.X, (deltaScaleX * start.localSize[0]) / 2);
+                }
+                if (scaleAxis === 'Y' || scaleAxis === 'XY' || scaleAxis === 'YZ') {
+                  const deltaScaleY = newScaleY - s[1];
+                  shift.addScaledVector(start.handleWorldDir.Y, (deltaScaleY * start.localSize[1]) / 2);
+                }
+                if (scaleAxis === 'Z' || scaleAxis === 'XZ' || scaleAxis === 'YZ') {
+                  const deltaScaleZ = newScaleZ - s[2];
+                  shift.addScaledVector(start.handleWorldDir.Z, (deltaScaleZ * start.localSize[2]) / 2);
+                }
+
+                newPosition = [
+                  start.position[0] + shift.x,
+                  start.position[1] + shift.y,
+                  start.position[2] + shift.z
+                ];
+              }
+
               return {
                 transform: {
                   ...start,
+                  position: newPosition,
                   scale: [
-                    Math.max(0.01, s[0] * scaleX),
-                    Math.max(0.01, s[1] * scaleY),
-                    Math.max(0.01, s[2] * scaleZ)
+                    newScaleX,
+                    newScaleY,
+                    newScaleZ
                   ]
                 }
               };
@@ -4823,85 +4895,55 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const gs = gizmoStateRef.current;
 
-      // Draw Axis Lines & Arrows
-      for (const axis of ['X', 'Y', 'Z']) {
-        const d = dirs[axis];
-        if (!d) continue;
-        const tipX = cx + d.nx, tipY = cy + d.ny;
-        const isHov = gs.hoveredAxis === axis || gs.activeAxis === axis;
-        ctx.save();
-        ctx.globalAlpha = isHov ? 1 : 0.9;
-        ctx.strokeStyle = d.color;
-        ctx.lineWidth = isHov ? 2.5 : 1.4;
-        ctx.lineCap = 'round';
-        ctx.shadowColor = d.color;
-        ctx.shadowBlur = isHov ? 6 : 2;
+      const showTranslate = transformMode === 'translate' || transformMode === 'universal';
+      const showRotate = transformMode === 'rotate' || transformMode === 'universal';
+      const showScale = transformMode === 'scale' || transformMode === 'universal';
+      const showPlanes = transformMode === 'translate' || transformMode === 'universal';
 
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(tipX, tipY);
-        ctx.stroke();
-
-        const angle = Math.atan2(d.ny, d.nx);
-        const al = 8;
-        ctx.beginPath();
-        ctx.moveTo(tipX, tipY);
-        ctx.lineTo(tipX - al * Math.cos(angle - 0.4), tipY - al * Math.sin(angle - 0.4));
-        ctx.lineTo(tipX - al * Math.cos(angle + 0.4), tipY - al * Math.sin(angle + 0.4));
-        ctx.closePath();
-        ctx.fillStyle = d.color;
-        ctx.fill();
-
-        ctx.shadowBlur = 0;
-        ctx.font = 'bold 11px monospace';
-        ctx.fillStyle = d.color;
-        ctx.fillText(axis, tipX + 5, tipY - 5);
-        ctx.restore();
-      }
-
-      // Draw 2D translation planes
-      if (transformMode === 'translate' || transformMode === 'universal' || transformMode === 'scale') {
+      // 1. Draw 2D translation corner plane handles (small, neat, non-cluttering)
+      if (showPlanes) {
         const drawPlane = (a1: string, a2: string, planeName: string, color: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return;
           const isHov = gs.hoveredAxis === planeName || gs.activeAxis === planeName;
           ctx.save();
-          ctx.globalAlpha = isHov ? 0.6 : 0.25;
+          ctx.globalAlpha = isHov ? 0.5 : 0.18;
           ctx.fillStyle = color;
           ctx.beginPath();
-          ctx.moveTo(cx + d1.nx * 0.15, cy + d1.ny * 0.15);
-          ctx.lineTo(cx + d1.nx * 0.4, cy + d1.ny * 0.4);
-          ctx.lineTo(cx + (d1.nx + d2.nx) * 0.4, cy + (d1.ny + d2.ny) * 0.4);
-          ctx.lineTo(cx + d2.nx * 0.4, cy + d2.ny * 0.4);
-          ctx.lineTo(cx + d2.nx * 0.15, cy + d2.ny * 0.15);
+          const p1x = cx + d1.nx * 0.2, p1y = cy + d1.ny * 0.2;
+          const p2x = cx + d1.nx * 0.42, p2y = cy + d1.ny * 0.42;
+          const p3x = cx + (d1.nx + d2.nx) * 0.42, p3y = cy + (d1.ny + d2.ny) * 0.42;
+          const p4x = cx + d2.nx * 0.42, p4y = cy + d2.ny * 0.42;
+          const p5x = cx + d2.nx * 0.2, p5y = cy + d2.ny * 0.2;
+          ctx.moveTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+          ctx.lineTo(p3x, p3y);
+          ctx.lineTo(p4x, p4y);
+          ctx.lineTo(p5x, p5y);
           ctx.closePath();
           ctx.fill();
-          if (isHov) {
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-          }
+          ctx.strokeStyle = isHov ? '#ffffff' : color;
+          ctx.lineWidth = 1.0;
+          ctx.stroke();
           ctx.restore();
         };
 
-        drawPlane('X', 'Y', 'XY', '#ffff33');
-        drawPlane('Y', 'Z', 'YZ', '#33ffff');
-        drawPlane('X', 'Z', 'XZ', '#ff33ff');
+        drawPlane('X', 'Y', 'XY', '#f59e0b');
+        drawPlane('Y', 'Z', 'YZ', '#06b6d4');
+        drawPlane('X', 'Z', 'XZ', '#ec4899');
       }
 
-      // Draw Rotation Arcs (camera-facing 3D arcs)
-      if (transformMode === 'rotate' || transformMode === 'universal') {
+      // 2. Draw Rotation Arcs (fine 1.2px arcs, camera-facing)
+      if (showRotate) {
         for (const rotAxis of ['Z', 'X', 'Y']) {
           const arc = rotArcs[rotAxis];
           if (!arc || !arc.pts.length) continue;
           const isHov = gs.hoveredAxis === `ROT_${rotAxis}` || gs.activeAxis === `ROT_${rotAxis}`;
 
           ctx.save();
-          ctx.globalAlpha = isHov ? 1 : 0.85;
+          ctx.globalAlpha = isHov ? 1.0 : 0.85;
           ctx.strokeStyle = arc.arcColor;
-          ctx.lineWidth = isHov ? 2.2 : 1.3;
-          ctx.shadowColor = arc.arcColor;
-          ctx.shadowBlur = isHov ? 8 : 2;
+          ctx.lineWidth = isHov ? 2.0 : 1.2;
 
           ctx.beginPath();
           ctx.moveTo(arc.pts[0].x, arc.pts[0].y);
@@ -4910,11 +4952,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           }
           ctx.stroke();
 
-          // Draw spherical node handle on the frontmost point of the arc
+          // Spherical node handle on arc frontmost point
           const nodeR = isHov ? 6.5 : 4.5;
           ctx.fillStyle = arc.sphereColor;
-          ctx.shadowColor = arc.sphereColor;
-          ctx.shadowBlur = isHov ? 10 : 4;
           ctx.beginPath();
           ctx.arc(arc.handlePt.x, arc.handlePt.y, nodeR, 0, Math.PI * 2);
           ctx.fill();
@@ -4926,20 +4966,65 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       }
 
-      // Draw Scale Cubes
-      if (transformMode === 'scale' || transformMode === 'universal') {
+      // 3. Draw Axis Lines & Shafts (Translate / Scale)
+      if (showTranslate || showScale) {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const tipX = cx + d.nx, tipY = cy + d.ny;
+          const isHov = gs.hoveredAxis === axis || gs.activeAxis === axis;
+
+          ctx.save();
+          ctx.globalAlpha = isHov ? 1.0 : 0.9;
+          ctx.strokeStyle = d.color;
+          ctx.lineWidth = isHov ? 2.0 : 1.2;
+          ctx.lineCap = 'round';
+
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(tipX, tipY);
+          ctx.stroke();
+
+          // Arrowheads for Translate / Universal
+          if (showTranslate) {
+            const angle = Math.atan2(d.ny, d.nx);
+            const al = 7;
+            ctx.beginPath();
+            ctx.moveTo(tipX, tipY);
+            ctx.lineTo(tipX - al * Math.cos(angle - 0.35), tipY - al * Math.sin(angle - 0.35));
+            ctx.lineTo(tipX - al * Math.cos(angle + 0.35), tipY - al * Math.sin(angle + 0.35));
+            ctx.closePath();
+            ctx.fillStyle = d.color;
+            ctx.fill();
+          }
+
+          // Clean labels
+          const len = Math.sqrt(d.nx * d.nx + d.ny * d.ny);
+          if (len > 0) {
+            const nxNorm = d.nx / len;
+            const nyNorm = d.ny / len;
+            ctx.font = 'bold 10px sans-serif';
+            ctx.fillStyle = isHov ? '#ffffff' : d.color;
+            ctx.fillText(axis, tipX + nxNorm * 8 - 3, tipY + nyNorm * 8 + 3);
+          }
+
+          ctx.restore();
+        }
+      }
+
+      // 4. Draw Scale Cubes
+      if (showScale) {
         for (const axis of ['X', 'Y', 'Z']) {
           const d = dirs[axis];
           if (!d) continue;
           const scaleName = `SCALE_${axis}`;
           const isHov = gs.hoveredAxis === scaleName || gs.activeAxis === scaleName || (transformMode === 'scale' && (gs.hoveredAxis === axis || gs.activeAxis === axis));
-          const cubeX = cx + d.nx * 0.85;
-          const cubeY = cy + d.ny * 0.85;
-          const sz = isHov ? 8 : 5.5;
+          const scaleDistRatio = transformMode === 'universal' ? 1.05 : 0.9;
+          const cubeX = cx + d.nx * scaleDistRatio;
+          const cubeY = cy + d.ny * scaleDistRatio;
+          const sz = isHov ? 10 : 7.5;
           ctx.save();
           ctx.fillStyle = d.color;
-          ctx.shadowColor = d.color;
-          ctx.shadowBlur = isHov ? 6 : 2;
           ctx.fillRect(cubeX - sz/2, cubeY - sz/2, sz, sz);
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = 1;
@@ -4948,28 +5033,29 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       }
 
-      // Draw Outer Trackball Ring
+      // 5. Draw Outer Trackball Ring
       const OUTER_R = AXIS_LEN * 1.15;
       const isOuterHov = gs.hoveredAxis === 'ROT_VIEW' || gs.activeAxis === 'ROT_VIEW' || gs.hoveredAxis === 'SCALE_UNIFORM' || gs.activeAxis === 'SCALE_UNIFORM';
       ctx.save();
-      ctx.globalAlpha = isOuterHov ? 0.9 : 0.35;
+      ctx.globalAlpha = isOuterHov ? 0.85 : 0.25;
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = isOuterHov ? 1.8 : 0.9;
-      ctx.setLineDash([4, 4]);
+      ctx.lineWidth = isOuterHov ? 1.5 : 0.9;
+      ctx.setLineDash([3, 3]);
       ctx.beginPath();
       ctx.arc(cx, cy, OUTER_R, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      // Draw center FREE handle
+      // 6. Draw center FREE handle
       const isFreeHov = gs.hoveredAxis === 'FREE' || gs.activeAxis === 'FREE';
       ctx.save();
       ctx.beginPath();
-      ctx.arc(cx, cy, isFreeHov ? 7 : 4.5, 0, Math.PI * 2);
-      ctx.fillStyle = isFreeHov ? '#ffffff' : '#dddddd';
-      ctx.shadowColor = '#ffffff';
-      ctx.shadowBlur = isFreeHov ? 10 : 3;
+      ctx.arc(cx, cy, isFreeHov ? 5.5 : 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = isFreeHov ? '#ffffff' : '#e4e4e7';
       ctx.fill();
+      ctx.strokeStyle = '#18181b';
+      ctx.lineWidth = 1;
+      ctx.stroke();
       ctx.restore();
     };
 
