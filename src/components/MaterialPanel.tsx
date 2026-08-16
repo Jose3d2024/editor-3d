@@ -23,7 +23,20 @@ import {
   X,
   Search,
   Sparkles,
-  Grid
+  Grid,
+  Disc,
+  Feather,
+  Shield,
+  Gem,
+  Glasses,
+  Flame,
+  ChevronDown,
+  ChevronRight,
+  Sliders,
+  RotateCw,
+  Copy,
+  Image as ImageIcon,
+  Check
 } from 'lucide-react';
 import { createORMMap } from '../utils/materialUtils';
 import { applyUVWMapping, generateUVs } from '../utils/modifiers';
@@ -38,6 +51,165 @@ import {
   generateAllThumbnailsAsync,
   ProceduralMaterial 
 } from '../utils/proceduralTextures';
+
+// ── Presets Físicos Calibrados de Acceso Rápido ────────────────────────────
+const PHYSICALLY_CALIBRATED_PRESETS: {
+  name: string;
+  category: string;
+  icon: string;
+  description: string;
+  apply: Partial<MaterialData>;
+}[] = [
+  // Metales PBR
+  {
+    name: 'Oro 24K',
+    category: 'Metales',
+    icon: '🪙',
+    description: 'Metal noble reflectante calibrado',
+    apply: { color: '#ffd700', metalness: 1.0, roughness: 0.08, specularIntensity: 1.0, clearcoat: 0, transmission: 0, sheen: 0, anisotropy: 0, iridescence: 0 }
+  },
+  {
+    name: 'Cobre Puro',
+    category: 'Metales',
+    icon: '🥉',
+    description: 'Cobre pulido con reflectancia física',
+    apply: { color: '#f5957a', metalness: 1.0, roughness: 0.15, specularIntensity: 1.0, transmission: 0 }
+  },
+  {
+    name: 'Acero Inox Cepillado',
+    category: 'Metales',
+    icon: '⚙️',
+    description: 'Anisotropía con reflejos estirados',
+    apply: { color: '#e5e7eb', metalness: 0.95, roughness: 0.28, anisotropy: 0.85, anisotropyRotation: 0, transmission: 0 }
+  },
+  {
+    name: 'Cromo Espejo',
+    category: 'Metales',
+    icon: '🪞',
+    description: 'Reflexión pura sin difusión',
+    apply: { color: '#ffffff', metalness: 1.0, roughness: 0.02, clearcoat: 0, transmission: 0 }
+  },
+  {
+    name: 'Disco Vinilo / Radial',
+    category: 'Metales',
+    icon: '💿',
+    description: 'Surcos circulares con anisotropía a 90°',
+    apply: { color: '#18181b', metalness: 0.75, roughness: 0.3, anisotropy: 1.0, anisotropyRotation: 90, transmission: 0 }
+  },
+
+  // Vidrios & Gemas
+  {
+    name: 'Vidrio Óptico Claro',
+    category: 'Vidrio & Gemas',
+    icon: '🪟',
+    description: 'Vidrio crown con IOR 1.52',
+    apply: { color: '#ffffff', roughness: 0.02, metalness: 0.0, transmission: 1.0, ior: 1.52, thickness: 1.2, transparent: true, opacity: 1, attenuationDistance: 5.0, attenuationColor: '#ffffff' }
+  },
+  {
+    name: 'Vidrio Esmerilado',
+    category: 'Vidrio & Gemas',
+    icon: '🧊',
+    description: 'Vidrio arenado mate difuso',
+    apply: { color: '#f8fafc', roughness: 0.38, metalness: 0.0, transmission: 0.95, ior: 1.50, thickness: 1.0, transparent: true, opacity: 1 }
+  },
+  {
+    name: 'Diamante Puro',
+    category: 'Vidrio & Gemas',
+    icon: '💎',
+    description: 'IOR 2.42 y dispersión prismática',
+    apply: { color: '#ffffff', roughness: 0.01, metalness: 0.0, transmission: 1.0, ior: 2.42, dispersion: 0.08, thickness: 1.5, transparent: true }
+  },
+  {
+    name: 'Rubí Carmesí',
+    category: 'Vidrio & Gemas',
+    icon: '🩸',
+    description: 'Corindón con absorción roja',
+    apply: { color: '#ffffff', roughness: 0.03, transmission: 0.92, ior: 1.77, attenuationColor: '#e11d48', attenuationDistance: 0.6, thickness: 2.0, transparent: true }
+  },
+  {
+    name: 'Esmeralda Verde',
+    category: 'Vidrio & Gemas',
+    icon: '💚',
+    description: 'Berilo translúcido verde',
+    apply: { color: '#ffffff', roughness: 0.04, transmission: 0.9, ior: 1.58, attenuationColor: '#059669', attenuationDistance: 0.5, thickness: 2.0, transparent: true }
+  },
+  {
+    name: 'Ámbar Fósil',
+    category: 'Vidrio & Gemas',
+    icon: '🍯',
+    description: 'Resina cálida con absorción ámbar',
+    apply: { color: '#ffffff', roughness: 0.08, transmission: 0.85, ior: 1.55, attenuationColor: '#f59e0b', attenuationDistance: 0.8, thickness: 1.5, transparent: true }
+  },
+  {
+    name: 'Agua Cristalina',
+    category: 'Vidrio & Gemas',
+    icon: '💧',
+    description: 'Líquido diáfano IOR 1.333',
+    apply: { color: '#f0f9ff', roughness: 0.02, metalness: 0.0, transmission: 1.0, ior: 1.333, thickness: 2.0, transparent: true }
+  },
+
+  // Lacados & Pinturas
+  {
+    name: 'Pintura Candy Red',
+    category: 'Lacados & Pinturas',
+    icon: '🏎️',
+    description: 'Metalizado con laca de alto brillo',
+    apply: { color: '#c8001a', metalness: 0.65, roughness: 0.25, clearcoat: 1.0, clearcoatRoughness: 0.04, specularIntensity: 1.2, transmission: 0 }
+  },
+  {
+    name: 'Fibra Carbono Lacada',
+    category: 'Lacados & Pinturas',
+    icon: '🏁',
+    description: 'Compuesto oscuro con barniz epoxi',
+    apply: { color: '#18181b', metalness: 0.15, roughness: 0.45, clearcoat: 1.0, clearcoatRoughness: 0.06, anisotropy: 0.6, transmission: 0 }
+  },
+  {
+    name: 'Cerámica Esmaltada',
+    category: 'Lacados & Pinturas',
+    icon: '🏺',
+    description: 'Porcelana con esmalte vítreo',
+    apply: { color: '#fafafa', metalness: 0.0, roughness: 0.18, clearcoat: 0.95, clearcoatRoughness: 0.05, ior: 1.52, transmission: 0 }
+  },
+
+  // Textiles & Terciopelos
+  {
+    name: 'Terciopelo Carmesí',
+    category: 'Textiles',
+    icon: '🧣',
+    description: 'Retro-reflexión de microvellosidades',
+    apply: { color: '#7f1d1d', roughness: 0.85, metalness: 0.0, sheen: 1.0, sheenRoughness: 0.35, sheenColor: '#f43f5e', transmission: 0 }
+  },
+  {
+    name: 'Seda Azul Noche',
+    category: 'Textiles',
+    icon: '👘',
+    description: 'Tejido lustroso con sheen azul hielo',
+    apply: { color: '#1e3a8a', roughness: 0.4, metalness: 0.05, sheen: 0.85, sheenRoughness: 0.3, sheenColor: '#93c5fd', anisotropy: 0.5, transmission: 0 }
+  },
+
+  // Especiales / Iridiscencia
+  {
+    name: 'Pompa de Jabón',
+    category: 'Especiales',
+    icon: '🫧',
+    description: 'Interferencia de película fina',
+    apply: { color: '#ffffff', roughness: 0.02, metalness: 0.0, transmission: 0.98, opacity: 0.35, transparent: true, ior: 1.15, iridescence: 1.0, iridescenceIOR: 1.33, iridescenceThicknessRange: [100, 400] }
+  },
+  {
+    name: 'Mancha Petróleo',
+    category: 'Especiales',
+    icon: '🛢️',
+    description: 'Capa delgada con efecto tornasol',
+    apply: { color: '#111827', roughness: 0.12, metalness: 0.4, iridescence: 1.0, iridescenceIOR: 1.6, iridescenceThicknessRange: [150, 600], transmission: 0 }
+  },
+  {
+    name: 'Nácar / Perla',
+    category: 'Especiales',
+    icon: '🦪',
+    description: 'Reflejos irisados nacarados',
+    apply: { color: '#fdfcfb', roughness: 0.22, metalness: 0.05, sheen: 0.45, sheenColor: '#fbcfe8', iridescence: 0.8, iridescenceIOR: 1.5, iridescenceThicknessRange: [200, 500], transmission: 0 }
+  }
+];
 
 // ── Modal de importación de pack PBR ────────────────────────────────────────
 const PBRImportModal: React.FC<{
@@ -312,12 +484,19 @@ export const MaterialPanel: React.FC = () => {
   const activeMaterialId = selectedObject?.materialId;
   
   const [editingMaterialId, setEditingMaterialId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'library' | 'edit'>('library');
+  const [activeTab, setActiveTab] = useState<'library' | 'textures' | 'edit'>('library');
   const [showPBRImport, setShowPBRImport] = useState(false);
 
   // Categorías y filtrado de la librería procedimental
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+
+  // Estado para la Librería de Texturas integrada
+  const [customTextures, setCustomTextures] = useState<Array<{ id: string; name: string; url: string; type: string }>>([]);
+  const [textureSearch, setTextureSearch] = useState<string>('');
+  const [textureCategory, setTextureCategory] = useState<string>('all');
+  const [textureSlotTarget, setTextureSlotTarget] = useState<'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'aoMap' | 'displacementMap'>('map');
+  const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
 
   const [proceduralThumbnails, setProceduralThumbnails] = useState<Map<string, string>>(() => generateAllThumbnails());
 
@@ -470,7 +649,7 @@ export const MaterialPanel: React.FC = () => {
     setActiveTab('edit');
   };
 
-  const onDropTexture = useCallback(async (e: React.DragEvent, type: 'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'aoMap' | 'ormMap') => {
+  const onDropTexture = useCallback(async (e: React.DragEvent, type: keyof MaterialData) => {
     e.preventDefault();
     if (!activeMaterial) return;
 
@@ -484,6 +663,25 @@ export const MaterialPanel: React.FC = () => {
     };
     reader.readAsDataURL(file);
   }, [activeMaterial, updateMaterial]);
+
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    presets: true,
+    basic: true,
+    normal: true,
+    glass: true,
+    clearcoat: false,
+    sheen: false,
+    anisotropy: false,
+    iridescence: false,
+    emissive: false,
+    filters: false,
+    projection: false,
+    maps: true
+  });
+
+  const toggleSection = (key: string) => {
+    setOpenSections(prev => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const handleAutoUVProjection = useCallback((targetMapping?: string) => {
     if (!activeMaterial) return;
@@ -500,18 +698,137 @@ export const MaterialPanel: React.FC = () => {
 
     if (objectsToUpdate.length === 0) return;
 
+    const angleThresholdDeg = activeMaterial.uvAngleThreshold ?? 66;
+    const islandMargin = activeMaterial.uvIslandMargin ?? 0.02;
+    const relaxIterations = activeMaterial.uvRelaxIterations ?? 6;
+
     objectsToUpdate.forEach(obj => {
       if (obj.vertices && obj.faces && obj.faces.length > 0) {
-        let meshData: { vertices: any[]; faces: any[] } = { vertices: obj.vertices, faces: obj.faces.map(f => ({ ...f, uvs: undefined })) };
-        if (mapping === 'UV' || mapping === 'PLANAR') {
-          meshData = generateUVs(meshData as any);
-        } else {
-          meshData = applyUVWMapping(meshData as any, mapping);
-        }
+        const meshData = applyUVWMapping(
+          { vertices: obj.vertices, faces: obj.faces.map(f => ({ ...f, uvs: undefined })) },
+          mapping,
+          { angleThresholdDeg, islandMargin, relaxIterations }
+        );
         state.updateObject(obj.id, { vertices: meshData.vertices, faces: meshData.faces });
       }
     });
   }, [activeMaterial, selectedObjectId, selectedObjectIds]);
+
+  // Generar texturas procedimentales + texturas por defecto + texturas del proyecto + texturas de usuario
+  const proceduralTexturesList = useMemo(() => {
+    const list: Array<{ id: string; name: string; type: string; category: string; url: string; source: string }> = [];
+
+    // 1. Procedural textures from material generators
+    const baseMats = ['wood', 'marble', 'rusted_iron', 'concrete', 'tiles', 'brick_wall', 'carbon_fiber', 'leather', 'brushed_metal', 'gold_foil'];
+    baseMats.forEach(baseId => {
+      const matDef = MATERIAL_LIBRARY.find(m => m.id === baseId);
+      const name = matDef?.name || baseId;
+      const maps = generateMaterial(baseId, 256, 256, { rust: 0, scratches: 0, dirt: 0 });
+      if (maps) {
+        if (maps.albedo) list.push({ id: `${baseId}_albedo`, name: `${name} (Albedo / Color)`, type: 'albedo', category: 'albedo', url: maps.albedo, source: 'Procedimental' });
+        if (maps.normal) list.push({ id: `${baseId}_normal`, name: `${name} (Normal Map)`, type: 'normal', category: 'normal', url: maps.normal, source: 'Procedimental' });
+        if (maps.roughness) list.push({ id: `${baseId}_roughness`, name: `${name} (Rugosidad)`, type: 'roughness', category: 'roughness', url: maps.roughness, source: 'Procedimental' });
+        if (maps.metallic) list.push({ id: `${baseId}_metallic`, name: `${name} (Metálico)`, type: 'metalness', category: 'metalness', url: maps.metallic, source: 'Procedimental' });
+        if (maps.ao) list.push({ id: `${baseId}_ao`, name: `${name} (Oclusión / AO)`, type: 'ao', category: 'ao', url: maps.ao, source: 'Procedimental' });
+        if (maps.displacement) list.push({ id: `${baseId}_disp`, name: `${name} (Desplazamiento)`, type: 'displacement', category: 'displacement', url: maps.displacement, source: 'Procedimental' });
+      }
+    });
+
+    // 2. UV Calibration test textures
+    const uvGridCanvas = document.createElement('canvas');
+    uvGridCanvas.width = 256; uvGridCanvas.height = 256;
+    const uctx = uvGridCanvas.getContext('2d');
+    if (uctx) {
+      uctx.fillStyle = '#1e1e24'; uctx.fillRect(0,0,256,256);
+      uctx.strokeStyle = '#6366f1'; uctx.lineWidth = 2;
+      for(let i=0; i<=256; i+=32){
+        uctx.beginPath(); uctx.moveTo(i,0); uctx.lineTo(i,256); uctx.moveTo(0,i); uctx.lineTo(256,i); uctx.stroke();
+      }
+      uctx.fillStyle = '#a5b4fc'; uctx.font = 'bold 11px sans-serif';
+      for(let y=16; y<256; y+=32){ for(let x=10; x<256; x+=32){ uctx.fillText(`U${Math.floor(x/32)}V${Math.floor(y/32)}`, x-6, y+4); }}
+      list.push({ id: 'uv_grid_test', name: 'Rejilla Coordenadas UV', type: 'uv_grid', category: 'uv_grid', url: uvGridCanvas.toDataURL(), source: 'Calibración' });
+    }
+
+    const uvCheckerCanvas = document.createElement('canvas');
+    uvCheckerCanvas.width = 256; uvCheckerCanvas.height = 256;
+    const cctx = uvCheckerCanvas.getContext('2d');
+    if (cctx) {
+      for(let y=0; y<256; y+=32){
+        for(let x=0; x<256; x+=32){
+          const even = ((x/32)+(y/32))%2===0;
+          cctx.fillStyle = even ? '#e4e4e7' : '#18181b';
+          cctx.fillRect(x,y,32,32);
+        }
+      }
+      list.push({ id: 'uv_checker_test', name: 'Damero Cuadros UV', type: 'uv_grid', category: 'uv_grid', url: uvCheckerCanvas.toDataURL(), source: 'Calibración' });
+    }
+
+    // 3. Project textures from materials
+    materials.forEach(mat => {
+      if (mat.map && !list.some(t => t.url === mat.map)) {
+        list.push({ id: `proj_${mat.id}_map`, name: `${mat.name} (Albedo)`, type: 'albedo', category: 'project', url: mat.map, source: 'Proyecto' });
+      }
+      if (mat.normalMap && !list.some(t => t.url === mat.normalMap)) {
+        list.push({ id: `proj_${mat.id}_norm`, name: `${mat.name} (Normal)`, type: 'normal', category: 'project', url: mat.normalMap, source: 'Proyecto' });
+      }
+      if (mat.roughnessMap && !list.some(t => t.url === mat.roughnessMap)) {
+        list.push({ id: `proj_${mat.id}_rough`, name: `${mat.name} (Rugosidad)`, type: 'roughness', category: 'project', url: mat.roughnessMap, source: 'Proyecto' });
+      }
+      if (mat.metalnessMap && !list.some(t => t.url === mat.metalnessMap)) {
+        list.push({ id: `proj_${mat.id}_met`, name: `${mat.name} (Metálico)`, type: 'metalness', category: 'project', url: mat.metalnessMap, source: 'Proyecto' });
+      }
+      if (mat.aoMap && !list.some(t => t.url === mat.aoMap)) {
+        list.push({ id: `proj_${mat.id}_ao`, name: `${mat.name} (AO)`, type: 'ao', category: 'project', url: mat.aoMap, source: 'Proyecto' });
+      }
+      if (mat.displacementMap && !list.some(t => t.url === mat.displacementMap)) {
+        list.push({ id: `proj_${mat.id}_disp`, name: `${mat.name} (Desplazamiento)`, type: 'displacement', category: 'project', url: mat.displacementMap, source: 'Proyecto' });
+      }
+    });
+
+    // 4. Custom user uploaded textures
+    customTextures.forEach(ct => {
+      list.unshift({ id: ct.id, name: ct.name, type: ct.type || 'albedo', category: 'custom', url: ct.url, source: 'Subida por Usuario' });
+    });
+
+    return list;
+  }, [materials, customTextures]);
+
+  const handleApplyTextureToSelected = useCallback((texUrl: string, targetSlot: 'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'aoMap' | 'displacementMap' = textureSlotTarget) => {
+    const targetObjId = selectedObjectId;
+    if (!targetObjId) {
+      alert('Selecciona un objeto en la escena 3D para asignarle la textura.');
+      return;
+    }
+    const obj = objects.find(o => o.id === targetObjId);
+    if (!obj) return;
+
+    let targetMatId = obj.materialId;
+    if (!targetMatId) {
+      targetMatId = 'mat_' + Math.random().toString(36).substr(2, 9);
+      const newMat: MaterialData = {
+        id: targetMatId,
+        name: `Material ${obj.name || 'Objeto'}`,
+        color: '#ffffff',
+        roughness: 0.5,
+        metalness: 0.0,
+        emissive: '#000000',
+        emissiveIntensity: 1,
+        opacity: 1,
+        transparent: false,
+        [targetSlot]: texUrl,
+      };
+      addMaterial(newMat);
+      assignMaterialToObjects([targetObjId], targetMatId);
+      setEditingMaterialId(targetMatId);
+    } else {
+      updateMaterial(targetMatId, { [targetSlot]: texUrl });
+    }
+
+    useStore.getState().setViewMode('TEXTURED');
+    useStore.getState().saveHistory();
+    setCopiedNotification(`Asignado a "${obj.name || 'Objeto'}" (${targetSlot})`);
+    setTimeout(() => setCopiedNotification(null), 2500);
+  }, [selectedObjectId, objects, addMaterial, assignMaterialToObjects, setEditingMaterialId, updateMaterial, textureSlotTarget]);
 
   if (activeTab === 'library') {
     return (
@@ -525,6 +842,40 @@ export const MaterialPanel: React.FC = () => {
             }}
           />
         )}
+
+        {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
+        <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab('library')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+          >
+            <Sparkles size={12} />
+            <span>Materiales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('textures')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          >
+            <ImageIcon size={12} />
+            <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => {
+              if (activeMaterial) {
+                setActiveTab('edit');
+              } else if (materials.length > 0) {
+                setEditingMaterialId(materials[0].id);
+                setActiveTab('edit');
+              } else {
+                handleCreateMaterial();
+              }
+            }}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          >
+            <Settings size={12} />
+            <span>Editor PBR</span>
+          </button>
+        </div>
         
         {/* Header */}
         <div className="p-3 border-b border-white/10 flex items-center justify-between bg-[#18181c]">
@@ -714,54 +1065,360 @@ export const MaterialPanel: React.FC = () => {
     );
   }
 
+  if (activeTab === 'textures') {
+    const categories = [
+      { id: 'all', label: 'Todas', icon: '✨' },
+      { id: 'albedo', label: 'Albedo / Color', icon: '🎨' },
+      { id: 'normal', label: 'Normal Maps', icon: '🟣' },
+      { id: 'roughness', label: 'Rugosidad', icon: '⚪' },
+      { id: 'metalness', label: 'Metálico', icon: '🪙' },
+      { id: 'ao', label: 'Oclusión (AO)', icon: '🌑' },
+      { id: 'displacement', label: 'Desplazamiento', icon: '🏔️' },
+      { id: 'uv_grid', label: 'Calibración UV', icon: '📐' },
+      { id: 'custom', label: 'Mis Subidas', icon: '📂' },
+    ];
+
+    const filteredTextures = proceduralTexturesList.filter(t => {
+      if (textureCategory !== 'all') {
+        if (textureCategory === 'custom' && t.source !== 'Subida por Usuario') return false;
+        if (textureCategory !== 'custom' && t.category !== textureCategory) return false;
+      }
+      if (textureSearch && !t.name.toLowerCase().includes(textureSearch.toLowerCase())) return false;
+      return true;
+    });
+
+    return (
+      <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
+        {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
+        <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab('library')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          >
+            <Sparkles size={12} />
+            <span>Materiales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('textures')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-emerald-600 text-white shadow-md shadow-emerald-600/30"
+          >
+            <ImageIcon size={12} />
+            <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => {
+              if (activeMaterial) {
+                setActiveTab('edit');
+              } else if (materials.length > 0) {
+                setEditingMaterialId(materials[0].id);
+                setActiveTab('edit');
+              } else {
+                handleCreateMaterial();
+              }
+            }}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          >
+            <Settings size={12} />
+            <span>Editor PBR</span>
+          </button>
+        </div>
+
+        {/* Header Texturas */}
+        <div className="p-3 border-b border-white/10 flex items-center justify-between bg-[#18181c]">
+          <div className="flex items-center gap-2">
+            <ImageIcon size={16} className="text-emerald-400" />
+            <h3 className="font-bold text-xs uppercase tracking-wider text-zinc-200">Librería de Texturas</h3>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
+              {filteredTextures.length}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <label className="cursor-pointer flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-700/80 hover:bg-emerald-600 text-white transition-colors text-[10px] font-bold shadow-sm">
+              <Upload size={12} />
+              <span>Subir Textura</span>
+              <input
+                type="file"
+                className="hidden"
+                accept="image/*"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = (ev: any) => {
+                    const url = ev.target.result as string;
+                    const name = file.name.replace(/\.[^/.]+$/, "");
+                    const slot = detectSlotFromFilename(file.name);
+                    const newTex = {
+                      id: 'tex_' + Math.random().toString(36).substr(2, 9),
+                      name,
+                      url,
+                      type: slot === 'albedo' ? 'albedo' : slot,
+                    };
+                    setCustomTextures(prev => [newTex, ...prev]);
+                    setTextureCategory('custom');
+                  };
+                  reader.readAsDataURL(file);
+                }}
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Notificación de asignación */}
+        {copiedNotification && (
+          <div className="px-3 py-1.5 bg-emerald-900/60 border-b border-emerald-500/30 text-emerald-200 text-[10px] font-medium flex items-center gap-1.5 animate-fadeIn">
+            <Check size={12} className="text-emerald-400 flex-shrink-0" />
+            <span className="truncate">{copiedNotification}</span>
+          </div>
+        )}
+
+        {/* Selector de ranura objetivo y buscador */}
+        <div className="p-3 border-b border-white/5 space-y-2.5 bg-[#16161a]">
+          <div className="flex items-center justify-between gap-2 text-[10px]">
+            <span className="text-zinc-400 font-semibold whitespace-nowrap">Ranura al hacer clic:</span>
+            <select
+              value={textureSlotTarget}
+              onChange={e => setTextureSlotTarget(e.target.value as any)}
+              className="bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-lg px-2 py-1 text-[11px] font-medium focus:outline-none focus:border-emerald-500"
+            >
+              <option value="map">Color / Albedo (map)</option>
+              <option value="normalMap">Normal Map</option>
+              <option value="roughnessMap">Rugosidad (Roughness)</option>
+              <option value="metalnessMap">Metálico (Metalness)</option>
+              <option value="aoMap">Oclusión Ambiental (AO)</option>
+              <option value="displacementMap">Desplazamiento (Height)</option>
+            </select>
+          </div>
+
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-2.5 text-zinc-500" />
+            <input
+              type="text"
+              value={textureSearch}
+              onChange={e => setTextureSearch(e.target.value)}
+              placeholder="Buscar textura (ej. Madera, Normal, Mármol...)"
+              className="w-full bg-zinc-900/90 border border-white/10 rounded-xl pl-8 pr-7 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+            {textureSearch && (
+              <button onClick={() => setTextureSearch('')} className="absolute right-2.5 top-2.5 text-zinc-500 hover:text-zinc-300">
+                <X size={12} />
+              </button>
+            )}
+          </div>
+
+          {/* Categorías (Pills con scroll horizontal) */}
+          <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1 text-[11px]">
+            {categories.map(cat => (
+              <button
+                key={cat.id}
+                onClick={() => setTextureCategory(cat.id)}
+                className={`px-2.5 py-1 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
+                  textureCategory === cat.id
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                    : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <span>{cat.icon}</span>
+                <span>{cat.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* ── CUADRÍCULA DE TEXTURAS ── */}
+        <div className="flex-1 overflow-y-auto p-3 custom-scrollbar min-h-0 min-w-0">
+          <div className="grid grid-cols-2 gap-3 pb-8">
+            {filteredTextures.map(tex => {
+              const typeBadgeColors: Record<string, string> = {
+                albedo: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
+                normal: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+                roughness: 'bg-zinc-500/20 text-zinc-300 border-zinc-500/40',
+                metalness: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+                ao: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+                displacement: 'bg-teal-500/20 text-teal-300 border-teal-500/40',
+                uv_grid: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+              };
+
+              return (
+                <div
+                  key={tex.id}
+                  className="group relative flex flex-col p-2 rounded-xl border border-white/5 bg-zinc-900/60 hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all text-left overflow-hidden shadow-sm"
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('application/x-texture-url', tex.url);
+                    e.dataTransfer.setData('application/x-texture-type', tex.type);
+                    e.dataTransfer.setData('text/plain', tex.url);
+                  }}
+                >
+                  <div
+                    onClick={() => handleApplyTextureToSelected(tex.url, textureSlotTarget)}
+                    className="w-full aspect-square rounded-lg overflow-hidden bg-black/50 border border-white/10 relative flex items-center justify-center cursor-pointer group-hover:scale-[1.02] transition-transform duration-200"
+                    title="Haz clic para aplicar al objeto seleccionado o arrastra al visor 3D"
+                  >
+                    <img src={tex.url} alt={tex.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    
+                    <div className="absolute top-1.5 left-1.5">
+                      <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded border backdrop-blur-md uppercase tracking-wider ${typeBadgeColors[tex.type] || 'bg-black/60 text-white'}`}>
+                        {tex.type}
+                      </span>
+                    </div>
+
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                      <span className="text-[10px] font-bold bg-emerald-600 text-white px-2 py-1 rounded-md shadow-lg">
+                        Aplicar
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-col min-w-0">
+                    <span className="text-[11px] font-semibold text-zinc-200 truncate group-hover:text-emerald-300">
+                      {tex.name}
+                    </span>
+                    <span className="text-[9px] text-zinc-500 truncate">
+                      {tex.source}
+                    </span>
+                  </div>
+
+                  {/* Acciones rápidas de ranuras */}
+                  <div className="mt-2 pt-1.5 border-t border-white/5 flex items-center justify-between gap-1 text-[9px]">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleApplyTextureToSelected(tex.url, 'map'); }}
+                      className="flex-1 py-0.5 rounded bg-zinc-800 hover:bg-indigo-600 text-zinc-300 hover:text-white transition-colors text-center font-bold"
+                      title="Asignar como Albedo / Color"
+                    >
+                      Color
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleApplyTextureToSelected(tex.url, 'normalMap'); }}
+                      className="flex-1 py-0.5 rounded bg-zinc-800 hover:bg-purple-600 text-zinc-300 hover:text-white transition-colors text-center font-bold"
+                      title="Asignar como Normal Map"
+                    >
+                      Normal
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleApplyTextureToSelected(tex.url, 'roughnessMap'); }}
+                      className="flex-1 py-0.5 rounded bg-zinc-800 hover:bg-zinc-600 text-zinc-300 hover:text-white transition-colors text-center font-bold"
+                      title="Asignar como Rugosidad"
+                    >
+                      Rugoso
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Zona de Drop rápida para archivos de imagen */}
+          <div
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={async (e) => {
+              e.preventDefault();
+              const file = e.dataTransfer.files?.[0];
+              if (file && file.type.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onload = (ev: any) => {
+                  const url = ev.target.result as string;
+                  const name = file.name.replace(/\.[^/.]+$/, "");
+                  const slot = detectSlotFromFilename(file.name);
+                  const newTex = {
+                    id: 'tex_' + Math.random().toString(36).substr(2, 9),
+                    name,
+                    url,
+                    type: slot === 'albedo' ? 'albedo' : slot,
+                  };
+                  setCustomTextures(prev => [newTex, ...prev]);
+                  setTextureCategory('custom');
+                };
+                reader.readAsDataURL(file);
+              }
+            }}
+            className="mt-2 border-2 border-dashed border-zinc-800 hover:border-emerald-500/50 rounded-xl p-4 text-center text-zinc-500 hover:text-zinc-300 transition-colors bg-zinc-950/30"
+          >
+            <Upload size={18} className="mx-auto mb-1 text-zinc-600" />
+            <p className="text-[11px] font-bold text-zinc-400">Arrastra archivos de imagen aquí</p>
+            <p className="text-[9px] text-zinc-600 mt-0.5">Soporta PNG, JPG, WebP (Albedo, Normal, Roughness, Metalness, AO)</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!activeMaterial) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-6 text-center text-zinc-400 space-y-4">
-        <Palette size={40} className="opacity-30 text-indigo-400" />
-        <div className="space-y-1">
-          <p className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-            {selectedObject ? `Objeto "${selectedObject.name || 'Sin Nombre'}" Seleccionado` : 'Ningún Objeto Seleccionado'}
-          </p>
-          <p className="text-[11px] text-zinc-500 max-w-xs">
-            {selectedObject 
-              ? 'Este objeto aún no tiene un material PBR asignado de la librería.'
-              : 'Selecciona un objeto en el visor para vincular un material o abre la librería.'}
-          </p>
-        </div>
-        
-        <div className="flex flex-col gap-2 w-full max-w-xs">
-          {selectedObject && (
-            <button
-              onClick={() => {
-                const newMat = {
-                  id: 'mat_' + Math.random().toString(36).substr(2, 9),
-                  name: `Material ${selectedObject.name || 'Objeto'}`,
-                  color: selectedObject.material?.color || selectedObject.color || '#ffffff',
-                  roughness: selectedObject.material?.roughness ?? 0.5,
-                  metalness: selectedObject.material?.metalness ?? 0,
-                  emissive: '#000000',
-                  emissiveIntensity: 1,
-                  opacity: selectedObject.opacity ?? 1,
-                  transparent: (selectedObject.opacity ?? 1) < 1,
-                };
-                addMaterial(newMat);
-                const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : [selectedObject.id];
-                assignMaterialToObjects(ids, newMat.id);
-                setEditingMaterialId(newMat.id);
-                setActiveTab('edit');
-              }}
-              className="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
-            >
-              <Plus size={14} /> Crear Nuevo Material PBR
-            </button>
-          )}
-
-          <button 
+      <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
+        {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
+        <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
+          <button
             onClick={() => setActiveTab('library')}
-            className="py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-2"
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
           >
-            <FolderOpen size={14} className="text-indigo-400" /> Explorar Librería / Importar Pack PBR
+            <Sparkles size={12} />
+            <span>Materiales</span>
           </button>
+          <button
+            onClick={() => setActiveTab('textures')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          >
+            <ImageIcon size={12} />
+            <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('edit')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+          >
+            <Settings size={12} />
+            <span>Editor PBR</span>
+          </button>
+        </div>
+
+        <div className="flex flex-col items-center justify-center h-full p-6 text-center text-zinc-400 space-y-4">
+          <Palette size={40} className="opacity-30 text-indigo-400" />
+          <div className="space-y-1">
+            <p className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+              {selectedObject ? `Objeto "${selectedObject.name || 'Sin Nombre'}" Seleccionado` : 'Ningún Objeto Seleccionado'}
+            </p>
+            <p className="text-[11px] text-zinc-500 max-w-xs">
+              {selectedObject 
+                ? 'Este objeto aún no tiene un material PBR asignado de la librería.'
+                : 'Selecciona un objeto en el visor para vincular un material o abre la librería.'}
+            </p>
+          </div>
+          
+          <div className="flex flex-col gap-2 w-full max-w-xs">
+            {selectedObject && (
+              <button
+                onClick={() => {
+                  const newMat = {
+                    id: 'mat_' + Math.random().toString(36).substr(2, 9),
+                    name: `Material ${selectedObject.name || 'Objeto'}`,
+                    color: selectedObject.material?.color || selectedObject.color || '#ffffff',
+                    roughness: selectedObject.material?.roughness ?? 0.5,
+                    metalness: selectedObject.material?.metalness ?? 0,
+                    emissive: '#000000',
+                    emissiveIntensity: 1,
+                    opacity: selectedObject.opacity ?? 1,
+                    transparent: (selectedObject.opacity ?? 1) < 1,
+                  };
+                  addMaterial(newMat);
+                  const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : [selectedObject.id];
+                  assignMaterialToObjects(ids, newMat.id);
+                  setEditingMaterialId(newMat.id);
+                  setActiveTab('edit');
+                }}
+                className="py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
+              >
+                <Plus size={14} /> Crear Nuevo Material PBR
+              </button>
+            )}
+
+            <button 
+              onClick={() => setActiveTab('library')}
+              className="py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <FolderOpen size={14} className="text-indigo-400" /> Explorar Librería / Importar Pack PBR
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -769,6 +1426,31 @@ export const MaterialPanel: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300 overflow-hidden">
+      {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
+      <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
+        <button
+          onClick={() => setActiveTab('library')}
+          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+        >
+          <Sparkles size={12} />
+          <span>Materiales</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('textures')}
+          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+        >
+          <ImageIcon size={12} />
+          <span>Texturas</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('edit')}
+          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+        >
+          <Settings size={12} />
+          <span>Editor PBR</span>
+        </button>
+      </div>
+
       {/* Header del Panel Corregido (Evita desbordamiento de Asignar) */}
       <div className="p-3 border-b border-white/10 flex items-center justify-between bg-[#1a1a1f] w-full min-w-0 flex-shrink-0">
         <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -795,7 +1477,7 @@ export const MaterialPanel: React.FC = () => {
           />
         </div>
 
-        {/* Bloque de Botones de Acción Derecho Bloqueado para que no se encoja */}
+        {/* Bloque de Botones de Acción Derecho */}
         <div className="flex items-center gap-1 flex-shrink-0 ml-1">
           <button 
             onClick={() => {
@@ -805,6 +1487,19 @@ export const MaterialPanel: React.FC = () => {
             className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-black tracking-wider transition-all active:scale-95 flex-shrink-0 shadow-md uppercase"
           >
             ASIGNAR
+          </button>
+
+          <button 
+            onClick={() => {
+              const newId = 'mat_' + Math.random().toString(36).substr(2, 9);
+              const clone = { ...activeMaterial, id: newId, name: `${activeMaterial.name} (Copia)` };
+              addMaterial(clone);
+              setEditingMaterialId(newId);
+            }} 
+            className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-400 hover:text-indigo-400 transition-colors flex-shrink-0" 
+            title="Duplicar Material"
+          >
+            <Copy size={13} />
           </button>
           
           <button 
@@ -826,603 +1521,1082 @@ export const MaterialPanel: React.FC = () => {
       </div>
 
       {/* Contenido con Scroll Protegido */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-5 custom-scrollbar max-w-full overflow-x-hidden">
+      <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-w-full overflow-x-hidden">
         
-        {/* ── SECCIÓN DE PROPIEDADES BÁSICAS ── */}
-        <section className="space-y-3">
-          <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-            <Palette size={12} />
-            <span>Propiedades Básicas</span>
-          </div>
-          
-          {/* Fila: Color Base & Opacidad */}
-          <div className="grid grid-cols-2 gap-3 items-end">
-            <div className="space-y-1.5">
-              <label className="text-[10px] text-zinc-500">Color Base</label>
-              <div className="flex items-center gap-2 bg-white/5 p-1.5 h-8 rounded-lg border border-white/5">
-                <input 
-                  type="color" 
-                  value={activeMaterial.color}
-                  onChange={e => updateMaterial(activeMaterial.id, { color: e.target.value })}
-                  className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
-                />
-                <span className="text-[10px] font-mono uppercase text-zinc-300">{activeMaterial.color}</span>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-center text-[10px]">
-                <label className="text-zinc-500">Opacidad</label>
-                <span className="font-mono text-indigo-400">{(activeMaterial.opacity * 100).toFixed(0)}%</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.opacity}
-                onChange={e => updateMaterial(activeMaterial.id, { 
-                  opacity: parseFloat(e.target.value),
-                  transparent: parseFloat(e.target.value) < 1
-                })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
-          </div>
-
-          {/* Fila: Rugosidad & Metalicidad */}
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-center text-[10px]">
-                <label className="text-zinc-500">Rugosidad (Roughness)</label>
-                <span className="font-mono text-zinc-400">{(activeMaterial.roughness ?? 0.5).toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.roughness}
-                onChange={e => updateMaterial(activeMaterial.id, { roughness: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex justify-between items-center text-[10px]">
-                <label className="text-zinc-500">Metalicidad (Metalness)</label>
-                <span className="font-mono text-zinc-400">{(activeMaterial.metalness ?? 0.0).toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.metalness}
-                onChange={e => updateMaterial(activeMaterial.id, { metalness: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
-          </div>
-
-          {/* DESLIZADOR PROFESIONAL DE RELIEVE (DISPLACEMENT SCALE) */}
-          <div className="space-y-1.5 bg-white/5 p-2 rounded-lg border border-white/5">
-            <div className="flex justify-between items-center text-[10px]">
-              <span className="text-zinc-300 font-semibold">Fuerza de Relieve (Displacement)</span>
-              <span className="font-mono text-cyan-400">{(activeMaterial.displacementScale ?? 0.0).toFixed(3)}</span>
-            </div>
-            <input 
-              type="range" min="0" max="0.08" step="0.001" 
-              value={activeMaterial.displacementScale ?? 0.0} 
-              onChange={(e) => updateMaterial(activeMaterial.id, { displacementScale: parseFloat(e.target.value) })}
-              className="w-full accent-cyan-500 h-1 bg-white/10 rounded-lg cursor-pointer"
-            />
-            <p className="text-[9px] text-zinc-600 leading-none">Aviso: Reduce este valor a 0 si las esquinas del bisel se fracturan o separan.</p>
-          </div>
-        </section>
-
-        {/* ── SECCIÓN DE IMPERFECCIONES Y DESGASTE (ÓXIDO, ARAÑAZOS, SUCIEDAD) ── */}
-        <section className="space-y-3 bg-amber-950/20 p-3 rounded-xl border border-amber-500/20">
+        {/* ── PRESETS FÍSICOS CALIBRADOS DE ACCESO RÁPIDO ── */}
+        <div className="bg-zinc-900/60 p-2.5 rounded-xl border border-white/5 space-y-2">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-amber-400">
-              <Sparkles size={13} className="text-amber-400" />
-              <span>Imperfecciones y Desgaste (Filtros)</span>
-            </div>
-            <span className="text-[9px] font-mono text-amber-500/80 bg-amber-500/10 px-1.5 py-0.5 rounded">
-              Generador PBR
+            <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-400 flex items-center gap-1.5">
+              <span>✨</span> Presets Físicos Calibrados
             </span>
+            <span className="text-[9px] text-zinc-500 font-mono">1-Click</span>
           </div>
-
-          <p className="text-[10px] text-zinc-400 leading-tight">
-            Aplica efectos realistas de óxido, arañazos y mugre en tiempo real a las capas PBR del material.
-          </p>
-
-          <div className="space-y-2.5 pt-1">
-            {/* Slider Óxido */}
-            <div className="space-y-1">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
-                  <span>🦀</span> Óxido / Corrosión (Rust)
-                </span>
-                <span className="font-mono text-amber-400 font-bold">
-                  {((activeMaterial.filters?.rust ?? 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.05"
-                value={activeMaterial.filters?.rust ?? 0}
-                onChange={e => handleFilterChange('rust', parseFloat(e.target.value))}
-                className="w-full accent-amber-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            {/* Slider Arañazos */}
-            <div className="space-y-1">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
-                  <span>🔪</span> Arañazos / Incisiones (Scratches)
-                </span>
-                <span className="font-mono text-cyan-400 font-bold">
-                  {((activeMaterial.filters?.scratches ?? 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.05"
-                value={activeMaterial.filters?.scratches ?? 0}
-                onChange={e => handleFilterChange('scratches', parseFloat(e.target.value))}
-                className="w-full accent-cyan-400 h-1.5 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
-
-            {/* Slider Suciedad / Grietas */}
-            <div className="space-y-1">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
-                  <span>🟤</span> Suciedad / Grietas (Dirt)
-                </span>
-                <span className="font-mono text-yellow-500 font-bold">
-                  {((activeMaterial.filters?.dirt ?? 0) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.05"
-                value={activeMaterial.filters?.dirt ?? 0}
-                onChange={e => handleFilterChange('dirt', parseFloat(e.target.value))}
-                className="w-full accent-yellow-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
-              />
-            </div>
+          <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1">
+            {PHYSICALLY_CALIBRATED_PRESETS.map((preset, idx) => (
+              <button
+                key={idx}
+                onClick={() => updateMaterial(activeMaterial.id, preset.apply)}
+                className="px-2 py-1 rounded-lg bg-zinc-800/90 hover:bg-indigo-600/30 text-zinc-300 hover:text-white border border-white/5 hover:border-indigo-500/40 text-[10px] font-medium whitespace-nowrap transition-all flex items-center gap-1 flex-shrink-0 shadow-sm"
+                title={`${preset.name}: ${preset.description}`}
+              >
+                <span>{preset.icon}</span>
+                <span>{preset.name}</span>
+              </button>
+            ))}
           </div>
+        </div>
 
-          {/* Presets Rápidos */}
-          <div className="grid grid-cols-4 gap-1.5 pt-2 border-t border-amber-500/20">
-            <button
-              onClick={() => {
-                handleFilterChange('rust', 0);
-                handleFilterChange('scratches', 0);
-                handleFilterChange('dirt', 0);
-              }}
-              className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-[9px] font-bold text-zinc-300 rounded text-center transition-colors truncate"
-            >
-              Limpio
-            </button>
-            <button
-              onClick={() => {
-                handleFilterChange('rust', 0.15);
-                handleFilterChange('scratches', 0.2);
-                handleFilterChange('dirt', 0.15);
-              }}
-              className="py-1 px-1 bg-amber-900/40 hover:bg-amber-800/60 text-[9px] font-bold text-amber-300 rounded text-center transition-colors border border-amber-500/30 truncate"
-            >
-              Uso Ligero
-            </button>
-            <button
-              onClick={() => {
-                handleFilterChange('rust', 0.45);
-                handleFilterChange('scratches', 0.5);
-                handleFilterChange('dirt', 0.4);
-              }}
-              className="py-1 px-1 bg-amber-900/60 hover:bg-amber-800/80 text-[9px] font-bold text-amber-200 rounded text-center transition-colors border border-amber-500/40 truncate"
-            >
-              Desgastado
-            </button>
-            <button
-              onClick={() => {
-                handleFilterChange('rust', 0.85);
-                handleFilterChange('scratches', 0.8);
-                handleFilterChange('dirt', 0.75);
-              }}
-              className="py-1 px-1 bg-red-950/80 hover:bg-red-900/80 text-[9px] font-bold text-red-200 rounded text-center transition-colors border border-red-500/40 truncate"
-            >
-              Extremo
-            </button>
-          </div>
-        </section>
-
-        {/* ── SECCIÓN DE PROYECCIÓN DE TEXTURA Y MAPEADO UV ── */}
-        <section className="space-y-3 bg-zinc-900/60 p-3 rounded-xl border border-white/10">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-indigo-400">
-              <Box size={13} />
-              <span>Proyección de Textura y Coordenadas UV</span>
+        {/* ── SECCIÓN 1: SUPERFICIE BASE & COLOR ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('basic')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Palette size={13} className="text-indigo-400" />
+              <span>Superficie Base & Color</span>
             </div>
-          </div>
-
-          <p className="text-[10px] text-zinc-400 leading-tight">
-            Controla cómo se proyecta la textura sobre las caras de los objetos 3D y difumina las costuras.
-          </p>
-
-          {/* Selector de Tipo de Proyección (Projection / Coordenadas) */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] text-zinc-400 font-semibold block">Tipo de Proyección (Projection / Coordenadas)</label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { id: 'BOX', label: 'Cúbico (Box)', icon: '📦' },
-                { id: 'TRIPLANAR', label: 'Triplanar', icon: '💎' },
-                { id: 'PLANAR', label: 'Plana (Flat)', icon: '📐' },
-                { id: 'UV', label: 'Smart UV', icon: '🗺️' },
-                { id: 'SPHERICAL', label: 'Esférica', icon: '🌐' },
-                { id: 'CYLINDRICAL', label: 'Cilíndrica', icon: '🛢️' },
-              ].map(proj => (
-                <button
-                  key={proj.id}
-                  onClick={() => {
-                    updateMaterial(activeMaterial.id, { uvwMapping: proj.id as any });
-                    handleAutoUVProjection(proj.id);
-                  }}
-                  className={`px-2 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 transition-all border ${
-                    (activeMaterial.uvwMapping || 'BOX') === proj.id
-                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-600/30'
-                      : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/5'
-                  }`}
-                >
-                  <span className="text-[11px]">{proj.icon}</span>
-                  <span className="truncate">{proj.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Botón Proyección UV Automática / Smart UV / Generar UV / Re-unir mapa */}
-          <div className="pt-1 flex gap-2">
-            <button
-              onClick={() => handleAutoUVProjection()}
-              className="flex-1 py-2 px-2 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98"
-            >
-              <Zap size={12} className="text-indigo-400" />
-              <span>Proyección UV Auto</span>
-            </button>
-            <button
-              onClick={() => updateMaterial(activeMaterial.id, { uvDebug: !activeMaterial.uvDebug })}
-              className={`py-2 px-2.5 rounded-xl text-[10px] font-bold border transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98 ${
-                activeMaterial.uvDebug 
-                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-600/30' 
-                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/10'
-              }`}
-              title="Activar/Desactivar textura Checkerboard UV para este material"
-            >
-              <Grid size={12} />
-              <span>UV Debug: {activeMaterial.uvDebug ? 'ON' : 'OFF'}</span>
-            </button>
-          </div>
-          <p className="text-[9px] text-zinc-500 mt-1 text-center">
-            Recalcula las coordenadas UV o visualiza la cuadrícula checkerboard de prueba.
-          </p>
-
-          {/* Deslizador Suaviza la Transición: Blend (Mezcla) / Suavizado de Bordes */}
-          {((activeMaterial.uvwMapping || 'BOX') === 'TRIPLANAR' || (activeMaterial.uvwMapping || 'BOX') === 'BOX') && (
-            <div className="space-y-1.5 bg-indigo-950/30 p-2.5 rounded-xl border border-indigo-500/30 pt-2">
-              <div className="flex justify-between items-center text-[10px]">
-                <span className="text-zinc-200 font-bold flex items-center gap-1.5">
-                  <Sparkles size={12} className="text-indigo-400" />
-                  <span>Blend (Mezcla) / Suavizado de bordes</span>
-                </span>
-                <span className="font-mono text-indigo-400 font-bold">
-                  {((activeMaterial.triplanarBlend ?? 0.5) * 100).toFixed(0)}%
-                </span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.triplanarBlend ?? 0.5}
-                onChange={e => updateMaterial(activeMaterial.id, { triplanarBlend: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
-              />
-              <div className="flex justify-between text-[9px] text-zinc-500">
-                <span>0% (Corte duro)</span>
-                <span>100% (Difuminado suave)</span>
-              </div>
-              <p className="text-[9px] text-zinc-400 leading-tight">
-                Al subir su valor, las uniones cortadas en los biseles y esquinas redondeadas se difuminan entre sí eliminando la línea dura.
-              </p>
-            </div>
-          )}
-        </section>
-
-        {/* ── SECCIÓN DE MAPAS DE TEXTURA Y TRANSFORMACIONES ── */}
-        <section className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-              <Layers size={12} />
-              <span>Mapas de Textura</span>
-            </div>
-            
-            {/* Toggles Compactados en el lateral superior */}
-            <div className="flex items-center gap-3 text-[9px] font-bold text-zinc-500 uppercase">
-              <div className="flex items-center gap-1.5">
-                <span>Flip Y</span>
-                <button 
-                  onClick={() => updateMaterial(activeMaterial.id, { flipY: !(activeMaterial.flipY ?? true) })}
-                  className={`w-7 h-3.5 rounded-full transition-colors relative ${activeMaterial.flipY ?? true ? 'bg-indigo-600' : 'bg-zinc-800'}`}
-                >
-                  <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${activeMaterial.flipY ?? true ? 'left-4' : 'left-0.5'}`} />
-                </button>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span>Usar ORM</span>
-                <button 
-                  onClick={() => updateMaterial(activeMaterial.id, { useORM: !activeMaterial.useORM })}
-                  className={`w-7 h-3.5 rounded-full transition-colors relative ${activeMaterial.useORM ? 'bg-indigo-600' : 'bg-zinc-800'}`}
-                >
-                  <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${activeMaterial.useORM ? 'left-4' : 'left-0.5'}`} />
-                </button>
-              </div>
-            </div>
-          </div>
+            {openSections.basic ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
           
-          {/* Rejilla de 3 columnas compactas para evitar desbordamientos */}
-          <div className="pt-2 border-t border-zinc-800/50 grid grid-cols-3 gap-2">
-            <div className="flex flex-col gap-1">
-              <span className="text-[9px] text-zinc-500 truncate" title="Repetición (Scale)">Repetición</span>
-              <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                <span className="text-[9px] text-zinc-600">U</span>
-                <input 
-                  type="number" step="0.1"
-                  value={activeMaterial.mapRepeat?.[0] ?? 1}
-                  onChange={e => updateMaterial(activeMaterial.id, { mapRepeat: [parseFloat(e.target.value) || 1, activeMaterial.mapRepeat?.[1] ?? 1] })}
-                  className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                />
-              </div>
-            </div>
+          {openSections.basic && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              {/* Color Base & Opacidad */}
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-zinc-500">Color Base</label>
+                  <div className="flex items-center gap-2 bg-white/5 p-1.5 h-8 rounded-lg border border-white/5">
+                    <input 
+                      type="color" 
+                      value={activeMaterial.color}
+                      onChange={e => updateMaterial(activeMaterial.id, { color: e.target.value })}
+                      className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                    />
+                    <span className="text-[10px] font-mono uppercase text-zinc-300">{activeMaterial.color}</span>
+                  </div>
+                </div>
 
-            <div className="flex flex-col gap-1">
-              <span className="text-[9px] text-zinc-500 truncate" title="Desplazamiento (Offset)">Desplazamiento</span>
-              <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                <span className="text-[9px] text-zinc-600">U</span>
-                <input 
-                  type="number" step="0.05"
-                  value={activeMaterial.mapOffset?.[0] ?? 0}
-                  onChange={e => updateMaterial(activeMaterial.id, { mapOffset: [parseFloat(e.target.value) || 0, activeMaterial.mapOffset?.[1] ?? 0] })}
-                  className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <span className="text-[9px] text-zinc-500 truncate" title="Rotación (Grados)">Rotación</span>
-              <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                <input 
-                  type="number" step="5"
-                  value={activeMaterial.mapRotation ?? 0}
-                  onChange={e => updateMaterial(activeMaterial.id, { mapRotation: parseFloat(e.target.value) || 0 })}
-                  className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                />
-                <span className="text-[9px] text-zinc-600">°</span>
-              </div>
-            </div>
-          </div>
-
-          {activeMaterial.useORM && (activeMaterial.aoMap || activeMaterial.roughnessMap || activeMaterial.metalnessMap) && (
-            <button 
-              onClick={() => useStore.getState().generateORM(activeMaterial.id)}
-              className="w-full py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 text-[10px] font-bold rounded border border-indigo-500/30 transition-colors"
-            >
-              GENERAR MAPA COMPUESTO ORM
-            </button>
-          )}
-
-          {/* Ranuras de imágenes (Slots) inferiores */}
-          <div className="grid grid-cols-2 gap-3">
-            {/* Albedo Map */}
-            <TextureSlot 
-              label="Albedo / Color" 
-              texture={activeMaterial.map} 
-              onDrop={e => onDropTexture(e, 'map')}
-              onClear={() => updateMaterial(activeMaterial.id, { map: undefined })}
-            />
-            {/* Normal Map */}
-            <TextureSlot 
-              label="Normal Map" 
-              texture={activeMaterial.normalMap} 
-              onDrop={e => onDropTexture(e, 'normalMap')}
-              onClear={() => updateMaterial(activeMaterial.id, { normalMap: undefined })}
-            />
-
-            {activeMaterial.useORM ? (
-              <div className="col-span-2 space-y-3">
-                <TextureSlot 
-                  label="ORM Map (R:AO, G:Rough, B:Metal)" 
-                  texture={activeMaterial.ormMap} 
-                  onDrop={e => onDropTexture(e, 'ormMap')}
-                  onClear={() => updateMaterial(activeMaterial.id, { ormMap: undefined })}
-                  isLarge
-                />
-                <div className="grid grid-cols-3 gap-2">
-                  <IntensityControl 
-                    label="AO" 
-                    value={activeMaterial.ormIntensityAO ?? 1} 
-                    onChange={v => updateMaterial(activeMaterial.id, { ormIntensityAO: v })} 
-                  />
-                  <IntensityControl 
-                    label="Rough" 
-                    value={activeMaterial.ormIntensityRoughness ?? 1} 
-                    onChange={v => updateMaterial(activeMaterial.id, { ormIntensityRoughness: v })} 
-                  />
-                  <IntensityControl 
-                    label="Metal" 
-                    value={activeMaterial.ormIntensityMetalness ?? 1} 
-                    onChange={v => updateMaterial(activeMaterial.id, { ormIntensityMetalness: v })} 
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-500">Opacidad</label>
+                    <span className="font-mono text-indigo-400">{(activeMaterial.opacity * 100).toFixed(0)}%</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.01"
+                    value={activeMaterial.opacity}
+                    onChange={e => updateMaterial(activeMaterial.id, { 
+                      opacity: parseFloat(e.target.value),
+                      transparent: parseFloat(e.target.value) < 1 || (activeMaterial.transmission ?? 0) > 0
+                    })}
+                    className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
                   />
                 </div>
-                {activeMaterial.ormMap && (
-                  <div className="pt-2">
-                    <label className="text-[9px] text-zinc-600 font-bold uppercase mb-2 block">Visualizador de Canales</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div className="space-y-1">
-                        <div className="aspect-square rounded-lg overflow-hidden border border-white/5 relative group">
-                          <img src={activeMaterial.ormMap} className="w-full h-full object-cover grayscale brightness-150 contrast-125" style={{ filter: 'matrix(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)' }} />
-                          <div className="absolute inset-0 bg-red-500/20 mix-blend-multiply" />
-                          <div className="absolute bottom-1 left-1 text-[7px] font-bold bg-black/60 px-1 rounded text-red-400">R (AO)</div>
-                        </div>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="aspect-square rounded-lg overflow-hidden border border-white/5 relative group">
-                          <img src={activeMaterial.ormMap} className="w-full h-full object-cover grayscale brightness-150 contrast-125" style={{ filter: 'matrix(0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)' }} />
-                          <div className="absolute inset-0 bg-green-500/20 mix-blend-multiply" />
-                          <div className="absolute bottom-1 left-1 text-[7px] font-bold bg-black/60 px-1 rounded text-green-400">G (ROUGH)</div>
-                        </div>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="aspect-square rounded-lg overflow-hidden border border-white/5 relative group">
-                          <img src={activeMaterial.ormMap} className="w-full h-full object-cover grayscale brightness-150 contrast-125" style={{ filter: 'matrix(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)' }} />
-                          <div className="absolute inset-0 bg-blue-500/20 mix-blend-multiply" />
-                          <div className="absolute bottom-1 left-1 text-[7px] font-bold bg-black/60 px-1 rounded text-blue-400">B (METAL)</div>
-                        </div>
-                      </div>
+              </div>
+
+              {/* Rugosidad & Metalicidad */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-500">Rugosidad (Roughness)</label>
+                    <span className="font-mono text-zinc-400">{(activeMaterial.roughness ?? 0.5).toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.01"
+                    value={activeMaterial.roughness}
+                    onChange={e => updateMaterial(activeMaterial.id, { roughness: parseFloat(e.target.value) })}
+                    className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-500">Metalicidad (Metalness)</label>
+                    <span className="font-mono text-zinc-400">{(activeMaterial.metalness ?? 0.0).toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.01"
+                    value={activeMaterial.metalness}
+                    onChange={e => updateMaterial(activeMaterial.id, { metalness: parseFloat(e.target.value) })}
+                    className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* Intensidad Especular */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-500">Reflejo Especular (Specular Intensity)</label>
+                  <span className="font-mono text-zinc-400">{(activeMaterial.specularIntensity ?? 1.0).toFixed(2)}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="2" step="0.05"
+                  value={activeMaterial.specularIntensity ?? 1.0}
+                  onChange={e => updateMaterial(activeMaterial.id, { specularIntensity: parseFloat(e.target.value) })}
+                  className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 2: MAPAS NORMALES & FORMATO DIRECTX / OPENGL ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('normal')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Sliders size={13} className="text-cyan-400" />
+              <span>Normales & Relieve PBR</span>
+              {activeMaterial.normalFormat === 'DIRECTX' && (
+                <span className="text-[8px] bg-cyan-500/20 text-cyan-300 px-1 rounded border border-cyan-500/30">DirectX (-Y)</span>
+              )}
+            </div>
+            {openSections.normal ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.normal && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              {/* Selector de Formato Normal Map (DirectX vs OpenGL) */}
+              <div className="space-y-1.5 bg-black/20 p-2.5 rounded-lg border border-white/5">
+                <div className="flex justify-between items-center">
+                  <label className="text-[10px] font-semibold text-zinc-300">Formato de Normal Map</label>
+                  <span className="text-[9px] text-zinc-500 font-mono">
+                    {activeMaterial.normalFormat === 'DIRECTX' || activeMaterial.invertNormalY ? 'Canal Y Invertido (-Y)' : 'Estándar (+Y)'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={() => updateMaterial(activeMaterial.id, { normalFormat: 'OPENGL', invertNormalY: false })}
+                    className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition-all text-center ${
+                      (activeMaterial.normalFormat !== 'DIRECTX' && !activeMaterial.invertNormalY)
+                        ? 'bg-cyan-600/30 text-cyan-300 border-cyan-500 shadow-sm'
+                        : 'bg-zinc-800/60 text-zinc-400 border-white/5 hover:bg-zinc-800'
+                    }`}
+                  >
+                    OpenGL (+Y)
+                    <span className="block text-[8px] font-normal text-zinc-400">Blender / Three.js / Maya</span>
+                  </button>
+                  <button
+                    onClick={() => updateMaterial(activeMaterial.id, { normalFormat: 'DIRECTX', invertNormalY: true })}
+                    className={`py-1.5 px-2 rounded-lg text-[10px] font-bold border transition-all text-center ${
+                      (activeMaterial.normalFormat === 'DIRECTX' || activeMaterial.invertNormalY)
+                        ? 'bg-cyan-600/30 text-cyan-300 border-cyan-500 shadow-sm'
+                        : 'bg-zinc-800/60 text-zinc-400 border-white/5 hover:bg-zinc-800'
+                    }`}
+                  >
+                    DirectX (-Y)
+                    <span className="block text-[8px] font-normal text-zinc-400">cgbookcase / Unreal / 3ds Max</span>
+                  </button>
+                </div>
+                <p className="text-[8px] text-zinc-500 leading-tight pt-1">
+                  * cgbookcase y Unreal usan normales DirectX (-Y). Si el relieve se ve hundido o invertido con la luz, activa DirectX (-Y).
+                </p>
+              </div>
+
+              {/* Fuerza de Normal Map */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-500">Escala de Normales (Normal Scale)</label>
+                  <span className="font-mono text-cyan-400">{(activeMaterial.normalScale ?? 1.0).toFixed(2)}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="3" step="0.05"
+                  value={activeMaterial.normalScale ?? 1.0}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    updateMaterial(activeMaterial.id, { normalScale: val });
+                  }}
+                  className="w-full accent-cyan-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Relieve Geométrico (Displacement) */}
+              <div className="space-y-1.5 bg-white/5 p-2 rounded-lg border border-white/5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <span className="text-zinc-300 font-semibold">Fuerza de Relieve (Displacement Scale)</span>
+                  <span className="font-mono text-cyan-400">{(activeMaterial.displacementScale ?? 0.0).toFixed(3)}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="0.08" step="0.001" 
+                  value={activeMaterial.displacementScale ?? 0.0} 
+                  onChange={(e) => updateMaterial(activeMaterial.id, { displacementScale: parseFloat(e.target.value) })}
+                  className="w-full accent-cyan-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 3: VIDRIO, TRANSMISIÓN Y GEMAS ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('glass')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Glasses size={13} className="text-blue-400" />
+              <span>Vidrio, Transmisión & Gemas</span>
+              {(activeMaterial.transmission ?? 0) > 0 && (
+                <span className="text-[8px] bg-blue-500/20 text-blue-300 px-1 rounded border border-blue-500/30">
+                  {((activeMaterial.transmission ?? 0) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            {openSections.glass ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.glass && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              {/* Slider Transmisión */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Transmisión (Vidrio / Refracción)</label>
+                  <span className="font-mono text-blue-400 font-bold">{((activeMaterial.transmission ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.transmission ?? 0}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    updateMaterial(activeMaterial.id, { 
+                      transmission: val,
+                      transparent: val > 0 || (activeMaterial.opacity ?? 1) < 1
+                    });
+                  }}
+                  className="w-full accent-blue-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Selector de IOR con Presets Rápidos */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Índice de Refracción (IOR)</label>
+                  <span className="font-mono text-blue-300 font-bold">{(activeMaterial.ior ?? 1.5).toFixed(3)}</span>
+                </div>
+                <input 
+                  type="range" min="1.0" max="3.0" step="0.01"
+                  value={activeMaterial.ior ?? 1.5}
+                  onChange={e => updateMaterial(activeMaterial.id, { ior: parseFloat(e.target.value) })}
+                  className="w-full accent-blue-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+                <div className="grid grid-cols-4 gap-1 pt-1">
+                  {[
+                    { label: 'Aire (1.0)', val: 1.0 },
+                    { label: 'Agua (1.33)', val: 1.333 },
+                    { label: 'Vidrio (1.52)', val: 1.52 },
+                    { label: 'Diamante (2.42)', val: 2.417 },
+                  ].map(iorP => (
+                    <button
+                      key={iorP.label}
+                      onClick={() => updateMaterial(activeMaterial.id, { ior: iorP.val })}
+                      className={`py-1 rounded text-[8px] font-bold transition-all border ${
+                        Math.abs((activeMaterial.ior ?? 1.5) - iorP.val) < 0.02
+                          ? 'bg-blue-600/30 text-blue-200 border-blue-500'
+                          : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:bg-zinc-800'
+                      }`}
+                    >
+                      {iorP.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Dispersión Cromática (Prisma / Arcoíris) */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Dispersión Cromática (Prisma)</label>
+                  <span className="font-mono text-indigo-400">{(activeMaterial.dispersion ?? 0.0).toFixed(3)}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="0.2" step="0.005"
+                  value={activeMaterial.dispersion ?? 0.0}
+                  onChange={e => updateMaterial(activeMaterial.id, { dispersion: parseFloat(e.target.value) })}
+                  className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Espesor y Atenuación Volumétrica */}
+              <div className="space-y-2 bg-black/20 p-2.5 rounded-lg border border-white/5">
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-400">Espesor Volumétrico (Thickness)</label>
+                    <span className="font-mono text-zinc-300">{(activeMaterial.thickness ?? 0.0).toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="5.0" step="0.05"
+                    value={activeMaterial.thickness ?? 0.0}
+                    onChange={e => updateMaterial(activeMaterial.id, { thickness: parseFloat(e.target.value) })}
+                    className="w-full accent-blue-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div className="space-y-1">
+                    <label className="text-[9px] text-zinc-500">Color de Atenuación</label>
+                    <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded border border-white/5">
+                      <input 
+                        type="color" 
+                        value={activeMaterial.attenuationColor || '#ffffff'}
+                        onChange={e => updateMaterial(activeMaterial.id, { attenuationColor: e.target.value })}
+                        className="w-4 h-4 rounded bg-transparent border-none cursor-pointer"
+                      />
+                      <span className="text-[9px] font-mono text-zinc-300">{activeMaterial.attenuationColor || '#ffffff'}</span>
                     </div>
                   </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <TextureSlot 
-                  label="Roughness" 
-                  texture={activeMaterial.roughnessMap} 
-                  onDrop={e => onDropTexture(e, 'roughnessMap')}
-                  onClear={() => updateMaterial(activeMaterial.id, { roughnessMap: undefined })}
-                />
-                <TextureSlot 
-                  label="Metalness" 
-                  texture={activeMaterial.metalnessMap} 
-                  onDrop={e => onDropTexture(e, 'metalnessMap')}
-                  onClear={() => updateMaterial(activeMaterial.id, { metalnessMap: undefined })}
-                />
-                <TextureSlot 
-                  label="Ambient Occlusion" 
-                  texture={activeMaterial.aoMap} 
-                  onDrop={e => onDropTexture(e, 'aoMap')}
-                  onClear={() => updateMaterial(activeMaterial.id, { aoMap: undefined })}
-                />
-              </>
-            )}
-          </div>
-        </section>
 
-        {/* Advanced Physical Section */}
-        <section className="space-y-4">
-          <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
-            <Zap size={12} />
-            <span>Propiedades Físicas Avanzadas</span>
-          </div>
-
-          <div className="space-y-4 bg-white/5 p-3 rounded-xl border border-white/5">
-            {/* Transmission */}
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] text-zinc-400">Transmisión (Vidrio)</label>
-                <span className="text-[10px] font-mono">{(activeMaterial.transmission ?? 0).toFixed(2)}</span>
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[9px]">
+                      <label className="text-zinc-500">Distancia</label>
+                      <span className="font-mono text-zinc-400">{activeMaterial.attenuationDistance ?? 1.0}</span>
+                    </div>
+                    <input 
+                      type="range" min="0.1" max="10" step="0.1"
+                      value={activeMaterial.attenuationDistance ?? 1.0}
+                      onChange={e => updateMaterial(activeMaterial.id, { attenuationDistance: parseFloat(e.target.value) })}
+                      className="w-full accent-blue-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+                </div>
               </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.transmission ?? 0}
-                onChange={e => updateMaterial(activeMaterial.id, { 
-                  transmission: parseFloat(e.target.value),
-                  transparent: parseFloat(e.target.value) > 0 || activeMaterial.opacity < 1
-                })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-              />
             </div>
+          )}
+        </div>
 
-            {/* Clearcoat */}
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] text-zinc-400">Barniz (Clearcoat)</label>
-                <span className="text-[10px] font-mono">{(activeMaterial.clearcoat ?? 0).toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.clearcoat ?? 0}
-                onChange={e => updateMaterial(activeMaterial.id, { clearcoat: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-              />
+        {/* ── SECCIÓN 4: ANISOTROPÍA (METALES CEPILLADOS & DISCOS) ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('anisotropy')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Disc size={13} className="text-emerald-400" />
+              <span>Anisotropía (Metales Cepillados & Radial)</span>
+              {(activeMaterial.anisotropy ?? 0) > 0 && (
+                <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-1 rounded border border-emerald-500/30">
+                  {((activeMaterial.anisotropy ?? 0) * 100).toFixed(0)}%
+                </span>
+              )}
             </div>
+            {openSections.anisotropy ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
 
-            {/* Emissive */}
-            <div className="space-y-3 pt-2 border-t border-white/5">
+          {openSections.anisotropy && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              <p className="text-[9px] text-zinc-400 leading-tight">
+                Estira los brillos especulares en una dirección angular (aluminio cepillado, surcos de discos de vinilo, sartenes).
+              </p>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Intensidad de Anisotropía</label>
+                  <span className="font-mono text-emerald-400 font-bold">{((activeMaterial.anisotropy ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.anisotropy ?? 0}
+                  onChange={e => updateMaterial(activeMaterial.id, { anisotropy: parseFloat(e.target.value) })}
+                  className="w-full accent-emerald-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Rotación de la Anisotropía</label>
+                  <span className="font-mono text-zinc-300">{(activeMaterial.anisotropyRotation ?? 0).toFixed(0)}°</span>
+                </div>
+                <input 
+                  type="range" min="0" max="360" step="1"
+                  value={activeMaterial.anisotropyRotation ?? 0}
+                  onChange={e => updateMaterial(activeMaterial.id, { anisotropyRotation: parseFloat(e.target.value) })}
+                  className="w-full accent-emerald-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 5: BARNIZ Y LACADOS (CLEARCOAT) ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('clearcoat')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Shield size={13} className="text-amber-400" />
+              <span>Barniz & Lacados (Clearcoat)</span>
+              {(activeMaterial.clearcoat ?? 0) > 0 && (
+                <span className="text-[8px] bg-amber-500/20 text-amber-300 px-1 rounded border border-amber-500/30">
+                  {((activeMaterial.clearcoat ?? 0) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            {openSections.clearcoat ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.clearcoat && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              <p className="text-[9px] text-zinc-400 leading-tight">
+                Simula una capa exterior de barniz brillante sobre la superficie base (pintura de carrocerías, fibra de carbono lacada, madera tratada).
+              </p>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Intensidad de Barniz (Clearcoat)</label>
+                  <span className="font-mono text-amber-400 font-bold">{((activeMaterial.clearcoat ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.clearcoat ?? 0}
+                  onChange={e => updateMaterial(activeMaterial.id, { clearcoat: parseFloat(e.target.value) })}
+                  className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Rugosidad del Barniz (Clearcoat Roughness)</label>
+                  <span className="font-mono text-zinc-300">{(activeMaterial.clearcoatRoughness ?? 0.05).toFixed(2)}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.clearcoatRoughness ?? 0.05}
+                  onChange={e => updateMaterial(activeMaterial.id, { clearcoatRoughness: parseFloat(e.target.value) })}
+                  className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 6: TELAS Y TERCIOPELO (SHEEN) ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('sheen')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Feather size={13} className="text-rose-400" />
+              <span>Telas & Terciopelo (Sheen)</span>
+              {(activeMaterial.sheen ?? 0) > 0 && (
+                <span className="text-[8px] bg-rose-500/20 text-rose-300 px-1 rounded border border-rose-500/30">
+                  {((activeMaterial.sheen ?? 0) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            {openSections.sheen ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.sheen && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              <p className="text-[9px] text-zinc-400 leading-tight">
+                Genera retro-dispersión y suavidad de micro-vellosidades en los bordes de la tela o terciopelo.
+              </p>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Intensidad Sheen (Terciopelo)</label>
+                  <span className="font-mono text-rose-400 font-bold">{((activeMaterial.sheen ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.sheen ?? 0}
+                  onChange={e => updateMaterial(activeMaterial.id, { sheen: parseFloat(e.target.value) })}
+                  className="w-full accent-rose-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 items-end">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-zinc-400">Color de Sheen</label>
+                  <div className="flex items-center gap-2 bg-white/5 p-1.5 h-8 rounded-lg border border-white/5">
+                    <input 
+                      type="color" 
+                      value={activeMaterial.sheenColor || '#ffffff'}
+                      onChange={e => updateMaterial(activeMaterial.id, { sheenColor: e.target.value })}
+                      className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                    />
+                    <span className="text-[10px] font-mono uppercase text-zinc-300">{activeMaterial.sheenColor || '#ffffff'}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-400">Rugosidad Sheen</label>
+                    <span className="font-mono text-zinc-400">{(activeMaterial.sheenRoughness ?? 0.5).toFixed(2)}</span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.01"
+                    value={activeMaterial.sheenRoughness ?? 0.5}
+                    onChange={e => updateMaterial(activeMaterial.id, { sheenRoughness: parseFloat(e.target.value) })}
+                    className="w-full accent-rose-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 7: IRIDISCENCIA & PELÍCULA FINA ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('iridescence')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Gem size={13} className="text-fuchsia-400" />
+              <span>Iridiscencia & Película Fina</span>
+              {(activeMaterial.iridescence ?? 0) > 0 && (
+                <span className="text-[8px] bg-fuchsia-500/20 text-fuchsia-300 px-1 rounded border border-fuchsia-500/30">
+                  {((activeMaterial.iridescence ?? 0) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            {openSections.iridescence ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.iridescence && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              <p className="text-[9px] text-zinc-400 leading-tight">
+                Interferencia óptica de capa delgada que produce cambios de color iridiscentes según el ángulo de visión (pompas de jabón, manchas de aceite, nácar, alas de insectos).
+              </p>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Intensidad Iridiscente</label>
+                  <span className="font-mono text-fuchsia-400 font-bold">{((activeMaterial.iridescence ?? 0) * 100).toFixed(0)}%</span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.01"
+                  value={activeMaterial.iridescence ?? 0}
+                  onChange={e => updateMaterial(activeMaterial.id, { iridescence: parseFloat(e.target.value) })}
+                  className="w-full accent-fuchsia-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">IOR Película Iridiscente</label>
+                  <span className="font-mono text-zinc-300">{(activeMaterial.iridescenceIOR ?? 1.3).toFixed(2)}</span>
+                </div>
+                <input 
+                  type="range" min="1.0" max="3.0" step="0.05"
+                  value={activeMaterial.iridescenceIOR ?? 1.3}
+                  onChange={e => updateMaterial(activeMaterial.id, { iridescenceIOR: parseFloat(e.target.value) })}
+                  className="w-full accent-fuchsia-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 8: EMISIÓN Y BRILLO (GLOW) ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('emissive')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Sun size={13} className="text-yellow-400" />
+              <span>Emisión & Brillo (Glow)</span>
+              {activeMaterial.emissive && activeMaterial.emissive !== '#000000' && (
+                <span className="text-[8px] bg-yellow-500/20 text-yellow-300 px-1 rounded border border-yellow-500/30">ACTIVO</span>
+              )}
+            </div>
+            {openSections.emissive ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.emissive && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
               <div className="flex items-center justify-between">
-                <label className="text-[10px] text-zinc-400">Emisión (Glow)</label>
-                <input 
-                  type="color" 
-                  value={activeMaterial.emissive}
-                  onChange={e => updateMaterial(activeMaterial.id, { emissive: e.target.value })}
-                  className="w-6 h-6 rounded bg-transparent border-none cursor-pointer"
-                />
-              </div>
-              <div className="flex items-center gap-3">
-                <Sun size={12} className="text-yellow-400" />
-                <input 
-                  type="range" min="0" max="20" step="0.1"
-                  value={activeMaterial.emissiveIntensity}
-                  onChange={e => updateMaterial(activeMaterial.id, { emissiveIntensity: parseFloat(e.target.value) })}
-                  className="flex-1 accent-yellow-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                />
-                <span className="text-[10px] font-mono w-6">{activeMaterial.emissiveIntensity}</span>
-              </div>
-            </div>
-
-            {/* Sheen */}
-            <div className="space-y-3 pt-2 border-t border-white/5">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] text-zinc-400">Terciopelo (Sheen)</label>
-                <span className="text-[10px] font-mono">{(activeMaterial.sheen ?? 0).toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.sheen ?? 0}
-                onChange={e => updateMaterial(activeMaterial.id, { sheen: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-              />
-              {activeMaterial.sheen! > 0 && (
-                <div className="flex items-center justify-between">
-                  <label className="text-[9px] text-zinc-500">Color Sheen</label>
+                <label className="text-[10px] text-zinc-400">Color de Emisión</label>
+                <div className="flex items-center gap-2 bg-white/5 p-1 rounded border border-white/5">
                   <input 
                     type="color" 
-                    value={activeMaterial.sheenColor || '#ffffff'}
-                    onChange={e => updateMaterial(activeMaterial.id, { sheenColor: e.target.value })}
+                    value={activeMaterial.emissive || '#000000'}
+                    onChange={e => updateMaterial(activeMaterial.id, { emissive: e.target.value })}
                     className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                  />
+                  <span className="text-[10px] font-mono uppercase text-zinc-300">{activeMaterial.emissive || '#000000'}</span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-400">Intensidad Emisiva</label>
+                  <span className="font-mono text-yellow-400 font-bold">{activeMaterial.emissiveIntensity ?? 1}</span>
+                </div>
+                <input 
+                  type="range" min="0" max="20" step="0.1"
+                  value={activeMaterial.emissiveIntensity ?? 1}
+                  onChange={e => updateMaterial(activeMaterial.id, { emissiveIntensity: parseFloat(e.target.value) })}
+                  className="w-full accent-yellow-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 9: FILTROS DE DESGASTE (ÓXIDO, ARAÑAZOS, SUCpipeline) ── */}
+        <div className="bg-amber-950/20 rounded-xl border border-amber-500/20 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('filters')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-amber-400">
+              <Sparkles size={13} />
+              <span>Imperfecciones & Desgaste (Filtros)</span>
+            </div>
+            {openSections.filters ? <ChevronDown size={14} className="text-amber-500" /> : <ChevronRight size={14} className="text-amber-500" />}
+          </button>
+
+          {openSections.filters && (
+            <div className="p-3 pt-1 space-y-2.5 border-t border-amber-500/20">
+              {/* Slider Óxido */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
+                    <span>🦀</span> Óxido / Corrosión (Rust)
+                  </span>
+                  <span className="font-mono text-amber-400 font-bold">
+                    {((activeMaterial.filters?.rust ?? 0) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.05"
+                  value={activeMaterial.filters?.rust ?? 0}
+                  onChange={e => handleFilterChange('rust', parseFloat(e.target.value))}
+                  className="w-full accent-amber-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Slider Arañazos */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
+                    <span>🔪</span> Arañazos / Incisiones (Scratches)
+                  </span>
+                  <span className="font-mono text-cyan-400 font-bold">
+                    {((activeMaterial.filters?.scratches ?? 0) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.05"
+                  value={activeMaterial.filters?.scratches ?? 0}
+                  onChange={e => handleFilterChange('scratches', parseFloat(e.target.value))}
+                  className="w-full accent-cyan-400 h-1.5 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Slider Suciedad / Grietas */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
+                    <span>🟤</span> Suciedad / Grietas (Dirt)
+                  </span>
+                  <span className="font-mono text-yellow-500 font-bold">
+                    {((activeMaterial.filters?.dirt ?? 0) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="1" step="0.05"
+                  value={activeMaterial.filters?.dirt ?? 0}
+                  onChange={e => handleFilterChange('dirt', parseFloat(e.target.value))}
+                  className="w-full accent-yellow-500 h-1.5 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Presets Rápidos */}
+              <div className="grid grid-cols-4 gap-1.5 pt-1.5 border-t border-amber-500/20">
+                <button
+                  onClick={() => {
+                    handleFilterChange('rust', 0);
+                    handleFilterChange('scratches', 0);
+                    handleFilterChange('dirt', 0);
+                  }}
+                  className="py-1 px-1 bg-zinc-800 hover:bg-zinc-700 text-[9px] font-bold text-zinc-300 rounded text-center transition-colors truncate"
+                >
+                  Limpio
+                </button>
+                <button
+                  onClick={() => {
+                    handleFilterChange('rust', 0.15);
+                    handleFilterChange('scratches', 0.2);
+                    handleFilterChange('dirt', 0.15);
+                  }}
+                  className="py-1 px-1 bg-amber-900/40 hover:bg-amber-800/60 text-[9px] font-bold text-amber-300 rounded text-center transition-colors border border-amber-500/30 truncate"
+                >
+                  Uso Ligero
+                </button>
+                <button
+                  onClick={() => {
+                    handleFilterChange('rust', 0.45);
+                    handleFilterChange('scratches', 0.5);
+                    handleFilterChange('dirt', 0.4);
+                  }}
+                  className="py-1 px-1 bg-amber-900/60 hover:bg-amber-800/80 text-[9px] font-bold text-amber-200 rounded text-center transition-colors border border-amber-500/40 truncate"
+                >
+                  Desgastado
+                </button>
+                <button
+                  onClick={() => {
+                    handleFilterChange('rust', 0.85);
+                    handleFilterChange('scratches', 0.8);
+                    handleFilterChange('dirt', 0.75);
+                  }}
+                  className="py-1 px-1 bg-red-950/80 hover:bg-red-900/80 text-[9px] font-bold text-red-200 rounded text-center transition-colors border border-red-500/40 truncate"
+                >
+                  Extremo
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 10: MAPEO Y DESENVOLVIMIENTO UV (BLENDER STANDARD) ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('projection')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-indigo-400">
+              <Box size={13} />
+              <span>Mapeo & Desenvolvimiento UV (Blender)</span>
+            </div>
+            {openSections.projection ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.projection && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { id: 'SMART_UV', label: 'Smart UV', icon: '🧠' },
+                  { id: 'BOX', label: 'Cúbico (Box)', icon: '📦' },
+                  { id: 'TRIPLANAR', label: 'Triplanar', icon: '💎' },
+                  { id: 'LIGHTMAP', label: 'Lightmap', icon: '💡' },
+                  { id: 'PLANAR', label: 'Plana', icon: '📐' },
+                  { id: 'SPHERICAL', label: 'Esférica', icon: '🌐' },
+                  { id: 'CYLINDRICAL', label: 'Cilíndrica', icon: '🛢️' },
+                  { id: 'UV', label: 'Auto Normal', icon: '🗺️' },
+                ].map(proj => {
+                  const currentMapping = activeMaterial.uvwMapping || 'BOX';
+                  const isSelected = currentMapping === proj.id || (proj.id === 'SMART_UV' && currentMapping === 'UV');
+                  return (
+                    <button
+                      key={proj.id}
+                      onClick={() => {
+                        updateMaterial(activeMaterial.id, { uvwMapping: proj.id as any });
+                        handleAutoUVProjection(proj.id);
+                      }}
+                      className={`px-1.5 py-1.5 rounded-lg text-[9px] font-bold flex flex-col items-center justify-center gap-0.5 transition-all border ${
+                        isSelected
+                          ? 'bg-indigo-600 text-white border-indigo-500 shadow-md shadow-indigo-600/30'
+                          : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/5'
+                      }`}
+                    >
+                      <span className="text-[13px]">{proj.icon}</span>
+                      <span className="truncate w-full text-center">{proj.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Controles de Smart UV Project (Ángulo límite, Margen de islas, Relajación contra estiramiento) */}
+              {((activeMaterial.uvwMapping || 'BOX') === 'SMART_UV' || (activeMaterial.uvwMapping || 'BOX') === 'UV') && (
+                <div className="space-y-2 bg-indigo-950/25 p-2.5 rounded-lg border border-indigo-500/25">
+                  <div className="text-[9px] font-bold text-indigo-300 uppercase tracking-wider flex items-center justify-between">
+                    <span>Parámetros Smart UV Project</span>
+                    <span className="text-[8px] bg-indigo-500/20 text-indigo-200 px-1 py-0.5 rounded">Blender 5.x</span>
+                  </div>
+
+                  {/* Ángulo Límite */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[10px]">
+                      <label className="text-zinc-400">Ángulo Límite (Angle Limit)</label>
+                      <span className="font-mono text-indigo-400">{(activeMaterial.uvAngleThreshold ?? 66).toFixed(0)}°</span>
+                    </div>
+                    <input 
+                      type="range" min="20" max="89" step="1"
+                      value={activeMaterial.uvAngleThreshold ?? 66}
+                      onChange={e => {
+                        const val = parseFloat(e.target.value);
+                        updateMaterial(activeMaterial.id, { uvAngleThreshold: val });
+                      }}
+                      onPointerUp={() => handleAutoUVProjection('SMART_UV')}
+                      className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Margen entre islas */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[10px]">
+                      <label className="text-zinc-400">Margen de Islas (Island Margin)</label>
+                      <span className="font-mono text-indigo-400">{(activeMaterial.uvIslandMargin ?? 0.02).toFixed(3)}</span>
+                    </div>
+                    <input 
+                      type="range" min="0.001" max="0.08" step="0.002"
+                      value={activeMaterial.uvIslandMargin ?? 0.02}
+                      onChange={e => {
+                        const val = parseFloat(e.target.value);
+                        updateMaterial(activeMaterial.id, { uvIslandMargin: val });
+                      }}
+                      onPointerUp={() => handleAutoUVProjection('SMART_UV')}
+                      className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+
+                  {/* Pasos de Relajación Antiestiramiento */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[10px]">
+                      <label className="text-zinc-400">Relajación Laplaciana (Min Stretch)</label>
+                      <span className="font-mono text-indigo-400">{activeMaterial.uvRelaxIterations ?? 6} iter</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="15" step="1"
+                      value={activeMaterial.uvRelaxIterations ?? 6}
+                      onChange={e => {
+                        const val = parseInt(e.target.value, 10);
+                        updateMaterial(activeMaterial.id, { uvRelaxIterations: val });
+                      }}
+                      onPointerUp={() => handleAutoUVProjection('SMART_UV')}
+                      className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {((activeMaterial.uvwMapping || 'BOX') === 'TRIPLANAR' || (activeMaterial.uvwMapping || 'BOX') === 'BOX') && (
+                <div className="space-y-1.5 bg-indigo-950/30 p-2 rounded-lg border border-indigo-500/30">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <span className="text-zinc-200 font-bold flex items-center gap-1">
+                      <Sparkles size={11} className="text-indigo-400" />
+                      <span>Blend (Suavizado de bordes)</span>
+                    </span>
+                    <span className="font-mono text-indigo-400 font-bold">
+                      {((activeMaterial.triplanarBlend ?? 0.5) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1" step="0.01"
+                    value={activeMaterial.triplanarBlend ?? 0.5}
+                    onChange={e => updateMaterial(activeMaterial.id, { triplanarBlend: parseFloat(e.target.value) })}
+                    className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
                   />
                 </div>
               )}
-            </div>
 
-            {/* Iridescence */}
-            <div className="space-y-3 pt-2 border-t border-white/5">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] text-zinc-400">Iridiscencia</label>
-                <span className="text-[10px] font-mono">{(activeMaterial.iridescence ?? 0).toFixed(2)}</span>
+              <div className="pt-1 flex gap-2">
+                <button
+                  onClick={() => handleAutoUVProjection()}
+                  className="flex-1 py-1.5 px-2 bg-indigo-600/20 hover:bg-indigo-600/35 text-indigo-300 hover:text-white border border-indigo-500/40 rounded-xl text-[10px] font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98"
+                >
+                  <Zap size={12} className="text-indigo-400" />
+                  <span>Desplegar / Recalcular UV</span>
+                </button>
+                <button
+                  onClick={() => updateMaterial(activeMaterial.id, { uvDebug: !activeMaterial.uvDebug })}
+                  className={`py-1.5 px-2 rounded-xl text-[10px] font-bold border transition-all flex items-center justify-center gap-1.5 shadow-sm active:scale-98 ${
+                    activeMaterial.uvDebug 
+                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-600/30' 
+                      : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-white/10'
+                  }`}
+                  title="Activar/Desactivar textura Checkerboard UV para este material"
+                >
+                  <Grid size={12} />
+                  <span>UV Debug: {activeMaterial.uvDebug ? 'ON' : 'OFF'}</span>
+                </button>
               </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.iridescence ?? 0}
-                onChange={e => updateMaterial(activeMaterial.id, { iridescence: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-              />
             </div>
+          )}
+        </div>
 
-            {/* Specular */}
-            <div className="space-y-3 pt-2 border-t border-white/5">
-              <div className="flex justify-between items-center">
-                <label className="text-[10px] text-zinc-400">Especular (Intensidad)</label>
-                <span className="text-[10px] font-mono">{(activeMaterial.specularIntensity ?? 1).toFixed(2)}</span>
-              </div>
-              <input 
-                type="range" min="0" max="1" step="0.01"
-                value={activeMaterial.specularIntensity ?? 1}
-                onChange={e => updateMaterial(activeMaterial.id, { specularIntensity: parseFloat(e.target.value) })}
-                className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer"
-              />
+        {/* ── SECCIÓN 11: MAPAS DE TEXTURAS & SLOTS EXPANDIDOS ── */}
+        <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('maps')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-zinc-300">
+              <Layers size={13} className="text-indigo-400" />
+              <span>Mapas de Textura PBR (Slots)</span>
             </div>
-          </div>
-        </section>
+            {openSections.maps ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {openSections.maps && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5">
+              {/* Toggles Compactados en el lateral superior */}
+              <div className="flex items-center justify-between text-[9px] font-bold text-zinc-500 uppercase bg-black/20 p-2 rounded-lg border border-white/5">
+                <div className="flex items-center gap-1.5">
+                  <span>Flip Y (Texturas)</span>
+                  <button 
+                    onClick={() => updateMaterial(activeMaterial.id, { flipY: !(activeMaterial.flipY ?? true) })}
+                    className={`w-7 h-3.5 rounded-full transition-colors relative ${activeMaterial.flipY ?? true ? 'bg-indigo-600' : 'bg-zinc-800'}`}
+                  >
+                    <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${activeMaterial.flipY ?? true ? 'left-4' : 'left-0.5'}`} />
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span>Usar ORM Compuesto</span>
+                  <button 
+                    onClick={() => updateMaterial(activeMaterial.id, { useORM: !activeMaterial.useORM })}
+                    className={`w-7 h-3.5 rounded-full transition-colors relative ${activeMaterial.useORM ? 'bg-indigo-600' : 'bg-zinc-800'}`}
+                  >
+                    <div className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${activeMaterial.useORM ? 'left-4' : 'left-0.5'}`} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Tiling / Scale / Offset */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] text-zinc-500 truncate" title="Repetición (Scale)">Repetición</span>
+                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
+                    <span className="text-[9px] text-zinc-600">U</span>
+                    <input 
+                      type="number" step="0.1"
+                      value={activeMaterial.mapRepeat?.[0] ?? 1}
+                      onChange={e => updateMaterial(activeMaterial.id, { mapRepeat: [parseFloat(e.target.value) || 1, activeMaterial.mapRepeat?.[1] ?? 1] })}
+                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] text-zinc-500 truncate" title="Desplazamiento (Offset)">Desplazamiento</span>
+                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
+                    <span className="text-[9px] text-zinc-600">U</span>
+                    <input 
+                      type="number" step="0.05"
+                      value={activeMaterial.mapOffset?.[0] ?? 0}
+                      onChange={e => updateMaterial(activeMaterial.id, { mapOffset: [parseFloat(e.target.value) || 0, activeMaterial.mapOffset?.[1] ?? 0] })}
+                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <span className="text-[9px] text-zinc-500 truncate" title="Rotación (Grados)">Rotación</span>
+                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
+                    <input 
+                      type="number" step="5"
+                      value={activeMaterial.mapRotation ?? 0}
+                      onChange={e => updateMaterial(activeMaterial.id, { mapRotation: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                    />
+                    <span className="text-[9px] text-zinc-600">°</span>
+                  </div>
+                </div>
+              </div>
+
+              {activeMaterial.useORM && (activeMaterial.aoMap || activeMaterial.roughnessMap || activeMaterial.metalnessMap) && (
+                <button 
+                  onClick={() => useStore.getState().generateORM(activeMaterial.id)}
+                  className="w-full py-1.5 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 text-[10px] font-bold rounded border border-indigo-500/30 transition-colors"
+                >
+                  GENERAR MAPA COMPUESTO ORM
+                </button>
+              )}
+
+              {/* Ranuras de imágenes PBR */}
+              <div className="grid grid-cols-2 gap-2.5">
+                <TextureSlot 
+                  label="Albedo / Base Color" 
+                  texture={activeMaterial.map} 
+                  onDrop={e => onDropTexture(e, 'map')}
+                  onClear={() => updateMaterial(activeMaterial.id, { map: undefined })}
+                />
+                <TextureSlot 
+                  label={`Normal Map (${activeMaterial.normalFormat === 'DIRECTX' ? 'DirectX' : 'OpenGL'})`}
+                  texture={activeMaterial.normalMap} 
+                  onDrop={e => onDropTexture(e, 'normalMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { normalMap: undefined })}
+                />
+
+                {activeMaterial.useORM ? (
+                  <div className="col-span-2 space-y-2">
+                    <TextureSlot 
+                      label="ORM Map (R:AO, G:Rough, B:Metal)" 
+                      texture={activeMaterial.ormMap} 
+                      onDrop={e => onDropTexture(e, 'ormMap')}
+                      onClear={() => updateMaterial(activeMaterial.id, { ormMap: undefined })}
+                      isLarge
+                    />
+                    <div className="grid grid-cols-3 gap-2">
+                      <IntensityControl 
+                        label="AO" 
+                        value={activeMaterial.ormIntensityAO ?? 1} 
+                        onChange={v => updateMaterial(activeMaterial.id, { ormIntensityAO: v })} 
+                      />
+                      <IntensityControl 
+                        label="Rough" 
+                        value={activeMaterial.ormIntensityRoughness ?? 1} 
+                        onChange={v => updateMaterial(activeMaterial.id, { ormIntensityRoughness: v })} 
+                      />
+                      <IntensityControl 
+                        label="Metal" 
+                        value={activeMaterial.ormIntensityMetalness ?? 1} 
+                        onChange={v => updateMaterial(activeMaterial.id, { ormIntensityMetalness: v })} 
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <TextureSlot 
+                      label="Roughness" 
+                      texture={activeMaterial.roughnessMap} 
+                      onDrop={e => onDropTexture(e, 'roughnessMap')}
+                      onClear={() => updateMaterial(activeMaterial.id, { roughnessMap: undefined })}
+                    />
+                    <TextureSlot 
+                      label="Metalness" 
+                      texture={activeMaterial.metalnessMap} 
+                      onDrop={e => onDropTexture(e, 'metalnessMap')}
+                      onClear={() => updateMaterial(activeMaterial.id, { metalnessMap: undefined })}
+                    />
+                    <TextureSlot 
+                      label="Ambient Occlusion" 
+                      texture={activeMaterial.aoMap} 
+                      onDrop={e => onDropTexture(e, 'aoMap')}
+                      onClear={() => updateMaterial(activeMaterial.id, { aoMap: undefined })}
+                    />
+                    <TextureSlot 
+                      label="Displacement / Height" 
+                      texture={activeMaterial.displacementMap} 
+                      onDrop={e => onDropTexture(e, 'displacementMap')}
+                      onClear={() => updateMaterial(activeMaterial.id, { displacementMap: undefined })}
+                    />
+                  </>
+                )}
+
+                <TextureSlot 
+                  label="Emissive Map" 
+                  texture={activeMaterial.emissiveMap} 
+                  onDrop={e => onDropTexture(e, 'emissiveMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { emissiveMap: undefined })}
+                />
+                <TextureSlot 
+                  label="Alpha / Opacidad" 
+                  texture={activeMaterial.alphaMap} 
+                  onDrop={e => onDropTexture(e, 'alphaMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { alphaMap: undefined })}
+                />
+                <TextureSlot 
+                  label="Transmission Map" 
+                  texture={activeMaterial.transmissionMap} 
+                  onDrop={e => onDropTexture(e, 'transmissionMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { transmissionMap: undefined })}
+                />
+                <TextureSlot 
+                  label="Anisotropy Map" 
+                  texture={activeMaterial.anisotropyMap} 
+                  onDrop={e => onDropTexture(e, 'anisotropyMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { anisotropyMap: undefined })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1439,7 +2613,7 @@ const TextureSlot: React.FC<{
 
   return (
     <div className={`space-y-1.5 ${isLarge ? 'col-span-2' : ''}`}>
-      <label className="text-[9px] text-zinc-600 font-bold uppercase tracking-tighter">{label}</label>
+      <label className="text-[9px] text-zinc-500 font-bold uppercase tracking-tighter truncate block" title={label}>{label}</label>
       <div
         onDragOver={e => { e.preventDefault(); setIsOver(true); }}
         onDragLeave={() => setIsOver(false)}

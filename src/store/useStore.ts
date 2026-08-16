@@ -1,12 +1,39 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import { createORMMap } from '../utils/materialUtils';
-import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType, ReferenceImage, MeshFace, V3, BezierHandle, SilhouetteState, ViewMode, MaterialData, CameraState, LightType, LightObject, CameraObject, TransformMode } from '../types';
+import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType, ReferenceImage, MeshFace, V3, BezierHandle, SilhouetteState, ViewMode, MaterialData, CameraState, LightType, LightObject, CameraObject, TransformMode, NurbsCurveData, NurbsSurfaceData } from '../types';
 import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
 import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
 import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
+import {
+  createDefaultNurbsCurve,
+  createDefaultNurbsCircle,
+  createDefaultNurbsSurface,
+  createDefaultNurbsCylinder,
+  createDefaultNurbsCone,
+  createDefaultNurbsSphere,
+  createDefaultNurbsTorus,
+  extrudeNurbsCurve,
+  revolveNurbsCurve,
+  loftNurbsCurves,
+  subdivideNurbsCurve,
+  subdivideNurbsSurface,
+  switchNurbsDirection,
+  extrudeNurbsSurfaceRow,
+  tessellateNurbsSurface,
+  tessellateNurbsCurveToMesh,
+  smoothNurbsCurve,
+  smoothNurbsSurface,
+  resetNurbsWeights,
+  resetNurbsTiltsAndRadii,
+  setNurbsOrder,
+  toggleNurbsEndpoint,
+  toggleNurbsCyclic,
+  setNurbsKnotType,
+} from '../utils/nurbs';
+import type { NurbsKnotType } from '../utils/nurbs';
 
 const DEFAULT_CUBE_GEOM = generatePrimitive('CUBE', { segments: 1 });
 
@@ -290,6 +317,23 @@ interface Store extends AppState {
   recenterPivotObject: (idInput?: string) => Promise<void>;
   alignToGrid: (id: string) => void;
   alignToGround: (id: string) => void;
+
+  // NURBS Methods
+  addNurbsObject: (type: 'NURBS_CURVE' | 'NURBS_CIRCLE' | 'NURBS_SURFACE' | 'NURBS_CYLINDER' | 'NURBS_CONE' | 'NURBS_SPHERE' | 'NURBS_TORUS') => void;
+  updateNurbsControlPoint: (id: string, uIndex: number, vIndex: number | undefined, point: V3, weight?: number) => void;
+  updateNurbsControlPoints: (id: string, updates: { u: number; v?: number; point: V3; weight?: number }[]) => void;
+  selectNurbsControlPoint: (id: string, uIndex: number | null, vIndex?: number | null, multi?: boolean) => void;
+  selectNurbsControlPoints: (id: string, points: { u: number; v?: number }[]) => void;
+  subdivideNurbsObject: (id: string, dir?: 'U' | 'V' | 'BOTH') => void;
+  extrudeNurbsObject: (id: string, delta?: V3) => void;
+  revolveNurbsObject: (id: string, angleDeg?: number, axis?: 'x' | 'y' | 'z') => void;
+  loftNurbsObjects: (ids: string[]) => void;
+  fillNurbsObject: (id: string) => void;
+  switchNurbsDirectionObject: (id: string, dir?: 'U' | 'V') => void;
+  convertNurbsToMesh: (id: string) => void;
+  setNurbsDegree: (id: string, degreeU: number, degreeV?: number) => void;
+  setNurbsResolution: (id: string, resU: number, resV?: number) => void;
+  setNurbsControlPointWeight: (id: string, uIndex: number, vIndex: number | undefined, weight: number) => void;
 }
 
 function solidExtrudeMesh(
@@ -581,7 +625,24 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
-  selectObject: (id) => set({ selectedObjectId: id, selectedObjectIds: id ? [id] : [], selectedGLTFMeshes: [], selectedCameraId: null, selectedLightId: null }),
+  selectObject: (id) => {
+    const { project } = get();
+    set({
+      selectedObjectId: id,
+      selectedObjectIds: id ? [id] : [],
+      selectedGLTFMeshes: [],
+      selectedCameraId: null,
+      selectedLightId: null,
+      ...(id === null
+        ? {
+            project: {
+              ...project,
+              objects: project.objects.map(o => o.selectedNurbsControlPoint ? { ...o, selectedNurbsControlPoint: null } : o)
+            }
+          }
+        : {})
+    });
+  },
 
   toggleObjectSelection: (id, multi) => {
     const { selectedObjectIds } = get();
@@ -606,13 +667,20 @@ export const useStore = create<Store>()((set, get) => ({
     set({ selectedGLTFMeshes: newMeshes });
   },
   setIsolateGLTFSelection: (isolate) => set({ isolateGLTFSelection: isolate }),
-  clearSelection: () => set({ 
-    selectedVertexIndices: [], 
-    selectedFaceIndices: [], 
-    selectedEdgeIndices: [], 
-    selectedGLTFMeshes: [],
-    isolateGLTFSelection: false 
-  }),
+  clearSelection: () => {
+    const { project } = get();
+    set({ 
+      selectedVertexIndices: [], 
+      selectedFaceIndices: [], 
+      selectedEdgeIndices: [], 
+      selectedGLTFMeshes: [],
+      isolateGLTFSelection: false,
+      project: {
+        ...project,
+        objects: project.objects.map(o => o.selectedNurbsControlPoint ? { ...o, selectedNurbsControlPoint: null } : o)
+      }
+    });
+  },
   setMaximizedViewport: (viewport) => set({ maximizedViewport: viewport }),
   setViewportCamera: (viewport, cameraState) => set((state) => ({
     viewportCameras: { ...state.viewportCameras, [viewport]: cameraState }
@@ -768,6 +836,41 @@ export const useStore = create<Store>()((set, get) => ({
       case 'HEMISPHERE':   p.segments = 32; break;
       case 'CIRCLE':       p.segments = 32; break;
       case 'RING':         p.innerRadius = 0.25; p.outerRadius = 0.5; p.thetaSegments = 32; break;
+      case 'NURBS_CURVE':
+        p.nurbsCurve = createDefaultNurbsCurve();
+        p.segments = 32;
+        p.radius = 0.03;
+        break;
+      case 'NURBS_CIRCLE':
+        p.nurbsCurve = createDefaultNurbsCircle(1.0);
+        p.segments = 48;
+        p.tube = 0.03;
+        break;
+      case 'NURBS_SURFACE':
+        p.nurbsSurface = createDefaultNurbsSurface(2.0);
+        p.nurbsResolutionU = 16;
+        p.nurbsResolutionV = 16;
+        break;
+      case 'NURBS_CYLINDER':
+        p.nurbsSurface = createDefaultNurbsCylinder(0.8, 2.0);
+        p.nurbsResolutionU = 16;
+        p.nurbsResolutionV = 32;
+        break;
+      case 'NURBS_CONE':
+        p.nurbsSurface = createDefaultNurbsCone(1.0, 2.0);
+        p.nurbsResolutionU = 16;
+        p.nurbsResolutionV = 32;
+        break;
+      case 'NURBS_SPHERE':
+        p.nurbsSurface = createDefaultNurbsSphere(1.0);
+        p.nurbsResolutionU = 24;
+        p.nurbsResolutionV = 32;
+        break;
+      case 'NURBS_TORUS':
+        p.nurbsSurface = createDefaultNurbsTorus(1.0, 0.35);
+        p.nurbsResolutionU = 24;
+        p.nurbsResolutionV = 32;
+        break;
       default:             p.segments = 1;
     }
     const geom = generatePrimitive(type, p);
@@ -777,16 +880,22 @@ export const useStore = create<Store>()((set, get) => ({
       CAPSULE:'Cápsula',TETRAHEDRON:'Tetraedro',OCTAHEDRON:'Octaedro',TUBE:'Tubo',
       ARC:'Arco 3D',STAR:'Estrella 3D',
       WEDGE:'Cuña',HEMISPHERE:'Hemisferio',PLANE:'Plano',CIRCLE:'Círculo',RING:'Anillo',SHAPE:'Forma',
+      NURBS_CURVE:'Curva NURBS',NURBS_CIRCLE:'Círculo NURBS',NURBS_SURFACE:'Superficie NURBS',
+      NURBS_CYLINDER:'Cilindro NURBS',NURBS_CONE:'Cono NURBS',NURBS_SPHERE:'Esfera NURBS',NURBS_TORUS:'Toroide NURBS'
     };
+    const isNurbsType = type.startsWith('NURBS_');
     const newObj: CSGObject = {
       id: genId(),
       name: `${names[type] ?? type} ${state.project.objects.length + 1}`,
       type, operation: 'ADD',
       transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
       parameters: p,
+      nurbsCurve: p.nurbsCurve,
+      nurbsSurface: p.nurbsSurface,
+      isNurbs: isNurbsType,
       vertices: geom.vertices, faces: geom.faces,
       color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
-      smoothShading: ['SPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE'].includes(type),
+      smoothShading: ['SPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE', 'NURBS_SURFACE', 'NURBS_CYLINDER', 'NURBS_CONE', 'NURBS_SPHERE', 'NURBS_TORUS'].includes(type),
       opacity: 1, visible: true, keyframes: [],
     };
     set({ project: { ...state.project, objects: [...state.project.objects, newObj] }, selectedObjectId: newObj.id, selectedObjectIds: [newObj.id] });
@@ -2288,5 +2397,872 @@ export const useStore = create<Store>()((set, get) => ({
       o.id === objectId ? { ...o, keyframes: [] } : o
     )}});
     get().saveHistory();
+  },
+
+  // ── NURBS Actions ─────────────────────────────────────────────────────────
+  addNurbsObject: (type) => {
+    get().addObject(type);
+  },
+
+  selectNurbsControlPoint: (id, uIndex, vIndex, multi = false) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        objects: project.objects.map(o => {
+          if (o.id !== id) {
+            return o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0)
+              ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+              : o;
+          }
+          if (uIndex === null || uIndex === undefined || uIndex < 0) {
+            return { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] };
+          }
+          const v = vIndex !== null && vIndex !== undefined ? vIndex : undefined;
+          const targetPt = { u: uIndex, v };
+          if (multi) {
+            const existing = o.selectedNurbsControlPoints || (o.selectedNurbsControlPoint ? [o.selectedNurbsControlPoint] : []);
+            const idx = existing.findIndex(p => p.u === targetPt.u && (p.v ?? 0) === (targetPt.v ?? 0));
+            let nextPts: { u: number; v?: number }[];
+            if (idx >= 0) {
+              nextPts = existing.filter((_, i) => i !== idx);
+            } else {
+              nextPts = [...existing, targetPt];
+            }
+            return {
+              ...o,
+              selectedNurbsControlPoints: nextPts,
+              selectedNurbsControlPoint: nextPts.length > 0 ? nextPts[nextPts.length - 1] : null
+            };
+          } else {
+            return {
+              ...o,
+              selectedNurbsControlPoint: targetPt,
+              selectedNurbsControlPoints: [targetPt]
+            };
+          }
+        })
+      }
+    });
+  },
+
+  selectNurbsControlPoints: (id, points) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        objects: project.objects.map(o => {
+          if (o.id !== id) {
+            return o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0)
+              ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+              : o;
+          }
+          return {
+            ...o,
+            selectedNurbsControlPoints: points,
+            selectedNurbsControlPoint: points.length > 0 ? points[points.length - 1] : null
+          };
+        })
+      }
+    });
+  },
+
+  updateNurbsControlPoints: (id, updates) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || updates.length === 0) return;
+
+    if (obj.nurbsSurface) {
+      const surface = { ...obj.nurbsSurface };
+      const grid = surface.controlPoints.map(row => row.map(cp => ({ ...cp, point: [...cp.point] as V3 })));
+      for (const u of updates) {
+        const v = u.v ?? 0;
+        if (grid[u.u] && grid[u.u][v]) {
+          grid[u.u][v].point = u.point;
+          if (u.weight !== undefined) grid[u.u][v].weight = Math.max(0.01, u.weight);
+        }
+      }
+      surface.controlPoints = grid;
+      const geom = tessellateNurbsSurface(
+        surface,
+        obj.parameters.nurbsResolutionU ?? 16,
+        obj.parameters.nurbsResolutionV ?? 16
+      );
+
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsSurface: surface,
+                  parameters: { ...o.parameters, nurbsSurface: surface },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+    } else if (obj.nurbsCurve) {
+      const curve = { ...obj.nurbsCurve };
+      const pts = curve.controlPoints.map(cp => ({ ...cp, point: [...cp.point] as V3 }));
+      for (const u of updates) {
+        if (pts[u.u]) {
+          pts[u.u].point = u.point;
+          if (u.weight !== undefined) pts[u.u].weight = Math.max(0.01, u.weight);
+        }
+      }
+      curve.controlPoints = pts;
+      const geom = tessellateNurbsCurveToMesh(
+        curve,
+        obj.parameters.segments ?? 32,
+        obj.parameters.radius ?? 0.03
+      );
+
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsCurve: curve,
+                  parameters: { ...o.parameters, nurbsCurve: curve },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+    }
+  },
+
+  updateNurbsControlPoint: (id, uIndex, vIndex, point, weight) => {
+    get().updateNurbsControlPoints(id, [{ u: uIndex, v: vIndex, point, weight }]);
+  },
+
+  setNurbsControlPointWeight: (id, uIndex, vIndex, weight) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const surface = { ...obj.nurbsSurface };
+      const grid = surface.controlPoints.map(row => row.map(cp => ({ ...cp, point: [...cp.point] as V3 })));
+      const v = vIndex ?? 0;
+      if (grid[uIndex] && grid[uIndex][v]) {
+        grid[uIndex][v].weight = Math.max(0.01, weight);
+      }
+      surface.controlPoints = grid;
+      const geom = tessellateNurbsSurface(surface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: surface, parameters: { ...o.parameters, nurbsSurface: surface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const curve = { ...obj.nurbsCurve };
+      const pts = curve.controlPoints.map(cp => ({ ...cp, point: [...cp.point] as V3 }));
+      if (pts[uIndex]) pts[uIndex].weight = Math.max(0.01, weight);
+      curve.controlPoints = pts;
+      const geom = tessellateNurbsCurveToMesh(curve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: curve, parameters: { ...o.parameters, nurbsCurve: curve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  subdivideNurbsObject: (id, dir = 'BOTH') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = subdivideNurbsSurface(obj.nurbsSurface, dir);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = subdivideNurbsCurve(obj.nurbsCurve);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  extrudeNurbsObject: (id, delta = [0, 0.8, 0]) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsCurve) {
+      // Extrude curve into 3D Surface
+      const surface = extrudeNurbsCurve(obj.nurbsCurve, delta);
+      const geom = tessellateNurbsSurface(surface, 16, 20);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  type: 'NURBS_SURFACE',
+                  name: `${obj.name} (Extruido)`,
+                  nurbsCurve: undefined,
+                  nurbsSurface: surface,
+                  parameters: { ...o.parameters, nurbsCurve: undefined, nurbsSurface: surface, nurbsResolutionU: 16, nurbsResolutionV: 20 },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                  smoothShading: true,
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsSurface) {
+      // Extrude surface boundary row
+      const newSurface = extrudeNurbsSurfaceRow(obj.nurbsSurface, 'U', 'END', delta);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsSurface: newSurface,
+                  parameters: { ...o.parameters, nurbsSurface: newSurface },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  revolveNurbsObject: (id, angleDeg = 360, axis = 'y') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.nurbsCurve) return;
+
+    const surface = revolveNurbsCurve(obj.nurbsCurve, angleDeg, axis);
+    const geom = tessellateNurbsSurface(surface, 18, 28);
+
+    set({
+      project: {
+        ...project,
+        objects: project.objects.map(o =>
+          o.id === id
+            ? {
+                ...o,
+                type: 'NURBS_SURFACE',
+                name: `${obj.name} (Revolución)`,
+                nurbsCurve: undefined,
+                nurbsSurface: surface,
+                parameters: { ...o.parameters, nurbsCurve: undefined, nurbsSurface: surface, nurbsResolutionU: 18, nurbsResolutionV: 28 },
+                vertices: geom.vertices,
+                faces: geom.faces,
+                smoothShading: true,
+              }
+            : o
+        )
+      }
+    });
+    get().saveHistory();
+  },
+
+  loftNurbsObjects: (ids) => {
+    const { project } = get();
+    const curves = ids
+      .map(id => project.objects.find(o => o.id === id)?.nurbsCurve)
+      .filter((c): c is NurbsCurveData => !!c);
+
+    if (curves.length === 0) return;
+
+    const surface = loftNurbsCurves(curves);
+    const geom = tessellateNurbsSurface(surface, 16, 24);
+
+    const newObj: CSGObject = {
+      id: genId(),
+      name: `Superficie Loft ${project.objects.length + 1}`,
+      type: 'NURBS_SURFACE',
+      operation: 'ADD',
+      transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      parameters: { nurbsSurface: surface, nurbsResolutionU: 16, nurbsResolutionV: 24 },
+      nurbsSurface: surface,
+      isNurbs: true,
+      vertices: geom.vertices,
+      faces: geom.faces,
+      color: '#06b6d4',
+      smoothShading: true,
+      opacity: 1,
+      visible: true,
+      keyframes: [],
+    };
+
+    set({
+      project: { ...project, objects: [...project.objects, newObj] },
+      selectedObjectId: newObj.id,
+      selectedObjectIds: [newObj.id],
+    });
+    get().saveHistory();
+  },
+
+  fillNurbsObject: (id) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsCurve) {
+      const curve: NurbsCurveData = {
+        ...obj.nurbsCurve,
+        closed: !obj.nurbsCurve.closed,
+      };
+      const geom = tessellateNurbsCurveToMesh(curve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: curve, parameters: { ...o.parameters, nurbsCurve: curve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsSurface) {
+      const surface: NurbsSurfaceData = {
+        ...obj.nurbsSurface,
+        closedU: !obj.nurbsSurface.closedU,
+      };
+      const geom = tessellateNurbsSurface(surface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: surface, parameters: { ...o.parameters, nurbsSurface: surface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  switchNurbsDirectionObject: (id, dir = 'U') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = switchNurbsDirection(obj.nurbsSurface, dir);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = switchNurbsDirection(obj.nurbsCurve);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  convertNurbsToMesh: (id) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    // Convert into a baked standard polygon mesh (MESH)
+    set({
+      project: {
+        ...project,
+        objects: project.objects.map(o =>
+          o.id === id
+            ? {
+                ...o,
+                type: 'MESH',
+                name: `${o.name} (Malla)`,
+                isNurbs: false,
+                nurbsCurve: undefined,
+                nurbsSurface: undefined,
+                parameters: { ...o.parameters, nurbsCurve: undefined, nurbsSurface: undefined },
+                selectedNurbsControlPoint: null,
+              }
+            : o
+        )
+      }
+    });
+    get().saveHistory();
+  },
+
+  setNurbsDegree: (id, degreeU, degreeV) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const surface: NurbsSurfaceData = {
+        ...obj.nurbsSurface,
+        degreeU: Math.max(1, degreeU),
+        degreeV: Math.max(1, degreeV ?? degreeU),
+      };
+      const geom = tessellateNurbsSurface(surface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: surface, parameters: { ...o.parameters, nurbsSurface: surface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const curve: NurbsCurveData = {
+        ...obj.nurbsCurve,
+        degree: Math.max(1, degreeU),
+      };
+      const geom = tessellateNurbsCurveToMesh(curve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: curve, parameters: { ...o.parameters, nurbsCurve: curve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  setNurbsResolution: (id, resU, resV) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const u = Math.max(3, resU);
+      const v = Math.max(3, resV ?? u);
+      const surface: NurbsSurfaceData = {
+        ...obj.nurbsSurface,
+        resolutionU: u,
+        resolutionV: v,
+      };
+      const geom = tessellateNurbsSurface(surface, u, v);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsSurface: surface,
+                  parameters: { ...o.parameters, nurbsSurface: surface, nurbsResolutionU: u, nurbsResolutionV: v },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const segs = Math.max(8, resU);
+      const geom = tessellateNurbsCurveToMesh(obj.nurbsCurve, segs, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  parameters: { ...o.parameters, segments: segs },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  updateNurbsControlPointAttributes: (id: string, uIndex: number, vIndex?: number, attrs?: { point?: V3; weight?: number; radius?: number; tilt?: number }) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const surface = { ...obj.nurbsSurface };
+      const grid = surface.controlPoints.map(row => row.map(cp => ({ ...cp, point: [...cp.point] as V3 })));
+      const v = vIndex ?? 0;
+      if (grid[uIndex] && grid[uIndex][v]) {
+        if (attrs?.point) grid[uIndex][v].point = attrs.point;
+        if (attrs?.weight !== undefined) grid[uIndex][v].weight = Math.max(0.01, attrs.weight);
+        if (attrs?.radius !== undefined) grid[uIndex][v].radius = Math.max(0.01, attrs.radius);
+        if (attrs?.tilt !== undefined) grid[uIndex][v].tilt = attrs.tilt;
+      }
+      surface.controlPoints = grid;
+      const geom = tessellateNurbsSurface(surface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsSurface: surface,
+                  parameters: { ...o.parameters, nurbsSurface: surface },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                  selectedNurbsControlPoint: { u: uIndex, v },
+                }
+              : o
+          )
+        }
+      });
+    } else if (obj.nurbsCurve) {
+      const curve = { ...obj.nurbsCurve };
+      const pts = curve.controlPoints.map(cp => ({ ...cp, point: [...cp.point] as V3 }));
+      if (pts[uIndex]) {
+        if (attrs?.point) pts[uIndex].point = attrs.point;
+        if (attrs?.weight !== undefined) pts[uIndex].weight = Math.max(0.01, attrs.weight);
+        if (attrs?.radius !== undefined) pts[uIndex].radius = Math.max(0.01, attrs.radius);
+        if (attrs?.tilt !== undefined) pts[uIndex].tilt = attrs.tilt;
+      }
+      curve.controlPoints = pts;
+      const geom = tessellateNurbsCurveToMesh(curve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  nurbsCurve: curve,
+                  parameters: { ...o.parameters, nurbsCurve: curve },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                  selectedNurbsControlPoint: { u: uIndex },
+                }
+              : o
+          )
+        }
+      });
+    }
+  },
+
+  setNurbsOrderAction: (id: string, orderU: number, orderV?: number) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = setNurbsOrder(obj.nurbsSurface, orderU, orderV);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = setNurbsOrder(obj.nurbsCurve, orderU);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  toggleNurbsEndpointAction: (id: string, dir: 'U' | 'V' = 'U') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = toggleNurbsEndpoint(obj.nurbsSurface, dir);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = toggleNurbsEndpoint(obj.nurbsCurve, dir);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  toggleNurbsCyclicAction: (id: string, dir: 'U' | 'V' = 'U') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = toggleNurbsCyclic(obj.nurbsSurface, dir);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = toggleNurbsCyclic(obj.nurbsCurve, dir);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  setNurbsKnotTypeAction: (id: string, knotType: NurbsKnotType, dir: 'U' | 'V' = 'U') => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = setNurbsKnotType(obj.nurbsSurface, knotType, dir);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = setNurbsKnotType(obj.nurbsCurve, knotType, dir);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  smoothNurbsObject: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = smoothNurbsSurface(obj.nurbsSurface, 0.5);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = smoothNurbsCurve(obj.nurbsCurve, 0.5);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  resetNurbsWeightsObject: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = resetNurbsWeights(obj.nurbsSurface);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = resetNurbsWeights(obj.nurbsCurve);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
+  },
+
+  resetNurbsTiltsAndRadiiObject: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.nurbsSurface) {
+      const newSurface = resetNurbsTiltsAndRadii(obj.nurbsSurface);
+      const geom = tessellateNurbsSurface(newSurface, obj.parameters.nurbsResolutionU ?? 16, obj.parameters.nurbsResolutionV ?? 16);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsSurface: newSurface, parameters: { ...o.parameters, nurbsSurface: newSurface }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } else if (obj.nurbsCurve) {
+      const newCurve = resetNurbsTiltsAndRadii(obj.nurbsCurve);
+      const geom = tessellateNurbsCurveToMesh(newCurve, obj.parameters.segments ?? 32, obj.parameters.radius ?? 0.03);
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === id
+              ? { ...o, nurbsCurve: newCurve, parameters: { ...o.parameters, nurbsCurve: newCurve }, vertices: geom.vertices, faces: geom.faces }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    }
   },
 }));

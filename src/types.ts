@@ -1,5 +1,7 @@
 import { Vector3, Euler } from 'three';
 import { SilhouetteContour } from './utils/silhouettes';
+import type { NurbsControlPoint, NurbsCurveData, NurbsSurfaceData, NurbsKnotType } from './utils/nurbs';
+export type { NurbsControlPoint, NurbsCurveData, NurbsSurfaceData, NurbsKnotType };
 
 export type V3 = [number, number, number];
 
@@ -18,7 +20,8 @@ export type PrimitiveType =
   | 'PYRAMID' | 'PRISM' | 'CAPSULE' | 'TETRAHEDRON' | 'OCTAHEDRON'
   | 'TUBE' | 'WEDGE' | 'HEMISPHERE' | 'ARC' | 'STAR'
   | 'PLANE' | 'CIRCLE' | 'RING'
-  | 'SHAPE' | 'MESH';
+  | 'SHAPE' | 'MESH'
+  | 'NURBS_CURVE' | 'NURBS_SURFACE' | 'NURBS_CIRCLE' | 'NURBS_CYLINDER' | 'NURBS_CONE' | 'NURBS_SPHERE' | 'NURBS_TORUS';
 
 export interface ShapeParameters {
   segments?:        number;
@@ -36,6 +39,12 @@ export interface ShapeParameters {
   sphereType?:      'UV' | 'ICO';
   shapeType?:       'line' | 'rect' | 'bezier' | 'custom';
   closed?:          boolean;
+
+  // NURBS Parametric Data
+  nurbsCurve?:      NurbsCurveData;
+  nurbsSurface?:    NurbsSurfaceData;
+  nurbsResolutionU?: number;
+  nurbsResolutionV?: number;
   
   // Extrusion
   extrusionDepth?:  number;
@@ -121,6 +130,7 @@ export interface MaterialData {
   transparent: boolean;
   ior?: number;
   transmission?: number;
+  dispersion?: number;
   thickness?: number;
   attenuationDistance?: number;
   attenuationColor?: string;
@@ -128,17 +138,34 @@ export interface MaterialData {
   clearcoatRoughness?: number;
   clearcoatNormalMap?: string;
   clearcoatNormalScale?: number;
+  clearcoatMap?: string;
+  clearcoatRoughnessMap?: string;
   sheen?: number;
   sheenRoughness?: number;
   sheenColor?: string;
+  sheenColorMap?: string;
+  sheenRoughnessMap?: string;
+  anisotropy?: number;
+  anisotropyRotation?: number;
+  anisotropyMap?: string;
   iridescence?: number;
   iridescenceIOR?: number;
   iridescenceThicknessRange?: [number, number];
+  iridescenceMap?: string;
+  iridescenceThicknessMap?: string;
+  transmissionMap?: string;
+  thicknessMap?: string;
   specularIntensity?: number;
   specularColor?: string;
+  normalFormat?: 'OPENGL' | 'DIRECTX';
+  invertNormalY?: boolean;
   flipY?: boolean;
-  uvwMapping?: 'PLANAR' | 'BOX' | 'SPHERICAL' | 'CYLINDRICAL' | 'TRIPLANAR' | 'UV';
+  category?: string;
+  uvwMapping?: 'PLANAR' | 'BOX' | 'SPHERICAL' | 'CYLINDRICAL' | 'TRIPLANAR' | 'UV' | 'SMART_UV' | 'LIGHTMAP';
   triplanarBlend?: number; // 0.0 (Duro) a 1.0 (Difuminado suave en biseles y esquinas)
+  uvAngleThreshold?: number; // Ángulo límite de Smart UV (por defecto 66°)
+  uvIslandMargin?: number; // Margen de separación entre islas UV (por defecto 0.02)
+  uvRelaxIterations?: number; // Pasos de relajación laplaciana contra estiramiento (por defecto 6)
   // ORM Specific Intensities (for custom shader)
   ormIntensityAO?: number;
   ormIntensityRoughness?: number;
@@ -196,6 +223,13 @@ export interface CSGObject {
 
   // Bézier cúbico: un handle por punto ancla (solo para SHAPE + shapeType=bezier)
   bezierHandles?: BezierHandle[];
+
+  // NURBS Parametric Definition
+  nurbsCurve?:    NurbsCurveData;
+  nurbsSurface?:  NurbsSurfaceData;
+  isNurbs?:       boolean;
+  selectedNurbsControlPoint?: { u: number; v?: number } | null;
+  selectedNurbsControlPoints?: { u: number; v?: number }[];
 
   mirrorAxis?: 'none' | 'x' | 'y' | 'z';
   smoothShading?: boolean;

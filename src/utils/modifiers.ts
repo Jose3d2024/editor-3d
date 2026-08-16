@@ -16,6 +16,31 @@ import type { CSGObject, MeshFace, V3, CSGOperation } from '../types';
 import { generatePrimitive } from './geometry';
 import { createBaseGeometry } from './csg';
 import { repairMesh, fillHoles, capSelectedFaces } from './meshUtils';
+import {
+  bevelMeshAdvanced,
+  type BevelConfig,
+  type BevelAffect,
+  type BevelWidthType,
+  type BevelMiter,
+  type BevelLimitMethod,
+  type BevelProfilePreset
+} from './bevel';
+export {
+  bevelMeshAdvanced,
+  type BevelConfig,
+  type BevelAffect,
+  type BevelWidthType,
+  type BevelMiter,
+  type BevelLimitMethod,
+  type BevelProfilePreset
+};
+import {
+  smartUVProject,
+  cubeUVProject,
+  cylinderSphereUVProject,
+  lightmapPack,
+  projectFromViewUV
+} from './uvUnwrap';
 
 // 2. Registrar las funciones aceleradoras en el motor
 (THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
@@ -870,10 +895,35 @@ export function generateUVs(obj: { vertices: V3[]; faces: MeshFace[] }): { verti
 
 /**
  * Applies a specific UVW mapping projection to the mesh.
+ * Supported: 'BOX', 'TRIPLANAR', 'SMART_UV', 'UV', 'SPHERICAL', 'CYLINDRICAL', 'PLANAR', 'LIGHTMAP'
  */
-export function applyUVWMapping(obj: { vertices: V3[]; faces: MeshFace[] }, type: string): { vertices: V3[]; faces: MeshFace[] } {
+export function applyUVWMapping(
+  obj: { vertices: V3[]; faces: MeshFace[] },
+  type: string,
+  options?: { angleThresholdDeg?: number; islandMargin?: number; relaxIterations?: number }
+): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = obj.vertices;
   if (vertices.length === 0) return obj;
+
+  if (type === 'SMART_UV' || type === 'UV' || type === 'SMART') {
+    return smartUVProject(obj, {
+      angleThresholdDeg: options?.angleThresholdDeg ?? 66,
+      islandMargin: options?.islandMargin ?? 0.02,
+      relaxIterations: options?.relaxIterations ?? 6
+    });
+  }
+
+  if (type === 'LIGHTMAP') {
+    return lightmapPack(obj, options?.islandMargin ?? 0.03);
+  }
+
+  if (type === 'SPHERICAL' || type === 'CYLINDRICAL') {
+    return cylinderSphereUVProject(obj, type);
+  }
+
+  if (type === 'BOX' || type === 'TRIPLANAR') {
+    return cubeUVProject(obj, 1.0);
+  }
 
   // Calculate bounding box for normalization
   const min = [Infinity, Infinity, Infinity];
@@ -886,94 +936,18 @@ export function applyUVWMapping(obj: { vertices: V3[]; faces: MeshFace[] }, type
   });
 
   const size = [
-    max[0] - min[0] || 1,
-    max[1] - min[1] || 1,
-    max[2] - min[2] || 1
-  ];
-  const center = [
-    (min[0] + max[0]) / 2,
-    (min[1] + max[1]) / 2,
-    (min[2] + max[2]) / 2
+    Math.max(1e-6, max[0] - min[0]),
+    Math.max(1e-6, max[1] - min[1]),
+    Math.max(1e-6, max[2] - min[2])
   ];
 
   const faces = obj.faces.map(face => {
-    // Calculate normal once per face for projections that need it
-    const v0 = new THREE.Vector3(...vertices[face.indices[0]]);
-    const v1 = new THREE.Vector3(...vertices[face.indices[1]]);
-    const v2 = new THREE.Vector3(...vertices[face.indices[2]]);
-    const normal = new THREE.Vector3().crossVectors(
-      v1.clone().sub(v0),
-      v2.clone().sub(v0)
-    ).normalize();
-
-    let uvs: [number, number][] = face.indices.map(vIdx => {
-      const [x, y, z] = vertices[vIdx];
-      let u = 0, v = 0;
-
-      switch (type) {
-        case 'BOX':
-        case 'TRIPLANAR': {
-          const absX = Math.abs(normal.x);
-          const absY = Math.abs(normal.y);
-          const absZ = Math.abs(normal.z);
-          const maxSize = Math.max(size[0], size[1], size[2]) || 1;
-          if (absY >= absX && absY >= absZ) {
-            u = (x - min[0]) / maxSize;
-            v = (z - min[2]) / maxSize;
-          } else if (absX >= absY && absX >= absZ) {
-            u = (z - min[2]) / maxSize;
-            v = (y - min[1]) / maxSize;
-          } else {
-            u = (x - min[0]) / maxSize;
-            v = (y - min[1]) / maxSize;
-          }
-          break;
-        }
-        case 'SPHERICAL': {
-          const dx = x - center[0];
-          const dy = y - center[1];
-          const dz = z - center[2];
-          const radius = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
-          u = 0.5 + Math.atan2(dz, dx) / (2 * Math.PI);
-          v = 0.5 - Math.asin(dy / radius) / Math.PI;
-          break;
-        }
-        case 'CYLINDRICAL': {
-          const dx = x - center[0];
-          const dz = z - center[2];
-          u = 0.5 + Math.atan2(dz, dx) / (2 * Math.PI);
-          v = (y - min[1]) / size[1];
-          break;
-        }
-        case 'PLANAR':
-        default:
-          u = (x - min[0]) / size[0];
-          v = (y - min[1]) / size[1];
-          break;
-      }
+    const uvs: [number, number][] = face.indices.map(vIdx => {
+      const [x, y] = vertices[vIdx];
+      const u = (x - min[0]) / size[0];
+      const v = (y - min[1]) / size[1];
       return [u, v] as [number, number];
     });
-
-    // Fix UV seams for Spherical and Cylindrical mappings
-    if (type === 'SPHERICAL' || type === 'CYLINDRICAL') {
-      let maxU = -Infinity;
-      let minU = Infinity;
-      uvs.forEach(uv => {
-        if (uv[0] > maxU) maxU = uv[0];
-        if (uv[0] < minU) minU = uv[0];
-      });
-      
-      // If the difference is large (e.g. > 0.5), it means the face crosses the seam
-      if (maxU - minU > 0.5) {
-        uvs = uvs.map(uv => {
-          if (uv[0] < 0.5) {
-            return [uv[0] + 1, uv[1]];
-          }
-          return uv;
-        });
-      }
-    }
-
     return { ...face, uvs };
   });
 
@@ -1427,717 +1401,41 @@ export function roundAnglesMesh(
   obj: CSGObject | { type?: string; vertices?: V3[]; faces?: MeshFace[]; vertexOffsets?: Record<number, V3>; parameters?: any },
   radius: number = 0.08,
   segments: number = 3,
-  angleThresholdDeg: number = 20,
+  angleThresholdDeg: number = 35,
 ): { vertices: V3[]; faces: MeshFace[] } {
-  // 1. Hornear los desplazamientos del gizmo (vertexOffsets)
-  let inputVerts: V3[] = [];
-  if (obj.vertices && obj.vertices.length > 0) {
-    inputVerts = obj.vertices.map((v, i) => {
-      const off = obj.vertexOffsets?.[i] || [0, 0, 0];
-      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
-    });
-  }
-  let inputFaces = obj.faces || [];
-
-  // Si no tiene vértices o caras explícitas aún (p. ej. cualquier primitiva o extrusión recién creada),
-  // obtenemos la geometría base desde createBaseGeometry
-  if (!inputVerts || inputVerts.length === 0 || !inputFaces || inputFaces.length === 0) {
-    try {
-      const baseGeo = createBaseGeometry(obj as any);
-      const res = fromThreeGeometry(baseGeo);
-      baseGeo.dispose();
-      inputVerts = res.vertices;
-      inputFaces = res.faces;
-    } catch (e) {
-      console.error('[roundAnglesMesh] Failed to generate base geometry:', e);
-    }
-  }
-
-  // 2. Si es una primitiva CUBE / BOX pura sin desplazamientos de vértices
-  const hasOffsets = obj.vertexOffsets && Object.keys(obj.vertexOffsets).length > 0;
-  const isCubeType = obj.type === 'CUBE' || obj.type === 'BOX' || obj.parameters?.genType === 'box';
-  if (!hasOffsets && isCubeType) {
-    const baseGeo = createBaseGeometry(obj as any);
-    const box = new THREE.Box3().setFromBufferAttribute(baseGeo.attributes.position as THREE.BufferAttribute);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    
-    let roundedGeo: THREE.BufferGeometry = new RoundedBoxGeometry(size.x, size.y, size.z, segments, radius);
-    roundedGeo.translate(center.x, center.y, center.z);
-    roundedGeo = BufferGeometryUtils.mergeVertices(roundedGeo, 1e-6);
-
-    const result = fromThreeGeometry(roundedGeo);
-    roundedGeo.dispose();
-    baseGeo.dispose();
-    return generateUVs(result);
-  }
-
-  if (!inputVerts || inputVerts.length === 0 || radius <= 0) {
-    return generateUVs({ vertices: inputVerts || [], faces: inputFaces || [] });
-  }
-
-  const segs = Math.max(1, Math.round(segments));
-  const minAngleRad = (angleThresholdDeg * Math.PI) / 180;
-
-  // Deduplicate vertices
-  const uniqueVerts: THREE.Vector3[] = [];
-  const vertRemap: number[] = new Array(inputVerts.length);
-
-  for (let i = 0; i < inputVerts.length; i++) {
-    const v = new THREE.Vector3(...inputVerts[i]);
-    let found = -1;
-    for (let j = 0; j < uniqueVerts.length; j++) {
-      if (uniqueVerts[j].distanceToSquared(v) < 1e-12) {
-        found = j;
-        break;
-      }
-    }
-    if (found !== -1) {
-      vertRemap[i] = found;
-    } else {
-      vertRemap[i] = uniqueVerts.length;
-      uniqueVerts.push(v);
-    }
-  }
-
-  // Build clean faces with remapped indices
-  const origFaces: number[][] = [];
-  inputFaces.forEach(f => {
-    const remapped = f.indices.map(idx => vertRemap[idx]);
-    const clean: number[] = [];
-    for (let i = 0; i < remapped.length; i++) {
-      if (i === 0 || remapped[i] !== remapped[i - 1]) {
-        clean.push(remapped[i]);
-      }
-    }
-    if (clean.length > 1 && clean[0] === clean[clean.length - 1]) clean.pop();
-    if (clean.length >= 3) origFaces.push(clean);
+  return bevelMeshAdvanced(obj, {
+    affect: 'EDGES',
+    widthType: 'OFFSET',
+    width: radius,
+    segments,
+    profile: 0.5,
+    profilePreset: 'SUPERELLIPSE',
+    miterOuter: 'SHARP',
+    limitMethod: 'ANGLE',
+    angleThresholdDeg,
+    clampOverlap: true,
+    hardenNormals: true,
   });
-
-  if (origFaces.length === 0) {
-    return generateUVs({ vertices: inputVerts, faces: inputFaces });
-  }
-
-  // Calculate minimum edge length across all faces to clamp radius safely
-  let minEdgeLen = Infinity;
-  origFaces.forEach(f => {
-    const len = f.length;
-    for (let i = 0; i < len; i++) {
-      const p1 = uniqueVerts[f[i]];
-      const p2 = uniqueVerts[f[(i + 1) % len]];
-      const d = p1.distanceTo(p2);
-      if (d > 1e-6 && d < minEdgeLen) minEdgeLen = d;
-    }
-  });
-
-  const maxAllowedRad = isFinite(minEdgeLen) ? minEdgeLen * 0.45 : radius;
-  const rad = Math.min(Math.max(0.0005, radius), Math.max(0.0005, maxAllowedRad));
-
-  // Mesh centroid for outward normal verification
-  const meshCentroid = new THREE.Vector3();
-  uniqueVerts.forEach(v => meshCentroid.add(v));
-  if (uniqueVerts.length > 0) meshCentroid.divideScalar(uniqueVerts.length);
-
-  // Verify overall mesh orientation: sum dot products of face normals with (centroid - meshCentroid)
-  let totalOrient = 0;
-  origFaces.forEach(f => {
-    const norm = new THREE.Vector3();
-    const len = f.length;
-    for (let i = 0; i < len; i++) {
-      const pCurr = uniqueVerts[f[i]];
-      const pNext = uniqueVerts[f[(i + 1) % len]];
-      norm.x += (pCurr.y - pNext.y) * (pCurr.z + pNext.z);
-      norm.y += (pCurr.z - pNext.z) * (pCurr.x + pNext.x);
-      norm.z += (pCurr.x - pNext.x) * (pCurr.y + pNext.y);
-    }
-    const centroid = new THREE.Vector3();
-    f.forEach(idx => centroid.add(uniqueVerts[idx]));
-    centroid.divideScalar(len);
-    totalOrient += norm.dot(centroid.clone().sub(meshCentroid));
-  });
-
-  if (totalOrient < 0) {
-    origFaces.forEach(f => f.reverse());
-  }
-
-  // Compute face normals and face centroids using Newell's method
-  const faceNormals: THREE.Vector3[] = [];
-  const faceCentroids: THREE.Vector3[] = [];
-  origFaces.forEach(f => {
-    const norm = new THREE.Vector3();
-    const len = f.length;
-    for (let i = 0; i < len; i++) {
-      const pCurr = uniqueVerts[f[i]];
-      const pNext = uniqueVerts[f[(i + 1) % len]];
-      norm.x += (pCurr.y - pNext.y) * (pCurr.z + pNext.z);
-      norm.y += (pCurr.z - pNext.z) * (pCurr.x + pNext.x);
-      norm.z += (pCurr.x - pNext.x) * (pCurr.y + pNext.y);
-    }
-    const centroid = new THREE.Vector3();
-    f.forEach(idx => centroid.add(uniqueVerts[idx]));
-    centroid.divideScalar(len);
-    faceCentroids.push(centroid);
-
-    if (norm.lengthSq() > 1e-6) norm.normalize(); else norm.set(0, 1, 0);
-    faceNormals.push(norm);
-  });
-
-  // Build edge adjacency map
-  const getEdgeKey = (a: number, b: number) => Math.min(a, b) + '_' + Math.max(a, b);
-  interface EdgeRef {
-    v1: number;
-    v2: number;
-    faces: { fIdx: number; edgeIdx: number }[];
-  }
-  const edgeMap = new Map<string, EdgeRef>();
-
-  origFaces.forEach((f, fIdx) => {
-    const len = f.length;
-    for (let i = 0; i < len; i++) {
-      const v1 = f[i];
-      const v2 = f[(i + 1) % len];
-      const key = getEdgeKey(v1, v2);
-      let entry = edgeMap.get(key);
-      if (!entry) {
-        entry = { v1: Math.min(v1, v2), v2: Math.max(v1, v2), faces: [] };
-        edgeMap.set(key, entry);
-      }
-      entry.faces.push({ fIdx, edgeIdx: i });
-    }
-  });
-
-  // Identify sharp edges
-  interface SharpEdge {
-    key: string;
-    v1: number;
-    v2: number;
-    f1: number;
-    f2: number;
-    angle: number;
-  }
-  const sharpEdges = new Map<string, SharpEdge>();
-
-  edgeMap.forEach((entry, key) => {
-    if (entry.faces.length === 2) {
-      const f1 = entry.faces[0].fIdx;
-      const f2 = entry.faces[1].fIdx;
-      const n1 = faceNormals[f1];
-      const n2 = faceNormals[f2];
-      const dot = Math.max(-1, Math.min(1, n1.dot(n2)));
-      const angle = Math.acos(dot);
-      if (angle >= minAngleRad) {
-        sharpEdges.set(key, { key, v1: entry.v1, v2: entry.v2, f1, f2, angle });
-      }
-    } else if (entry.faces.length === 1) {
-      const f1 = entry.faces[0].fIdx;
-      sharpEdges.set(key, { key, v1: entry.v1, v2: entry.v2, f1, f2: f1, angle: Math.PI / 2 });
-    }
-  });
-
-  // Count sharp edges touching each vertex
-  const vertSharpCount = new Map<number, number>();
-  sharpEdges.forEach(se => {
-    vertSharpCount.set(se.v1, (vertSharpCount.get(se.v1) || 0) + 1);
-    vertSharpCount.set(se.v2, (vertSharpCount.get(se.v2) || 0) + 1);
-  });
-
-  // Output structures
-  const outVerts: V3[] = [];
-  const outFaces: MeshFace[] = [];
-
-  const vertHashMap = new Map<string, number>();
-  const addVertex = (v: THREE.Vector3): number => {
-    // Quantize coordinates with 1e-4 tolerance to weld shared boundary vertices
-    const qx = Math.round(v.x * 10000);
-    const qy = Math.round(v.y * 10000);
-    const qz = Math.round(v.z * 10000);
-    const key = `${qx}_${qy}_${qz}`;
-    const existing = vertHashMap.get(key);
-    if (existing !== undefined) {
-      return existing;
-    }
-    const idx = outVerts.length;
-    outVerts.push([v.x, v.y, v.z]);
-    vertHashMap.set(key, idx);
-    return idx;
-  };
-
-  const fixWinding = (indices: number[], targetNormal: THREE.Vector3) => {
-    if (indices.length < 3) return indices;
-    const v0 = new THREE.Vector3(...outVerts[indices[0]]);
-    const v1 = new THREE.Vector3(...outVerts[indices[1]]);
-    const vLast = new THREE.Vector3(...outVerts[indices[indices.length - 1]]);
-    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), vLast.clone().sub(v0));
-    if (norm.dot(targetNormal) < 0) {
-      return [...indices].reverse();
-    }
-    return indices;
-  };
-
-  // 1. Compute per-face, per-vertex inset positions
-  const rawInsetPos: THREE.Vector3[][] = origFaces.map(() => []);
-
-  origFaces.forEach((f, fIdx) => {
-    const len = f.length;
-    const n = faceNormals[fIdx];
-
-    for (let i = 0; i < len; i++) {
-      const vPrev = f[(i - 1 + len) % len];
-      const vCurr = f[i];
-      const vNext = f[(i + 1) % len];
-
-      const prevKey = getEdgeKey(vPrev, vCurr);
-      const nextKey = getEdgeKey(vCurr, vNext);
-      const isPrevSharp = sharpEdges.has(prevKey);
-      const isNextSharp = sharpEdges.has(nextKey);
-
-      const P = uniqueVerts[vCurr].clone();
-
-      if (!isPrevSharp && !isNextSharp) {
-        rawInsetPos[fIdx].push(P);
-      } else {
-        const Pprev = uniqueVerts[vPrev];
-        const Pnext = uniqueVerts[vNext];
-
-        const ePrevDir = P.clone().sub(Pprev);
-        if (ePrevDir.lengthSq() > 1e-12) ePrevDir.normalize();
-        const eNextDir = Pnext.clone().sub(P);
-        if (eNextDir.lengthSq() > 1e-12) eNextDir.normalize();
-
-        const inPrev = isPrevSharp ? new THREE.Vector3().crossVectors(n, ePrevDir).normalize() : new THREE.Vector3(0, 0, 0);
-        const inNext = isNextSharp ? new THREE.Vector3().crossVectors(eNextDir, n).normalize() : new THREE.Vector3(0, 0, 0);
-
-        let disp = new THREE.Vector3();
-        if (isPrevSharp && isNextSharp) {
-          disp.addVectors(inPrev, inNext);
-          if (disp.lengthSq() > 1e-6) disp.normalize();
-          const cosHalfAngle = Math.max(0.1, inPrev.dot(disp));
-          const dist = Math.min(rad * 2.5, rad / cosHalfAngle);
-          disp.multiplyScalar(dist);
-        } else if (isPrevSharp) {
-          const uNext = eNextDir.clone();
-          const denom = uNext.dot(inPrev);
-          if (denom > 0.05) {
-            const dist = Math.min(rad * 2.5, rad / denom);
-            disp = uNext.multiplyScalar(dist);
-          } else {
-            disp = inPrev.clone().multiplyScalar(rad);
-          }
-        } else if (isNextSharp) {
-          const uPrev = Pprev.clone().sub(P);
-          if (uPrev.lengthSq() > 1e-12) uPrev.normalize();
-          const denom = uPrev.dot(inNext);
-          if (denom > 0.05) {
-            const dist = Math.min(rad * 2.5, rad / denom);
-            disp = uPrev.multiplyScalar(dist);
-          } else {
-            disp = inNext.clone().multiplyScalar(rad);
-          }
-        }
-
-        rawInsetPos[fIdx].push(P.add(disp));
-      }
-    }
-  });
-
-  // Construct vertex-to-faces map for corner caps and smooth patch welding
-  const vertToFaces = new Map<number, number[]>();
-  origFaces.forEach((f, fIdx) => {
-    f.forEach(v => {
-      let list = vertToFaces.get(v);
-      if (!list) {
-        list = [];
-        vertToFaces.set(v, list);
-      }
-      list.push(fIdx);
-    });
-  });
-
-  // 2. Weld smooth edge adjacent faces so they share identical inset vertices
-  const faceInsetVerts: number[][] = origFaces.map(() => []);
-
-  vertToFaces.forEach((fList, vIdx) => {
-    const visited = new Set<number>();
-    fList.forEach(fIdx => {
-      if (visited.has(fIdx)) return;
-
-      const patch: number[] = [];
-      const queue = [fIdx];
-      visited.add(fIdx);
-
-      while (queue.length > 0) {
-        const curr = queue.shift()!;
-        patch.push(curr);
-
-        const currFace = origFaces[curr];
-        const locCurr = currFace.indexOf(vIdx);
-        const lenCurr = currFace.length;
-        const vPrev = currFace[(locCurr - 1 + lenCurr) % lenCurr];
-        const vNext = currFace[(locCurr + 1) % lenCurr];
-
-        fList.forEach(neighbor => {
-          if (visited.has(neighbor)) return;
-          const neighborFace = origFaces[neighbor];
-          if (neighborFace.includes(vPrev) && !sharpEdges.has(getEdgeKey(vIdx, vPrev))) {
-            visited.add(neighbor);
-            queue.push(neighbor);
-          } else if (neighborFace.includes(vNext) && !sharpEdges.has(getEdgeKey(vIdx, vNext))) {
-            visited.add(neighbor);
-            queue.push(neighbor);
-          }
-        });
-      }
-
-      const avgP = new THREE.Vector3();
-      patch.forEach(f => {
-        const loc = origFaces[f].indexOf(vIdx);
-        avgP.add(rawInsetPos[f][loc]);
-      });
-      avgP.divideScalar(patch.length);
-
-      const weldedIdx = addVertex(avgP);
-
-      patch.forEach(f => {
-        const loc = origFaces[f].indexOf(vIdx);
-        faceInsetVerts[f][loc] = weldedIdx;
-      });
-    });
-  });
-
-  // 3. Add inset faces to outFaces
-  origFaces.forEach((f, fIdx) => {
-    outFaces.push({ indices: [...faceInsetVerts[fIdx]] });
-  });
-
-  // Connect sharp edges with 'segs' arc strips and store directed arcs for corner caps
-  const arcMap = new Map<string, number[]>();
-  const getArcKey = (vIdx: number, fA: number, fB: number) => `${vIdx}_${fA}_${fB}`;
-
-  sharpEdges.forEach(({ key, f1, f2, v1, v2, angle }) => {
-    const f1Indices = origFaces[f1];
-    const f2Indices = origFaces[f2];
-
-    const i1_f1 = f1Indices.indexOf(v1);
-    const i2_f1 = f1Indices.indexOf(v2);
-
-    const i1_f2 = f2Indices.indexOf(v1);
-    const i2_f2 = f2Indices.indexOf(v2);
-
-    if (i1_f1 === -1 || i2_f1 === -1 || i1_f2 === -1 || i2_f2 === -1) return;
-
-    const p1_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i1_f1]]);
-    const p1_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i1_f2]]);
-    const n1 = faceNormals[f1];
-    const n2 = f1 !== f2 ? faceNormals[f2] : n1;
-
-    const v1Arc: number[] = [faceInsetVerts[f1][i1_f1]];
-    for (let k = 1; k < segs; k++) {
-      const t = k / segs;
-      const nT = new THREE.Vector3().lerpVectors(n1, n2, t);
-      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(n1);
-      const pos = p1_f1.clone().lerp(p1_f2, t);
-      if (segs > 1 && angle > 0.01) {
-        const bulge = Math.sin(t * Math.PI) * rad * Math.tan(angle / 4);
-        pos.addScaledVector(nT, bulge);
-      }
-      v1Arc.push(addVertex(pos));
-    }
-    v1Arc.push(faceInsetVerts[f2][i1_f2]);
-
-    const p2_f1 = new THREE.Vector3(...outVerts[faceInsetVerts[f1][i2_f1]]);
-    const p2_f2 = new THREE.Vector3(...outVerts[faceInsetVerts[f2][i2_f2]]);
-
-    const v2Arc: number[] = [faceInsetVerts[f1][i2_f1]];
-    for (let k = 1; k < segs; k++) {
-      const t = k / segs;
-      const nT = new THREE.Vector3().lerpVectors(n1, n2, t);
-      if (nT.lengthSq() > 1e-6) nT.normalize(); else nT.copy(n1);
-      const pos = p2_f1.clone().lerp(p2_f2, t);
-      if (segs > 1 && angle > 0.01) {
-        const bulge = Math.sin(t * Math.PI) * rad * Math.tan(angle / 4);
-        pos.addScaledVector(nT, bulge);
-      }
-      v2Arc.push(addVertex(pos));
-    }
-    v2Arc.push(faceInsetVerts[f2][i2_f2]);
-
-    // Save directed arcs for corner caps
-    arcMap.set(getArcKey(v1, f1, f2), v1Arc);
-    arcMap.set(getArcKey(v1, f2, f1), [...v1Arc].reverse());
-    arcMap.set(getArcKey(v2, f1, f2), v2Arc);
-    arcMap.set(getArcKey(v2, f2, f1), [...v2Arc].reverse());
-
-    const loc1 = origFaces[f1].indexOf(v1);
-    const loc2 = origFaces[f1].indexOf(v2);
-    const isForwardInF1 = ((loc1 + 1) % f1Indices.length) === loc2;
-
-    const midNormal = new THREE.Vector3().addVectors(n1, n2);
-    if (midNormal.lengthSq() > 1e-6) midNormal.normalize(); else midNormal.copy(n1);
-
-    // Create quad strips
-    for (let k = 0; k < segs; k++) {
-      const a1 = v1Arc[k];
-      const a2 = v2Arc[k];
-      const b1 = v1Arc[k + 1];
-      const b2 = v2Arc[k + 1];
-      const quadIndices = isForwardInF1 ? [a2, a1, b2, b1] : [a1, a2, b1, b2];
-      const quad = quadIndices;
-      outFaces.push({ indices: quad });
-    }
-  });
-
-  // Construct Corner Cap Patches using radial ordering around vertex normal
-  vertToFaces.forEach((fList, vIdx) => {
-    const sharpCount = vertSharpCount.get(vIdx) || 0;
-    if (sharpCount < 2) return; // Corners and curved rim transitions with 2+ sharp edges get sealed!
-
-    // Outward vertex normal N_v
-    const N_v = new THREE.Vector3();
-    fList.forEach(fIdx => N_v.add(faceNormals[fIdx]));
-    if (N_v.lengthSq() > 1e-6) N_v.normalize(); else N_v.set(0, 1, 0);
-
-    // Topological face walk around vIdx using shared edge adjacencies
-    const faceSet = new Set<number>(fList);
-    const sortedFaces: number[] = [];
-    let currF = fList[0];
-
-    for (let step = 0; step < fList.length; step++) {
-      if (sortedFaces.includes(currF)) break;
-      sortedFaces.push(currF);
-
-      const fIndices = origFaces[currF];
-      const loc = fIndices.indexOf(vIdx);
-      if (loc === -1) break;
-
-      const len = fIndices.length;
-      const vNext = fIndices[(loc + 1) % len];
-      const edgeKey = getEdgeKey(vIdx, vNext);
-      const edgeRef = edgeMap.get(edgeKey);
-
-      if (!edgeRef) break;
-      const nextF = edgeRef.faces.find(item => item.fIdx !== currF && faceSet.has(item.fIdx))?.fIdx;
-      if (nextF === undefined || nextF === sortedFaces[0]) break;
-      currF = nextF;
-    }
-
-    if (sortedFaces.length < 2) return;
-
-    const loop: number[] = [];
-    const numFaces = sortedFaces.length;
-
-    for (let i = 0; i < numFaces; i++) {
-      const fA = sortedFaces[i];
-      const fB = sortedFaces[(i + 1) % numFaces];
-      const locA = origFaces[fA].indexOf(vIdx);
-      const insetIdxA = faceInsetVerts[fA][locA];
-
-      const arcKey = getArcKey(vIdx, fA, fB);
-      if (arcMap.has(arcKey)) {
-        const arc = arcMap.get(arcKey)!;
-        const ptsToAdd = arc.slice(0, -1);
-        ptsToAdd.forEach(p => {
-          if (loop.length === 0 || loop[loop.length - 1] !== p) {
-            loop.push(p);
-          }
-        });
-      } else {
-        if (loop.length === 0 || loop[loop.length - 1] !== insetIdxA) {
-          loop.push(insetIdxA);
-        }
-      }
-    }
-
-    if (loop.length < 3) return;
-
-    // Calculate polygon normal of loop to ensure CCW orientation relative to N_v
-    const loopNormal = new THREE.Vector3();
-    const numLoop = loop.length;
-    for (let i = 0; i < numLoop; i++) {
-      const pA = new THREE.Vector3(...outVerts[loop[i]]);
-      const pB = new THREE.Vector3(...outVerts[loop[(i + 1) % numLoop]]);
-      loopNormal.x += (pA.y - pB.y) * (pA.z + pB.z);
-      loopNormal.y += (pA.z - pB.z) * (pA.x + pB.x);
-      loopNormal.z += (pA.x - pB.x) * (pA.y + pB.y);
-    }
-    if (loopNormal.dot(N_v) < 0) {
-      loop.reverse();
-    }
-
-    // Calculate average position of loop
-    const avgP = new THREE.Vector3();
-    loop.forEach(idx => {
-      avgP.add(new THREE.Vector3(...outVerts[idx]));
-    });
-    avgP.divideScalar(loop.length);
-
-    const numPts = loop.length;
-
-    // ── QUAD CORNER (BOX CORNER) TOPOLOGY WITHOUT POLAR TRIANGLE FANS ──
-    if (numPts === 4) {
-      // Standard 4-sided corner (e.g. Box Corner)
-      // Create 4 inner vertices interpolated towards centroid
-      const innerIndices: number[] = [];
-      for (let i = 0; i < 4; i++) {
-        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
-        const pInner = new THREE.Vector3()
-          .lerpVectors(pBound, avgP, 0.45)
-          .addScaledVector(N_v, rad * 0.18);
-        innerIndices.push(addVertex(pInner));
-      }
-
-      // Fused Laplacian Relaxation for the 4 inner corner patch vertices
-      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.22);
-      for (let i = 0; i < 4; i++) {
-        const pCurr = new THREE.Vector3(...outVerts[innerIndices[i]]);
-        const pPrev = new THREE.Vector3(...outVerts[innerIndices[(i + 3) % 4]]);
-        const pNext = new THREE.Vector3(...outVerts[innerIndices[(i + 1) % 4]]);
-        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
-        const avgNeighbors = new THREE.Vector3()
-          .add(pPrev).add(pNext).add(pBound).add(centerP).multiplyScalar(0.25);
-        const relaxedP = new THREE.Vector3().lerpVectors(pCurr, avgNeighbors, 0.35);
-        outVerts[innerIndices[i]] = [relaxedP.x, relaxedP.y, relaxedP.z];
-      }
-
-      // 4 Outer Quad Faces connecting boundary loop to inner quad
-      outFaces.push({ indices: [loop[0], loop[1], innerIndices[1], innerIndices[0]] });
-      outFaces.push({ indices: [loop[1], loop[2], innerIndices[2], innerIndices[1]] });
-      outFaces.push({ indices: [loop[2], loop[3], innerIndices[3], innerIndices[2]] });
-      outFaces.push({ indices: [loop[3], loop[0], innerIndices[0], innerIndices[3]] });
-
-      // 1 Central Quad Face (No central pole vertex!)
-      outFaces.push({ indices: [innerIndices[0], innerIndices[1], innerIndices[2], innerIndices[3]] });
-
-    } else if (numPts === 3) {
-      // 3-sided corner: Y-junction with 3 Quad Faces
-      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.22);
-      const centerIdx = addVertex(centerP);
-
-      const midIndices: number[] = [];
-      for (let i = 0; i < 3; i++) {
-        const pA = new THREE.Vector3(...outVerts[loop[i]]);
-        const pB = new THREE.Vector3(...outVerts[loop[(i + 1) % 3]]);
-        const pMid = new THREE.Vector3()
-          .lerpVectors(pA, pB, 0.5)
-          .addScaledVector(N_v, rad * 0.12);
-        midIndices.push(addVertex(pMid));
-      }
-
-      // 3 Quad Faces
-      outFaces.push({ indices: [loop[0], midIndices[0], centerIdx, midIndices[2]] });
-      outFaces.push({ indices: [loop[1], midIndices[1], centerIdx, midIndices[0]] });
-      outFaces.push({ indices: [loop[2], midIndices[2], centerIdx, midIndices[1]] });
-
-    } else {
-      // N-sided corner loop (N > 4): Quad Ring + Inner Patch
-      const innerIndices: number[] = [];
-      for (let i = 0; i < numPts; i++) {
-        const pBound = new THREE.Vector3(...outVerts[loop[i]]);
-        const pInner = new THREE.Vector3()
-          .lerpVectors(pBound, avgP, 0.5)
-          .addScaledVector(N_v, rad * 0.18);
-        innerIndices.push(addVertex(pInner));
-      }
-
-      // Quad Ring
-      for (let i = 0; i < numPts; i++) {
-        const next = (i + 1) % numPts;
-        outFaces.push({ indices: [loop[i], loop[next], innerIndices[next], innerIndices[i]] });
-      }
-
-      // Inner Central Patch
-      const centerP = avgP.clone().addScaledVector(N_v, rad * 0.25);
-      const centerIdx = addVertex(centerP);
-      for (let i = 0; i < numPts; i++) {
-        const next = (i + 1) % numPts;
-        outFaces.push({ indices: [innerIndices[i], innerIndices[next], centerIdx] });
-      }
-    }
-  });
-
-  // Re-index / build final geometry
-  let temporalGeo = new THREE.BufferGeometry();
-  const posicionesFlotantes: number[] = [];
-  const indicesTriangulados: number[] = [];
-
-  outVerts.forEach(v => posicionesFlotantes.push(v[0], v[1], v[2]));
-  outFaces.forEach(f => {
-    for (let i = 1; i < f.indices.length - 1; i++) {
-      indicesTriangulados.push(f.indices[0], f.indices[i], f.indices[i + 1]);
-    }
-  });
-
-  temporalGeo.setAttribute('position', new THREE.Float32BufferAttribute(posicionesFlotantes, 3));
-  temporalGeo.setIndex(indicesTriangulados);
-  temporalGeo = BufferGeometryUtils.mergeVertices(temporalGeo, 1e-4);
-  temporalGeo.computeVertexNormals();
-
-  const geometriaFinalizada = fromThreeGeometry(temporalGeo);
-  temporalGeo.dispose();
-
-  return applyUVWMapping({
-    vertices: geometriaFinalizada.vertices,
-    faces: geometriaFinalizada.faces
-  }, 'BOX');
 }
 
 export function bevelMesh(
   obj: CSGObject,
-  amount: number = 0.15,
+  amount: number = 0.08,
   offset: number = 0,
 ): { vertices: V3[]; faces: MeshFace[] } {
-  const amount01 = Math.max(0, Math.min(0.99, amount));
-  const newVerts: V3[] = obj.vertices.map(v => [...v] as V3);
-  const newFaces: MeshFace[] = [];
-
-  for (const face of obj.faces) {
-    const n = face.indices.length;
-    if (n < 3) continue;
-
-    // Centro de la cara
-    const center: V3 = [0, 0, 0];
-    for (const idx of face.indices) {
-      center[0] += obj.vertices[idx][0] / n;
-      center[1] += obj.vertices[idx][1] / n;
-      center[2] += obj.vertices[idx][2] / n;
-    }
-
-    // Normal de la cara (para el desplazamiento Y del offset)
-    const v0 = new THREE.Vector3(...obj.vertices[face.indices[0]]);
-    const v1 = new THREE.Vector3(...obj.vertices[face.indices[1]]);
-    const v2 = new THREE.Vector3(...obj.vertices[face.indices[2]]);
-    const normal = new THREE.Vector3()
-      .crossVectors(v1.clone().sub(v0), v2.clone().sub(v0))
-      .normalize();
-
-    // Crear vértices del inset
-    const insetIndices: number[] = [];
-    for (const idx of face.indices) {
-      const v = obj.vertices[idx];
-      const inset: V3 = [
-        v[0] + (center[0] - v[0]) * amount01 + normal.x * offset,
-        v[1] + (center[1] - v[1]) * amount01 + normal.y * offset,
-        v[2] + (center[2] - v[2]) * amount01 + normal.z * offset,
-      ];
-      insetIndices.push(newVerts.length);
-      newVerts.push(inset);
-    }
-
-    // Cara interior (el original reducido)
-    newFaces.push({ indices: [...insetIndices] });
-
-    // Caras laterales trapezoidales (exterior → interior)
-    for (let i = 0; i < n; i++) {
-      const a = face.indices[i];
-      const b = face.indices[(i + 1) % n];
-      const c = insetIndices[(i + 1) % n];
-      const d = insetIndices[i];
-      newFaces.push({ indices: [a, b, c, d] });
-    }
-  }
-
-  return applyUVWMapping({ vertices: newVerts, faces: newFaces }, 'BOX');
+  return bevelMeshAdvanced(obj, {
+    affect: 'EDGES',
+    widthType: 'OFFSET',
+    width: amount > 0 ? amount : 0.08,
+    segments: 3,
+    profile: 0.5,
+    profilePreset: 'SUPERELLIPSE',
+    miterOuter: 'SHARP',
+    limitMethod: 'ANGLE',
+    angleThresholdDeg: 30,
+    clampOverlap: true,
+    hardenNormals: true,
+  });
 }
 
 // ─── PathDeform ───────────────────────────────────────────────────────────────

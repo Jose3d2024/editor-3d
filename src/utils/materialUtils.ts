@@ -143,6 +143,8 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     (data.transmission ?? 0) > 0 || 
     (data.clearcoat ?? 0) > 0 || 
     (data.sheen ?? 0) > 0 || 
+    (data.anisotropy ?? 0) > 0 ||
+    (data.dispersion ?? 0) > 0 ||
     isVelvet ||
     (data.iridescence ?? 0) > 0 ||
     (data.specularIntensity !== undefined && data.specularIntensity !== 1) ||
@@ -160,29 +162,6 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
   material.opacity = data.opacity ?? 1;
   material.transparent = data.transparent ?? (material.opacity < 1 || (data.transmission ?? 0) > 0);
   material.side = THREE.DoubleSide;
-
-  if (isPhysical) {
-    const m = material as THREE.MeshPhysicalMaterial;
-    m.ior = data.ior ?? 1.5;
-    m.transmission = data.transmission ?? 0;
-    m.thickness = data.thickness ?? 0;
-    m.attenuationDistance = data.attenuationDistance ?? Infinity;
-    if (data.attenuationColor) m.attenuationColor.set(data.attenuationColor);
-    m.clearcoat = data.clearcoat ?? 0;
-    m.clearcoatRoughness = data.clearcoatRoughness ?? 0;
-    m.sheen = data.sheen ?? (isVelvet ? 1.0 : 0);
-    m.sheenRoughness = data.sheenRoughness ?? 0.4;
-    if (data.sheenColor) {
-      m.sheenColor.set(data.sheenColor);
-    } else if (isVelvet) {
-      m.sheenColor.set('#ff9999');
-    }
-    m.iridescence = data.iridescence ?? 0;
-    m.iridescenceIOR = data.iridescenceIOR ?? 1.3;
-    if (data.iridescenceThicknessRange) m.iridescenceThicknessRange = data.iridescenceThicknessRange;
-    m.specularIntensity = data.specularIntensity ?? 1;
-    if (data.specularColor) m.specularColor.set(data.specularColor);
-  }
 
   const albedoUrl = data.map || data.mapAlbedo;
   const normalUrl = data.normalMap || data.mapNormal;
@@ -220,9 +199,68 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
     return tex;
   };
 
+  if (isPhysical) {
+    const m = material as THREE.MeshPhysicalMaterial;
+    m.ior = data.ior ?? 1.5;
+    m.transmission = data.transmission ?? 0;
+    if (data.transmissionMap) m.transmissionMap = loadTexture(data.transmissionMap);
+    m.thickness = data.thickness ?? 0;
+    if (data.thicknessMap) m.thicknessMap = loadTexture(data.thicknessMap);
+    if ('dispersion' in m && data.dispersion !== undefined) {
+      (m as any).dispersion = data.dispersion;
+    }
+    m.attenuationDistance = data.attenuationDistance ?? Infinity;
+    if (data.attenuationColor) m.attenuationColor.set(data.attenuationColor);
+    
+    // Clearcoat
+    m.clearcoat = data.clearcoat ?? 0;
+    m.clearcoatRoughness = data.clearcoatRoughness ?? 0;
+    if (data.clearcoatMap) m.clearcoatMap = loadTexture(data.clearcoatMap);
+    if (data.clearcoatRoughnessMap) m.clearcoatRoughnessMap = loadTexture(data.clearcoatRoughnessMap);
+    m.clearcoatNormalMap = loadTexture(data.clearcoatNormalMap);
+    if (data.clearcoatNormalScale) m.clearcoatNormalScale.set(data.clearcoatNormalScale, data.clearcoatNormalScale);
+    
+    // Sheen
+    m.sheen = data.sheen ?? (isVelvet ? 1.0 : 0);
+    m.sheenRoughness = data.sheenRoughness ?? 0.4;
+    if (data.sheenColor) {
+      m.sheenColor.set(data.sheenColor);
+    } else if (isVelvet) {
+      m.sheenColor.set('#ff9999');
+    }
+    if (data.sheenColorMap) m.sheenColorMap = loadTexture(data.sheenColorMap, THREE.SRGBColorSpace);
+    if (data.sheenRoughnessMap) m.sheenRoughnessMap = loadTexture(data.sheenRoughnessMap);
+
+    // Anisotropy
+    if ('anisotropy' in m) {
+      (m as any).anisotropy = data.anisotropy ?? 0;
+      if (data.anisotropyRotation !== undefined) {
+        (m as any).anisotropyRotation = (data.anisotropyRotation * Math.PI) / 180;
+      }
+      if (data.anisotropyMap) {
+        (m as any).anisotropyMap = loadTexture(data.anisotropyMap);
+      }
+    }
+
+    // Iridescence
+    m.iridescence = data.iridescence ?? 0;
+    m.iridescenceIOR = data.iridescenceIOR ?? 1.3;
+    if (data.iridescenceThicknessRange) m.iridescenceThicknessRange = data.iridescenceThicknessRange;
+    if (data.iridescenceMap) m.iridescenceMap = loadTexture(data.iridescenceMap);
+    if (data.iridescenceThicknessMap) m.iridescenceThicknessMap = loadTexture(data.iridescenceThicknessMap);
+
+    // Specular
+    m.specularIntensity = data.specularIntensity ?? 1;
+    if (data.specularColor) m.specularColor.set(data.specularColor);
+  }
+
   material.map = loadTexture(albedoUrl, THREE.SRGBColorSpace);
   material.normalMap = loadTexture(normalUrl);
-  if (data.normalScale) material.normalScale.set(data.normalScale, data.normalScale);
+  
+  // Normal Scale with DirectX / OpenGL format support (invert Y)
+  const normScaleVal = data.normalScale ?? 1.0;
+  const isDirectX = data.normalFormat === 'DIRECTX' || data.invertNormalY === true;
+  material.normalScale.set(normScaleVal, isDirectX ? -normScaleVal : normScaleVal);
   
   if (data.useORM && data.ormMap) {
     const orm = loadTexture(data.ormMap);
@@ -243,12 +281,6 @@ export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMateria
   material.displacementMap = loadTexture(displacementUrl);
   material.displacementScale = data.displacementScale ?? 0;
   material.displacementBias = data.displacementBias ?? 0;
-
-  if (isPhysical) {
-    const m = material as THREE.MeshPhysicalMaterial;
-    m.clearcoatNormalMap = loadTexture(data.clearcoatNormalMap);
-    if (data.clearcoatNormalScale) m.clearcoatNormalScale.set(data.clearcoatNormalScale, data.clearcoatNormalScale);
-  }
 
   injectSeamlessDisplacement(material);
 

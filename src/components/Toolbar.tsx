@@ -8,9 +8,11 @@ import {
   Copy, Clipboard, FlipHorizontal, Image as ImageIcon,
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
-  Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split
+  Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split,
+  Keyboard
 } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
+import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
@@ -448,7 +450,7 @@ export const Toolbar: React.FC = () => {
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
-    'primitivo'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
+    'primitivo'|'nurbs'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
   >('primitivo');
   const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'acciones'>('seleccion');
 
@@ -562,6 +564,11 @@ export const Toolbar: React.FC = () => {
         if (e.key==='d'){e.preventDefault();if(selectedObjectId)duplicateObject(selectedObjectId);}
         return;
       }
+      if (e.key === '?' || e.key === 'F1') {
+        e.preventDefault();
+        setShowShortcutsModal(prev => !prev);
+        return;
+      }
       switch(e.key){
         case 'g': setTransformMode('translate'); break;
         case 'r': setTransformMode('rotate');    break;
@@ -582,6 +589,7 @@ export const Toolbar: React.FC = () => {
   // ── File ops ──────────────────────────────────────────────────────────────
   const [isExporting, setIsExporting] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
 
   const handleReset = () => {
     setShowResetModal(true);
@@ -1003,13 +1011,6 @@ export const Toolbar: React.FC = () => {
 
         <div className={`flex items-center gap-1.5 flex-shrink-0 ${isFloating?'flex-wrap justify-center':'flex-nowrap'}`}>
 
-          {/* Pin */}
-          <button onClick={()=>setIsFloating(!isFloating)}
-            className={`p-1.5 rounded transition-colors ${isFloating?'bg-indigo-600 text-white':'text-zinc-500 hover:text-zinc-300'}`}>
-            {isFloating?<PinOff size={16}/>:<Pin size={16}/>}
-          </button>
-          <Sep/>
-
           {/* Brand */}
           {!isFloating&&<><div className="flex items-center gap-2 flex-shrink-0"><div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center text-white font-bold text-sm">R</div><span className="font-bold text-sm tracking-tight hidden lg:block">CSG Pro</span></div><Sep/></>}
 
@@ -1085,9 +1086,10 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   {/* Tab strip */}
-                  <div className="grid grid-cols-4 border-b border-zinc-800">
+                  <div className="grid grid-cols-5 border-b border-zinc-800">
                     {([
                       {id:'primitivo', label:'Figuras',  icon:'⬛'},
+                      {id:'nurbs',     label:'NURBS',    icon:'〰️'},
                       {id:'dibujar',   label:'Dibujar',  icon:'✏️'},
                       {id:'geometria', label:'Geometría',icon:'⬡'},
                       {id:'generar',   label:'Generar',  icon:'🌀'},
@@ -1105,6 +1107,31 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   <div className="p-4 space-y-3 max-h-[70vh] overflow-y-auto" style={{scrollbarWidth:'thin',scrollbarColor:'#3f3f46 transparent'}}>
+
+                    {/* ════ NURBS (SUPERFICIES & CURVAS) ════ */}
+                    {createTab==='nurbs'&&(
+                      <>
+                        <PTitle icon="〰️" title="Superficies y Curvas NURBS" desc="Geometría matemática B-Spline no destructiva y de alta precisión (Blender style)."/>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { label: 'Curva NURBS', icon: '〰️', desc: 'Curva spline de 4 puntos', fn: () => addObject('NURBS_CURVE') },
+                            { label: 'Círculo NURBS', icon: '⭕', desc: 'Círculo racional exacto 9 pts', fn: () => addObject('NURBS_CIRCLE') },
+                            { label: 'Superficie Patch', icon: '🟩', desc: 'Malla 4x4 cuadrática/cúbica', fn: () => addObject('NURBS_SURFACE') },
+                            { label: 'Cilindro NURBS', icon: '🛢️', desc: 'Superficie cilíndrica pura', fn: () => addObject('NURBS_CYLINDER') },
+                            { label: 'Cono NURBS', icon: '🍦', desc: 'Cono racional exacto', fn: () => addObject('NURBS_CONE') },
+                            { label: 'Esfera NURBS', icon: '🌐', desc: 'Esfera matemática racional', fn: () => addObject('NURBS_SPHERE') },
+                            { label: 'Toroide NURBS', icon: '🍩', desc: 'Toroide racional continuo', fn: () => addObject('NURBS_TORUS') },
+                          ].map(p => (
+                            <button key={p.label} onClick={() => { p.fn(); setShowMainCreate(false); }}
+                              className="flex flex-col items-center gap-1.5 p-3 bg-zinc-800/60 hover:bg-violet-600 rounded-xl border border-zinc-700/50 hover:border-violet-400 transition-all group cursor-pointer text-left">
+                              <span className="text-2xl group-hover:scale-110 transition-transform">{p.icon}</span>
+                              <span className="text-[10px] font-bold text-center leading-tight text-zinc-200 group-hover:text-white">{p.label}</span>
+                              <span className="text-[8px] text-zinc-400 group-hover:text-violet-200 text-center">{p.desc}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
 
                     {/* ════ GEOMETRÍA SUB-TABS ════ */}
                     {createTab==='geometria' && (
@@ -1648,59 +1675,19 @@ export const Toolbar: React.FC = () => {
             </div>
           )}
 
-          {/* Panel Texturas ── */}
-          <div className="relative flex-shrink-0" ref={textureRef}>
-            <button onClick={()=>setShowTextures(v=>!v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-[11px] font-bold transition-all border ${
-                showTextures
-                  ? 'bg-emerald-600 text-white border-emerald-400 shadow-lg'
-                  : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-emerald-800 hover:text-white hover:border-emerald-600'
-              }`}>
-              <ImageIcon size={13}/> <span className="hidden sm:inline">Texturas</span>
-              <ChevronDown size={10} className={`transition-transform ${showTextures?'rotate-180':''}`}/>
-            </button>
-
-            <AnimatePresence>
-              {showTextures && (
-                <motion.div
-                  initial={{opacity:0,y:-8,scale:0.97}}
-                  animate={{opacity:1,y:0,scale:1}}
-                  exit={{opacity:0,y:-8,scale:0.97}}
-                  transition={{duration:0.15}}
-                  className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-4"
-                  style={{
-                    top: textureRef.current?.getBoundingClientRect().bottom,
-                    left: Math.min(textureRef.current?.getBoundingClientRect().left??0, window.innerWidth-308),
-                    width: 300,
-                  }}
-                >
-                  <div className="flex items-center justify-between mb-3">
-                    <p className="text-[11px] font-bold text-zinc-200 uppercase tracking-widest">Librería de Texturas</p>
-                    <button onClick={()=>setShowTextures(false)} className="text-zinc-600 hover:text-zinc-400"><X size={14}/></button>
-                  </div>
-                  <div className="max-h-[300px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-zinc-800">
-                    <ToolbarTextureLibrary />
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-          <Sep/>
-
           {/* Configuración Visores Tab */}
           <div className="relative" ref={viewportConfigRef}>
             <button
               onClick={() => setShowViewportConfig(v => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-[11px] font-bold transition-all border cursor-pointer ${
+              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[11px] font-bold transition-all border cursor-pointer ${
                 showViewportConfig
                   ? 'bg-indigo-600 text-white border-indigo-400 shadow-lg'
                   : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
               }`}
               title="Configuración de Visores, Layouts, Rejilla y Snap"
             >
-              <LayoutGrid size={14} className="text-indigo-400" />
-              <span className="hidden sm:inline">Configuración Visores</span>
-              <span className="sm:hidden">Visores</span>
+              <LayoutGrid size={13} className="text-indigo-400" />
+              <span>Visores</span>
               <ChevronDown size={10} className={`transition-transform ${showViewportConfig ? 'rotate-180' : ''}`} />
             </button>
 
@@ -2103,7 +2090,17 @@ export const Toolbar: React.FC = () => {
             )}
           </div>
 
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowShortcutsModal(true)}
+              onMouseEnter={(e)=>handleHover('Atajos de Teclado (?)', e.currentTarget.getBoundingClientRect(), '?')}
+              onMouseLeave={()=>handleHover(null)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700/80 shadow-sm group"
+              title="Atajos de teclado y panel de navegación rápida (? / F1)"
+            >
+              <Keyboard size={14} className="text-indigo-400 group-hover:scale-110 transition-transform" />
+              <span className="text-[11px] font-bold hidden sm:inline">Atajos</span>
+            </button>
             <button
               onClick={() => setIsFloating(!isFloating)}
               onMouseEnter={(e)=>handleHover(isFloating ? 'Anclar barra' : 'Desanclar barra', e.currentTarget.getBoundingClientRect())}
@@ -2129,6 +2126,7 @@ export const Toolbar: React.FC = () => {
         {/* Render Modal */}
       {showRender && <RenderModal onClose={() => setShowRender(false)} />}
       {showCodeExporter && <CodeExporterModal isOpen={showCodeExporter} onClose={() => setShowCodeExporter(false)} />}
+      <KeyboardShortcutsModal isOpen={showShortcutsModal} onClose={() => setShowShortcutsModal(false)} />
       <ConfirmModal
         isOpen={showResetModal}
         onClose={() => setShowResetModal(false)}

@@ -12,6 +12,17 @@
 import * as THREE from 'three';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { V3, MeshFace, BezierHandle } from '../types';
+import {
+  createDefaultNurbsCurve,
+  createDefaultNurbsCircle,
+  createDefaultNurbsSurface,
+  createDefaultNurbsCylinder,
+  createDefaultNurbsCone,
+  createDefaultNurbsSphere,
+  createDefaultNurbsTorus,
+  tessellateNurbsSurface,
+  tessellateNurbsCurveToMesh,
+} from './nurbs';
 
 // PrimitiveType is a union string – we avoid importing the enum to keep this file lightweight.
 type PT = string;
@@ -471,6 +482,36 @@ export function generatePrimitive(type: PT, params: Record<string, any>): Primit
       } catch {
         return extractAndMergeQuads(sphereGeo);
       }
+    }
+
+    // ── NURBS Primitives ──────────────────────────────────────────────────
+    case 'NURBS_CURVE': {
+      const curve = p.nurbsCurve ?? createDefaultNurbsCurve();
+      return tessellateNurbsCurveToMesh(curve, Math.max(16, p.segments ?? 32), p.radius ?? 0.03);
+    }
+    case 'NURBS_CIRCLE': {
+      const circle = p.nurbsCurve ?? createDefaultNurbsCircle(p.radius ?? 1.0);
+      return tessellateNurbsCurveToMesh(circle, Math.max(24, p.segments ?? 48), p.tube ?? 0.03);
+    }
+    case 'NURBS_SURFACE': {
+      const surface = p.nurbsSurface ?? createDefaultNurbsSurface(p.height ?? 2.0);
+      return tessellateNurbsSurface(surface, p.nurbsResolutionU ?? 16, p.nurbsResolutionV ?? 16);
+    }
+    case 'NURBS_CYLINDER': {
+      const surface = p.nurbsSurface ?? createDefaultNurbsCylinder(p.radius ?? 0.8, p.height ?? 2.0);
+      return tessellateNurbsSurface(surface, p.nurbsResolutionU ?? 16, p.nurbsResolutionV ?? 32);
+    }
+    case 'NURBS_CONE': {
+      const surface = p.nurbsSurface ?? createDefaultNurbsCone(p.radius ?? 1.0, p.height ?? 2.0);
+      return tessellateNurbsSurface(surface, p.nurbsResolutionU ?? 16, p.nurbsResolutionV ?? 32);
+    }
+    case 'NURBS_SPHERE': {
+      const surface = p.nurbsSurface ?? createDefaultNurbsSphere(p.radius ?? 1.0);
+      return tessellateNurbsSurface(surface, p.nurbsResolutionU ?? 24, p.nurbsResolutionV ?? 32);
+    }
+    case 'NURBS_TORUS': {
+      const surface = p.nurbsSurface ?? createDefaultNurbsTorus(p.radius ?? 1.0, p.tube ?? 0.35);
+      return tessellateNurbsSurface(surface, p.nurbsResolutionU ?? 24, p.nurbsResolutionV ?? 32);
     }
 
     // ── SHAPE / custom — return empty (will be populated by drawing) ─────────

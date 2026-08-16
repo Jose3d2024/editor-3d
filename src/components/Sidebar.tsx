@@ -159,6 +159,34 @@ const PARAM_DEFS: Record<PrimitiveType, {
     { key: 'extrusionDepth', label: 'Profundidad',        min: 0,    max: 50,  step: 0.1 },
   ],
   MESH: [],
+  NURBS_CURVE: [
+    { key: 'segments', label: 'Segmentos', min: 8, max: 128, step: 4, integer: true },
+    { key: 'radius',   label: 'Grosor Tubo', min: 0.005, max: 1.0, step: 0.005 },
+  ],
+  NURBS_CIRCLE: [
+    { key: 'segments', label: 'Segmentos', min: 12, max: 256, step: 4, integer: true },
+    { key: 'tube',     label: 'Grosor Tubo', min: 0.005, max: 1.0, step: 0.005 },
+  ],
+  NURBS_SURFACE: [
+    { key: 'nurbsResolutionU', label: 'Resolución U', min: 4, max: 64, step: 2, integer: true },
+    { key: 'nurbsResolutionV', label: 'Resolución V', min: 4, max: 64, step: 2, integer: true },
+  ],
+  NURBS_CYLINDER: [
+    { key: 'nurbsResolutionU', label: 'Resolución U (Altura)', min: 4, max: 64, step: 2, integer: true },
+    { key: 'nurbsResolutionV', label: 'Resolución V (Radial)', min: 6, max: 64, step: 2, integer: true },
+  ],
+  NURBS_CONE: [
+    { key: 'nurbsResolutionU', label: 'Resolución U (Generatriz)', min: 4, max: 64, step: 2, integer: true },
+    { key: 'nurbsResolutionV', label: 'Resolución V (Radial)', min: 6, max: 64, step: 2, integer: true },
+  ],
+  NURBS_SPHERE: [
+    { key: 'nurbsResolutionU', label: 'Resolución U (Latitud)', min: 4, max: 64, step: 2, integer: true },
+    { key: 'nurbsResolutionV', label: 'Resolución V (Longitud)', min: 6, max: 64, step: 2, integer: true },
+  ],
+  NURBS_TORUS: [
+    { key: 'nurbsResolutionU', label: 'Resolución U (Tubo)', min: 6, max: 64, step: 2, integer: true },
+    { key: 'nurbsResolutionV', label: 'Resolución V (Anillo)', min: 8, max: 64, step: 2, integer: true },
+  ],
 };
 
 type AlignAxis = 'x' | 'y' | 'z';

@@ -23,13 +23,19 @@ export interface ImportResult {
 
 // ── Tipos de slots y sus patrones de detección por nombre ──────────────────
 const SLOT_PATTERNS: Record<string, string[]> = {
-  map:             ['basecolor','base_color','albedo','color','diffuse','_col','_dif','_alb','_bc','color.'],
-  normalMap:       ['normal','nrm','nor','_n.','normalgl','normaldx','normal_gl','normal_dx','_norm'],
-  roughnessMap:    ['roughness','rough','_rgh','_r.','roughness.'],
-  metalnessMap:    ['metallic','metalness','metal','_met','_m.','metallic.'],
-  aoMap:           ['ambientocclusion','_ao','ao.','occlusion','ambient_occlusion'],
-  emissiveMap:     ['emissive','emission','_emi','_e.','emissive.'],
-  displacementMap: ['height','displacement','disp','_h.','bump','_dp'],
+  map:                   ['basecolor','base_color','albedo','color','diffuse','_col','_dif','_alb','_bc','color.'],
+  normalMap:             ['normal','nrm','nor','_n.','normalgl','normaldx','normal_gl','normal_dx','_norm'],
+  roughnessMap:          ['roughness','rough','_rgh','_r.','roughness.'],
+  metalnessMap:          ['metallic','metalness','metal','_met','_m.','metallic.'],
+  aoMap:                 ['ambientocclusion','_ao','ao.','occlusion','ambient_occlusion'],
+  emissiveMap:           ['emissive','emission','_emi','_e.','emissive.'],
+  displacementMap:       ['height','displacement','disp','_h.','bump','_dp'],
+  alphaMap:              ['opacity','alpha','mask','cutout','transparency','_opac'],
+  clearcoatMap:          ['clearcoat','clear_coat','coating','_coat'],
+  clearcoatNormalMap:    ['clearcoat_normal','coat_normal','coating_normal','coat_norm'],
+  sheenColorMap:         ['sheencolor','sheen_color','sheen'],
+  anisotropyMap:         ['anisotropy','aniso','tangent','flowmap'],
+  transmissionMap:       ['transmission','transmiss','refraction'],
 };
 
 /** Detecta el slot de una textura a partir de su nombre de archivo */
@@ -142,6 +148,18 @@ export async function importPBRPack(files: File[]): Promise<ImportResult> {
       const dataURL = await fileToDataURL(file);
       (result as any)[slot] = dataURL;
       detectedSlots[file.name] = slot;
+
+      // Autodetectar formato DirectX vs OpenGL para mapas normales
+      if (slot === 'normalMap') {
+        const lowerName = file.name.toLowerCase();
+        if (lowerName.includes('directx') || lowerName.includes('_dx') || lowerName.includes('normaldx') || lowerName.includes('normal_dx')) {
+          result.normalFormat = 'DIRECTX';
+          result.invertNormalY = true;
+        } else if (lowerName.includes('opengl') || lowerName.includes('_gl') || lowerName.includes('normalgl') || lowerName.includes('normal_gl')) {
+          result.normalFormat = 'OPENGL';
+          result.invertNormalY = false;
+        }
+      }
     } else if (!slot) {
       warnings.push(`No se reconoció el tipo de textura: "${file.name}". Asígnala manualmente en el editor.`);
     }

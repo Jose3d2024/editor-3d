@@ -24,6 +24,7 @@ import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
+import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
 import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 
@@ -88,13 +89,14 @@ const computeGizmoLayout = (
   w: number,
   h: number,
   transformSpace: string = 'world',
-  selObj?: any
+  selObj?: any,
+  customAxisLen?: number
 ) => {
   const projected = gizmoPos.clone().project(camera);
   if (projected.z > 1 || projected.z < -1) return null;
   const cx = (projected.x * 0.5 + 0.5) * w;
   const cy = (-projected.y * 0.5 + 0.5) * h;
-  const AXIS_LEN = Math.max(75, Math.min(Math.min(w, h) * 0.20, 120));
+  const AXIS_LEN = customAxisLen || Math.max(75, Math.min(Math.min(w, h) * 0.20, 120));
 
   const eyeDir = camera.position.clone().sub(gizmoPos).normalize();
 
@@ -2328,45 +2330,228 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       edgeLines.userData.id = obj.id;
       group.add(edgeLines);
 
-      // ── Sub-object edit helpers ──────────────────────────────────────────
-      if (isSelected && editMode !== 'OBJECT') {
+      // ── Render NURBS Isoparms / Isocurves ────────────────────────────────
+      if (obj.nurbsSurface) {
+        const isoVerts = generateNurbsSurfaceIsoparms(
+          obj.nurbsSurface,
+          obj.parameters.isoparmsU ?? 10,
+          obj.parameters.isoparmsV ?? 10,
+          32
+        );
+        if (isoVerts.length > 0) {
+          const isoGeo = new THREE.BufferGeometry();
+          isoGeo.setAttribute('position', new THREE.Float32BufferAttribute(isoVerts, 3));
+          const isoMat = new THREE.LineBasicMaterial({
+            color: isSelected ? 0x00e5ff : 0x0284c7,
+            transparent: true,
+            opacity: isSelected ? (editMode === 'VERTEX' ? 0.9 : 0.65) : 0.35,
+            depthTest: true
+          });
+          const isoLines = new THREE.LineSegments(isoGeo, isoMat);
+          isoLines.position.copy(initialPos);
+          isoLines.rotation.copy(initialRot);
+          isoLines.scale.copy(initialScale);
+          isoLines.renderOrder = 3;
+          group.add(isoLines);
+        }
+      }
+
+      // ── Sub-object edit helpers & NURBS Control Cage ─────────────────────
+      const isNurbsObj = !!(obj.nurbsSurface || obj.nurbsCurve || obj.isNurbs || obj.type.startsWith('NURBS_'));
+      if (isSelected && (isNurbsObj || editMode !== 'OBJECT')) {
         const posAttr = geometry.getAttribute('position');
 
-        if (editMode === 'VERTEX') {
-          const pointGeo = new THREE.BufferGeometry();
-          const logicalVerts: number[] = [];
-          if (obj.vertices) {
-            obj.vertices.forEach((v, i) => {
-              const off = obj.vertexOffsets?.[i] || [0,0,0];
-              logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
-            });
-          }
-          pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
-          pointGeo.computeBoundingSphere();
-          const pts = new THREE.Points(pointGeo, new THREE.PointsMaterial({ visible:true, transparent:true, opacity:0, size:0.2 }));
-          pts.position.copy(initialPos);
-          pts.rotation.copy(initialRot);
-          pts.scale.copy(initialScale);
-          pts.updateMatrixWorld(true);
-          vertexPointsRef.current = pts;
+        if (obj.nurbsSurface) {
+          const surf = obj.nurbsSurface;
+          const cps = surf.controlPoints;
+          const uCount = cps.length;
+          const vCount = cps[0]?.length || 0;
+          const selCPs = obj.selectedNurbsControlPoints?.length
+            ? obj.selectedNurbsControlPoints
+            : (obj.selectedNurbsControlPoint ? [obj.selectedNurbsControlPoint] : []);
+          const selSet = new Set(selCPs.map(p => `${p.u},${p.v ?? 0}`));
 
-          const selectedSet = new Set(selectedVertexIndices);
-          const logicalPosAttr = pointGeo.getAttribute('position');
-          for (let i = 0; i < logicalPosAttr.count; i++) {
+          // 1. Control Cage / Hull Lines (La Rejilla NURBS)
+          const lineVerts: number[] = [];
+          for (let u = 0; u < uCount; u++) {
+            for (let v = 0; v < vCount; v++) {
+              const pt = cps[u][v].point;
+              if (u + 1 < uCount) {
+                const nextU = cps[u + 1][v].point;
+                lineVerts.push(pt[0], pt[1], pt[2], nextU[0], nextU[1], nextU[2]);
+              }
+              if (v + 1 < vCount) {
+                const nextV = cps[u][v + 1].point;
+                lineVerts.push(pt[0], pt[1], pt[2], nextV[0], nextV[1], nextV[2]);
+              }
+            }
+          }
+          if (lineVerts.length > 0) {
+            const lineGeo = new THREE.BufferGeometry();
+            lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(lineVerts, 3));
+            const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({
+              color: 0x06b6d4,
+              transparent: true,
+              opacity: 0.85,
+              depthTest: false
+            }));
+            lines.position.copy(initialPos);
+            lines.rotation.copy(initialRot);
+            lines.scale.copy(initialScale);
+            lines.renderOrder = 5;
+            group.add(lines);
+          }
+
+          // 2. Control Point nodes (clickable)
+          for (let u = 0; u < uCount; u++) {
+            for (let v = 0; v < vCount; v++) {
+              const cp = cps[u][v];
+              const isSel = selSet.has(`${u},${v}`);
+              const radScale = cp.radius !== undefined ? Math.max(0.5, Math.min(2.5, cp.radius)) : 1.0;
+              const sphereRadius = (isSel ? 0.040 : 0.022) * Math.sqrt(radScale);
+              const dot = new THREE.Mesh(
+                new THREE.SphereGeometry(sphereRadius, 14, 14),
+                new THREE.MeshBasicMaterial({
+                  color: isSel ? 0xffb700 : 0x06b6d4,
+                  depthTest: false
+                })
+              );
+              const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
+                .multiply(initialScale)
+                .applyEuler(initialRot)
+                .add(initialPos);
+              dot.position.copy(world);
+              dot.renderOrder = isSel ? 25 : 10;
+              dot.userData = { id: obj.id, isNurbsControlPoint: true, u, v };
+              group.add(dot);
+
+              // Add a luminous outer halo ring to the selected sphere
+              if (isSel) {
+                const ringGeo = new THREE.RingGeometry(sphereRadius * 1.35, sphereRadius * 1.75, 24);
+                const ringMat = new THREE.MeshBasicMaterial({
+                  color: 0xffffff,
+                  side: THREE.DoubleSide,
+                  depthTest: false,
+                  transparent: true,
+                  opacity: 0.95
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.position.copy(world);
+                if (cameraRef.current) ring.quaternion.copy(cameraRef.current.quaternion);
+                ring.renderOrder = 26;
+                group.add(ring);
+              }
+            }
+          }
+        } else if (obj.nurbsCurve) {
+          const curve = obj.nurbsCurve;
+          const cps = curve.controlPoints;
+          const selCPs = obj.selectedNurbsControlPoints?.length
+            ? obj.selectedNurbsControlPoints
+            : (obj.selectedNurbsControlPoint ? [obj.selectedNurbsControlPoint] : []);
+          const selSet = new Set(selCPs.map(p => p.u));
+
+          // 1. Control polygon lines
+          const lineVerts: number[] = [];
+          for (let i = 0; i < cps.length - 1; i++) {
+            const p1 = cps[i].point;
+            const p2 = cps[i + 1].point;
+            lineVerts.push(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
+          }
+          if (curve.closed && cps.length > 2) {
+            const p1 = cps[cps.length - 1].point;
+            const p2 = cps[0].point;
+            lineVerts.push(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]);
+          }
+          if (lineVerts.length > 0) {
+            const lineGeo = new THREE.BufferGeometry();
+            lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(lineVerts, 3));
+            const lines = new THREE.LineSegments(lineGeo, new THREE.LineBasicMaterial({
+              color: 0x06b6d4,
+              transparent: true,
+              opacity: 0.85,
+              depthTest: false
+            }));
+            lines.position.copy(initialPos);
+            lines.rotation.copy(initialRot);
+            lines.scale.copy(initialScale);
+            lines.renderOrder = 5;
+            group.add(lines);
+          }
+
+          // 2. Control Point nodes (clickable)
+          for (let i = 0; i < cps.length; i++) {
+            const cp = cps[i];
+            const isSel = selSet.has(i);
+            const radScale = cp.radius !== undefined ? Math.max(0.5, Math.min(2.5, cp.radius)) : 1.0;
+            const sphereRadius = (isSel ? 0.040 : 0.022) * Math.sqrt(radScale);
             const dot = new THREE.Mesh(
-              new THREE.SphereGeometry(0.012, 6, 6),
-              new THREE.MeshBasicMaterial({ color: selectedSet.has(i)?0xffaa00:0x888888, depthTest:false })
+              new THREE.SphereGeometry(sphereRadius, 14, 14),
+              new THREE.MeshBasicMaterial({
+                color: isSel ? 0xffb700 : 0x06b6d4,
+                depthTest: false
+              })
             );
-            const world = new THREE.Vector3(logicalPosAttr.getX(i), logicalPosAttr.getY(i), logicalPosAttr.getZ(i))
+            const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
               .multiply(initialScale)
               .applyEuler(initialRot)
               .add(initialPos);
             dot.position.copy(world);
-            dot.renderOrder = 2;
-            dot.userData.id = obj.id;
+            dot.renderOrder = isSel ? 25 : 10;
+            dot.userData = { id: obj.id, isNurbsControlPoint: true, u: i, v: 0 };
             group.add(dot);
+
+            if (isSel) {
+              const ringGeo = new THREE.RingGeometry(sphereRadius * 1.35, sphereRadius * 1.75, 24);
+              const ringMat = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                side: THREE.DoubleSide,
+                depthTest: false,
+                transparent: true,
+                opacity: 0.95
+              });
+              const ring = new THREE.Mesh(ringGeo, ringMat);
+              ring.position.copy(world);
+              if (cameraRef.current) ring.quaternion.copy(cameraRef.current.quaternion);
+              ring.renderOrder = 26;
+              group.add(ring);
+            }
           }
-        }
+        } else if (editMode === 'VERTEX') {
+            const pointGeo = new THREE.BufferGeometry();
+            const logicalVerts: number[] = [];
+            if (obj.vertices) {
+              obj.vertices.forEach((v, i) => {
+                const off = obj.vertexOffsets?.[i] || [0,0,0];
+                logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+              });
+            }
+            pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
+            pointGeo.computeBoundingSphere();
+            const pts = new THREE.Points(pointGeo, new THREE.PointsMaterial({ visible:true, transparent:true, opacity:0, size:0.2 }));
+            pts.position.copy(initialPos);
+            pts.rotation.copy(initialRot);
+            pts.scale.copy(initialScale);
+            pts.updateMatrixWorld(true);
+            vertexPointsRef.current = pts;
+
+            const selectedSet = new Set(selectedVertexIndices);
+            const logicalPosAttr = pointGeo.getAttribute('position');
+            for (let i = 0; i < logicalPosAttr.count; i++) {
+              const dot = new THREE.Mesh(
+                new THREE.SphereGeometry(0.012, 6, 6),
+                new THREE.MeshBasicMaterial({ color: selectedSet.has(i)?0xffaa00:0x888888, depthTest:false })
+              );
+              const world = new THREE.Vector3(logicalPosAttr.getX(i), logicalPosAttr.getY(i), logicalPosAttr.getZ(i))
+                .multiply(initialScale)
+                .applyEuler(initialRot)
+                .add(initialPos);
+              dot.position.copy(world);
+              dot.renderOrder = 2;
+              dot.userData.id = obj.id;
+              group.add(dot);
+            }
+          }
 
         if (editMode === 'FACE' && selectedFaceIndices.length > 0) {
           selectedFaceIndices.forEach(faceIdx => {
@@ -3124,18 +3309,56 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const w=renderer.domElement.clientWidth, h=renderer.domElement.clientHeight;
 
       let objPos = new THREE.Vector3();
+      const isNurbsCpSelected = !!(
+        selObj &&
+        (selObj.nurbsSurface || selObj.nurbsCurve) &&
+        (selObj.selectedNurbsControlPoint || selObj.selectedNurbsControlPoints?.length)
+      );
       if (selLight) {
         objPos.fromArray(selLight.transform.position);
       } else if (selCam) {
         const evalCam = evaluateCameraTransform(selCam, projectRef.current.objects, currentTime, projectRef.current.duration || 5);
         objPos.copy(evalCam.position);
       } else if (selObj) {
-        if (editMode==='OBJECT') {
+        if (isNurbsCpSelected) {
+          const selCPs = selObj.selectedNurbsControlPoints?.length
+            ? selObj.selectedNurbsControlPoints
+            : (selObj.selectedNurbsControlPoint ? [selObj.selectedNurbsControlPoint] : []);
+          const centroidLocal = new THREE.Vector3();
+          let validCount = 0;
+          selCPs.forEach(cp => {
+            let pt: [number, number, number] | null = null;
+            if (selObj.nurbsSurface) {
+              pt = selObj.nurbsSurface.controlPoints[cp.u]?.[cp.v ?? 0]?.point || null;
+            } else if (selObj.nurbsCurve) {
+              pt = selObj.nurbsCurve.controlPoints[cp.u]?.point || null;
+            }
+            if (pt) {
+              centroidLocal.add(new THREE.Vector3(...pt));
+              validCount++;
+            }
+          });
+          if (validCount > 0) centroidLocal.divideScalar(validCount);
+
+          const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+          if (mesh && validCount > 0) {
+            objPos = centroidLocal.applyMatrix4(mesh.matrixWorld);
+          } else if (validCount > 0) {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            objPos = centroidLocal
+              .multiply(new THREE.Vector3(..._interp.scale))
+              .applyEuler(new THREE.Euler(..._interp.rotation))
+              .add(new THREE.Vector3(..._interp.position));
+          } else {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            objPos.fromArray(_interp.position);
+          }
+        } else if (editMode==='OBJECT') {
           const _interp = getInterpolatedTransform(selObj, currentTime);
           objPos.fromArray(_interp.position);
         } else {
           if (!selectedVertexIndices.length) return null;
-          const mesh = primitivesGroupRef.current.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
+          const mesh = primitivesGroupRef.current?.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
           if (!mesh) return null;
 
           const isShape = selObj.type === 'SHAPE';
@@ -3169,16 +3392,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       }
 
-      const layout = computeGizmoLayout(objPos, camera, w, h, selObj);
+      const layout = computeGizmoLayout(objPos, camera, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined);
       if (!layout) return null;
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const distCenter = Math.sqrt((mx - cx)**2 + (my - cy)**2);
 
       // 1. Center FREE handle (small clean dot)
-      if (distCenter < 8) return 'FREE';
+      if (distCenter < (isNurbsCpSelected ? 10 : 8)) return 'FREE';
 
-      // 2. Check Scale Cubes
-      if (transformMode === 'scale' || transformMode === 'universal') {
+      // 2. Check Scale Cubes (disabled when a NURBS control point is selected)
+      if (!isNurbsCpSelected && (transformMode === 'scale' || transformMode === 'universal')) {
         const scaleDistRatio = transformMode === 'universal' ? 1.05 : 0.9;
         for (const axis of ['X', 'Y', 'Z']) {
           const d = dirs[axis];
@@ -3191,8 +3414,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       }
 
-      // 3. Check Rotation Arcs & Spheres
-      if (transformMode === 'rotate' || transformMode === 'universal') {
+      // 3. Check Rotation Arcs & Spheres (disabled when a NURBS control point is selected)
+      if (!isNurbsCpSelected && (transformMode === 'rotate' || transformMode === 'universal')) {
         for (const rotAxis of ['Z', 'X', 'Y']) {
           const arc = rotArcs[rotAxis];
           if (!arc) continue;
@@ -3208,7 +3431,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // 4. Check Axis Translation Arrows / Shafts
-      if (transformMode === 'translate' || transformMode === 'universal') {
+      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
         for (const axis of ['X', 'Y', 'Z']) {
           const d = dirs[axis];
           if (!d) continue;
@@ -3222,7 +3445,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // 5. Check 2D Translation Planes
-      if (transformMode === 'translate' || transformMode === 'universal') {
+      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
         const checkPlane = (a1: string, a2: string, planeName: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return false;
@@ -3247,10 +3470,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (checkPlane('X', 'Z', 'XZ')) return 'XZ';
       }
 
-      // 6. Outer View Ring
-      const OUTER_R = AXIS_LEN * 1.15;
-      if (Math.abs(distCenter - OUTER_R) < 10) {
-        return transformMode === 'scale' ? 'SCALE_UNIFORM' : 'ROT_VIEW';
+      // 6. Outer View Ring (disabled when a NURBS control point is selected)
+      if (!isNurbsCpSelected) {
+        const OUTER_R = AXIS_LEN * 1.15;
+        if (Math.abs(distCenter - OUTER_R) < 10) {
+          return transformMode === 'scale' ? 'SCALE_UNIFORM' : 'ROT_VIEW';
+        }
       }
 
       return null;
@@ -3380,13 +3605,37 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           
           // Store start gizmo world position
           let gizmoWorldPos = new THREE.Vector3();
+          const isNurbsCp = !!(selObj && (selObj.nurbsSurface || selObj.nurbsCurve) && selObj.selectedNurbsControlPoint);
           if (selLight) {
             gizmoWorldPos.fromArray(selLight.transform.position);
           } else if (selCam) {
             const evalCam = evaluateCameraTransform(selCam, projectRef.current.objects, currentTime, projectRef.current.duration || 5);
             gizmoWorldPos.copy(evalCam.position);
           } else if (selObj) {
-            if (editMode === 'OBJECT') {
+            if (isNurbsCp) {
+              let cpLocal: [number, number, number] | null = null;
+              if (selObj.nurbsSurface) {
+                const u = selObj.selectedNurbsControlPoint!.u;
+                const v = selObj.selectedNurbsControlPoint!.v ?? 0;
+                cpLocal = selObj.nurbsSurface.controlPoints[u]?.[v]?.point || null;
+              } else if (selObj.nurbsCurve) {
+                const u = selObj.selectedNurbsControlPoint!.u;
+                cpLocal = selObj.nurbsCurve.controlPoints[u]?.point || null;
+              }
+              const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+              if (cpLocal && mesh) {
+                gizmoWorldPos = new THREE.Vector3(...cpLocal).applyMatrix4(mesh.matrixWorld);
+              } else if (cpLocal) {
+                const _interp = getInterpolatedTransform(selObj, currentTime);
+                gizmoWorldPos = new THREE.Vector3(...cpLocal)
+                  .multiply(new THREE.Vector3(..._interp.scale))
+                  .applyEuler(new THREE.Euler(..._interp.rotation))
+                  .add(new THREE.Vector3(..._interp.position));
+              } else {
+                const _interp = getInterpolatedTransform(selObj, currentTime);
+                gizmoWorldPos.fromArray(_interp.position);
+              }
+            } else if (editMode === 'OBJECT') {
               const _interp = getInterpolatedTransform(selObj, currentTime);
               gizmoWorldPos.fromArray(_interp.position);
             } else {
@@ -3426,10 +3675,30 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             gizmoStateRef.current.startRot=[...selCam.transform.rotation];
             gizmoStateRef.current.startScale=[...selCam.transform.scale];
           } else if (selObj) {
-            const _interp = getInterpolatedTransform(selObj, currentTime);
-            gizmoStateRef.current.startPos=[..._interp.position];
-            gizmoStateRef.current.startRot=[..._interp.rotation];
-            gizmoStateRef.current.startScale=[..._interp.scale];
+            if (isNurbsCp) {
+              const activeCPs = selObj.selectedNurbsControlPoints?.length
+                ? selObj.selectedNurbsControlPoints
+                : (selObj.selectedNurbsControlPoint ? [selObj.selectedNurbsControlPoint] : []);
+              const startCPs: { u: number; v?: number; point: V3 }[] = [];
+              activeCPs.forEach(cp => {
+                let pt: V3 | null = null;
+                if (selObj.nurbsSurface) {
+                  pt = selObj.nurbsSurface.controlPoints[cp.u]?.[cp.v ?? 0]?.point || null;
+                } else if (selObj.nurbsCurve) {
+                  pt = selObj.nurbsCurve.controlPoints[cp.u]?.point || null;
+                }
+                if (pt) startCPs.push({ u: cp.u, v: cp.v, point: [...pt] as V3 });
+              });
+              (gizmoStateRef.current as any).startNurbsCPs = startCPs;
+              const firstPt = startCPs[0]?.point || [0, 0, 0];
+              gizmoStateRef.current.startPos = [...firstPt];
+              (gizmoStateRef.current as any).startNurbsCP = [...firstPt];
+            } else {
+              const _interp = getInterpolatedTransform(selObj, currentTime);
+              gizmoStateRef.current.startPos=[..._interp.position];
+              gizmoStateRef.current.startRot=[..._interp.rotation];
+              gizmoStateRef.current.startScale=[..._interp.scale];
+            }
           }
 
           // Store handle world direction & start transforms for all selected objects
@@ -3505,6 +3774,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           }
           gizmoStateRef.current.startTransforms = startTransforms;
+          if (selObj?.nurbsSurface) {
+            const uSel = selObj.selectedNurbsControlPoint?.u ?? 0;
+            const vSel = selObj.selectedNurbsControlPoint?.v ?? 0;
+            const pt = selObj.nurbsSurface.controlPoints[uSel]?.[vSel]?.point;
+            if (pt) (gizmoStateRef.current as any).startNurbsCP = [...pt];
+          } else if (selObj?.nurbsCurve) {
+            const uSel = selObj.selectedNurbsControlPoint?.u ?? 0;
+            const pt = selObj.nurbsCurve.controlPoints[uSel]?.point;
+            if (pt) (gizmoStateRef.current as any).startNurbsCP = [...pt];
+          }
+
           if (editMode!=='OBJECT') {
             const offsets: Record<number,[number,number,number]>={};
             if (selObj.type === 'SHAPE') {
@@ -3541,6 +3821,62 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       raycasterRef.current.params.Line.threshold=0.1;
 
       let hitSomething=false;
+
+      // Check NURBS control points raycasting in all modes
+      const potentialGroups = [groupRef.current, primitivesGroupRef.current].filter(Boolean) as THREE.Group[];
+      if (potentialGroups.length > 0) {
+        const sphereHits = raycasterRef.current.intersectObjects(potentialGroups, true);
+        const nurbsHit = sphereHits.find(h => h.object.userData?.isNurbsControlPoint);
+        if (nurbsHit) {
+          event.stopPropagation();
+          event.preventDefault();
+          hitSomething = true;
+          const { u, v, id } = nurbsHit.object.userData;
+          const targetObj = projectRef.current.objects.find(o => o.id === id);
+
+          if (selectedObjectId !== id) {
+            useStore.getState().selectObject(id);
+          }
+
+          if (event.shiftKey) {
+            useStore.getState().selectNurbsControlPoint(id, u, v, true);
+          } else {
+            const existingGroup = targetObj?.selectedNurbsControlPoints || [];
+            const isAlreadyInGroup = existingGroup.some(p => p.u === u && (p.v ?? 0) === (v ?? 0));
+            if (!isAlreadyInGroup || existingGroup.length <= 1) {
+              useStore.getState().selectNurbsControlPoint(id, u, v, false);
+            }
+          }
+
+          const currentObj = useStore.getState().project.objects.find(o => o.id === id);
+          const activeCPs = currentObj?.selectedNurbsControlPoints?.length
+            ? currentObj.selectedNurbsControlPoints
+            : (currentObj?.selectedNurbsControlPoint ? [currentObj.selectedNurbsControlPoint] : [{ u, v }]);
+
+          const startCPs: { u: number; v?: number; point: V3 }[] = [];
+          activeCPs.forEach(cp => {
+            let pt: V3 | null = null;
+            if (currentObj?.nurbsSurface) {
+              pt = currentObj.nurbsSurface.controlPoints[cp.u]?.[cp.v ?? 0]?.point || null;
+            } else if (currentObj?.nurbsCurve) {
+              pt = currentObj.nurbsCurve.controlPoints[cp.u]?.point || null;
+            }
+            if (pt) startCPs.push({ u: cp.u, v: cp.v, point: [...pt] as V3 });
+          });
+
+          (gizmoStateRef.current as any).startNurbsCPs = startCPs;
+          const firstPt = startCPs[0]?.point || [0, 0, 0];
+          (gizmoStateRef.current as any).startNurbsCP = [...firstPt];
+          gizmoStateRef.current.startPos = [...firstPt];
+
+          gizmoStateRef.current.activeAxis = 'FREE';
+          gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
+          gizmoStateRef.current.startWorldGizmoPos = nurbsHit.object.position.clone();
+          isDraggingRef.current = true;
+          if (controlsRef.current) controlsRef.current.enabled = false;
+          return;
+        }
+      }
 
       if (editMode==='VERTEX') {
         const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
@@ -3997,7 +4333,65 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             mov.addScaledVector(right, dx * ms).addScaledVector(up, -dy * ms);
           }
           
-          if (editMode === 'OBJECT') {
+          const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+          const isNurbsCp = !!(
+            curSelObj &&
+            (curSelObj.nurbsSurface || curSelObj.nurbsCurve) &&
+            (curSelObj.selectedNurbsControlPoint || curSelObj.selectedNurbsControlPoints?.length)
+          );
+
+          if (isNurbsCp) {
+            const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+            let movLocal = mov.clone();
+            if (mesh) {
+              const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
+              movLocal.applyMatrix4(invMat);
+            } else if (curSelObj) {
+              const _interp = getInterpolatedTransform(curSelObj, currentTime);
+              const invMat = new THREE.Matrix4()
+                .makeRotationFromEuler(new THREE.Euler(..._interp.rotation))
+                .scale(new THREE.Vector3(..._interp.scale))
+                .invert();
+              movLocal.applyMatrix4(invMat);
+            }
+
+            const startCPs: { u: number; v?: number; point: V3 }[] = (gs as any).startNurbsCPs || [];
+            if (startCPs.length > 0) {
+              const updates = startCPs.map(scp => ({
+                u: scp.u,
+                v: scp.v,
+                point: [
+                  scp.point[0] + movLocal.x,
+                  scp.point[1] + movLocal.y,
+                  scp.point[2] + movLocal.z
+                ] as V3
+              }));
+              useStore.getState().updateNurbsControlPoints(curSelObj.id, updates);
+            } else if (curSelObj?.nurbsSurface) {
+              const surf = curSelObj.nurbsSurface;
+              const uSel = curSelObj.selectedNurbsControlPoint?.u ?? 0;
+              const vSel = curSelObj.selectedNurbsControlPoint?.v ?? 0;
+              const startPt = (gs as any).startNurbsCP || surf.controlPoints[uSel]?.[vSel]?.point;
+              if (startPt) {
+                useStore.getState().updateNurbsControlPoint(curSelObj.id, uSel, vSel, [
+                  startPt[0] + movLocal.x,
+                  startPt[1] + movLocal.y,
+                  startPt[2] + movLocal.z
+                ]);
+              }
+            } else if (curSelObj?.nurbsCurve) {
+              const curve = curSelObj.nurbsCurve;
+              const uSel = curSelObj.selectedNurbsControlPoint?.u ?? 0;
+              const startPt = (gs as any).startNurbsCP || curve.controlPoints[uSel]?.point;
+              if (startPt) {
+                useStore.getState().updateNurbsControlPoint(curSelObj.id, uSel, 0, [
+                  startPt[0] + movLocal.x,
+                  startPt[1] + movLocal.y,
+                  startPt[2] + movLocal.z
+                ]);
+              }
+            }
+          } else if (editMode==='OBJECT') {
             if (selectedLightId) {
               const start = gs.startTransforms[selectedLightId];
               if (start) {
@@ -4032,7 +4426,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               });
             }
           } else {
-            const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
             const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
             let movLocal = mov.clone();
             if (mesh) {
@@ -4058,7 +4451,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           if (['XY', 'YZ', 'XZ'].includes(gs.activeAxis)) {
             const ax = gs.activeAxis;
             const normal = ax === 'XY' ? new THREE.Vector3(0,0,1) : ax === 'YZ' ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
-            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, new THREE.Vector3(...gs.startPos));
+            const startWorldPt = gs.startWorldGizmoPos ? gs.startWorldGizmoPos.clone() : new THREE.Vector3(...gs.startPos);
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, startWorldPt);
             const raycaster = new THREE.Raycaster();
             const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
             const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
@@ -4071,7 +4465,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             if (startHit && curHit) move = curHit.sub(startHit);
           } else {
             const axisVec = gs.activeAxis==='X' ? new THREE.Vector3(1,0,0) : gs.activeAxis==='Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
-            const startPos = new THREE.Vector3(...gs.startPos);
+            const startPos = gs.startWorldGizmoPos ? gs.startWorldGizmoPos.clone() : new THREE.Vector3(...gs.startPos);
             
             const camDir = new THREE.Vector3();
             camera.getWorldDirection(camDir);
@@ -4107,7 +4501,65 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           }
 
-          if (editMode==='OBJECT') {
+          const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+          const isNurbsCp = !!(
+            curSelObj &&
+            (curSelObj.nurbsSurface || curSelObj.nurbsCurve) &&
+            (curSelObj.selectedNurbsControlPoint || curSelObj.selectedNurbsControlPoints?.length)
+          );
+
+          if (isNurbsCp) {
+            const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+            let moveLocal = move.clone();
+            if (mesh) {
+              const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
+              moveLocal.applyMatrix4(invMat);
+            } else if (curSelObj) {
+              const _interp = getInterpolatedTransform(curSelObj, currentTime);
+              const invMat = new THREE.Matrix4()
+                .makeRotationFromEuler(new THREE.Euler(..._interp.rotation))
+                .scale(new THREE.Vector3(..._interp.scale))
+                .invert();
+              moveLocal.applyMatrix4(invMat);
+            }
+
+            const startCPs: { u: number; v?: number; point: V3 }[] = (gs as any).startNurbsCPs || [];
+            if (startCPs.length > 0) {
+              const updates = startCPs.map(scp => ({
+                u: scp.u,
+                v: scp.v,
+                point: [
+                  scp.point[0] + moveLocal.x,
+                  scp.point[1] + moveLocal.y,
+                  scp.point[2] + moveLocal.z
+                ] as V3
+              }));
+              useStore.getState().updateNurbsControlPoints(curSelObj.id, updates);
+            } else if (curSelObj?.nurbsSurface) {
+              const surf = curSelObj.nurbsSurface;
+              const uSel = curSelObj.selectedNurbsControlPoint?.u ?? 0;
+              const vSel = curSelObj.selectedNurbsControlPoint?.v ?? 0;
+              const startPt = (gs as any).startNurbsCP || surf.controlPoints[uSel]?.[vSel]?.point;
+              if (startPt) {
+                useStore.getState().updateNurbsControlPoint(curSelObj.id, uSel, vSel, [
+                  startPt[0] + moveLocal.x,
+                  startPt[1] + moveLocal.y,
+                  startPt[2] + moveLocal.z
+                ]);
+              }
+            } else if (curSelObj?.nurbsCurve) {
+              const curve = curSelObj.nurbsCurve;
+              const uSel = curSelObj.selectedNurbsControlPoint?.u ?? 0;
+              const startPt = (gs as any).startNurbsCP || curve.controlPoints[uSel]?.point;
+              if (startPt) {
+                useStore.getState().updateNurbsControlPoint(curSelObj.id, uSel, 0, [
+                  startPt[0] + moveLocal.x,
+                  startPt[1] + moveLocal.y,
+                  startPt[2] + moveLocal.z
+                ]);
+              }
+            }
+          } else if (editMode==='OBJECT') {
             if (selectedLightId) {
               const start = gs.startTransforms[selectedLightId];
               if (start) {
@@ -4142,7 +4594,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               });
             }
           } else {
-            const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
             const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
             let moveLocal = move.clone();
             if (mesh) {
@@ -4768,17 +5219,21 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
       switch(event.key.toLowerCase()) {
         case 'g': case 'w': setTransformMode('translate'); break;
-        case 'r': case 'e': setTransformMode('rotate'); break;
+        case 'r': setTransformMode('rotate'); break;
         case 's': setTransformMode('scale'); break;
         case 'a': if (event.ctrlKey || event.metaKey) { event.preventDefault(); useStore.getState().selectAll(); } break;
         case 'd': if (event.ctrlKey || event.metaKey) { event.preventDefault(); useStore.getState().duplicateSelected(); } break;
-        case 'e': if (event.ctrlKey || event.metaKey) { 
-          event.preventDefault(); 
-          const { selectedObjectId, selectedFaceIndices, editMode } = useStore.getState();
-          if (selectedObjectId && editMode === 'FACE' && selectedFaceIndices.length > 0) {
-            useStore.getState().extrudeFaces(selectedObjectId, selectedFaceIndices, 0.3);
+        case 'e': 
+          if (event.ctrlKey || event.metaKey) { 
+            event.preventDefault(); 
+            const { selectedObjectId, selectedFaceIndices, editMode } = useStore.getState();
+            if (selectedObjectId && editMode === 'FACE' && selectedFaceIndices.length > 0) {
+              useStore.getState().extrudeFaces(selectedObjectId, selectedFaceIndices, 0.3);
+            }
+          } else {
+            setTransformMode('rotate');
           }
-        } break;
+          break;
       }
       if (event.key === 'Escape') {
         useStore.getState().deselectAll();
@@ -4849,7 +5304,48 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
         const mesh = primitivesGroupRef.current.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
 
-      if (['VERTEX','FACE','EDGE'].includes(editMode)) {
+      if (selObj.nurbsSurface || selObj.nurbsCurve) {
+        const isNurbsCp = !!(selObj.selectedNurbsControlPoint || selObj.selectedNurbsControlPoints?.length);
+        if (isNurbsCp && (editMode === 'VERTEX' || isNurbsCp)) {
+          const selCPs = selObj.selectedNurbsControlPoints?.length
+            ? selObj.selectedNurbsControlPoints
+            : (selObj.selectedNurbsControlPoint ? [selObj.selectedNurbsControlPoint] : []);
+          const centroidLocal = new THREE.Vector3();
+          let validCount = 0;
+          selCPs.forEach(cp => {
+            let pt: [number, number, number] | null = null;
+            if (selObj.nurbsSurface) {
+              pt = selObj.nurbsSurface.controlPoints[cp.u]?.[cp.v ?? 0]?.point || null;
+            } else if (selObj.nurbsCurve) {
+              pt = selObj.nurbsCurve.controlPoints[cp.u]?.point || null;
+            }
+            if (pt) {
+              centroidLocal.add(new THREE.Vector3(...pt));
+              validCount++;
+            }
+          });
+          if (validCount > 0) centroidLocal.divideScalar(validCount);
+          if (mesh && validCount > 0) {
+            gizmoPos = centroidLocal.applyMatrix4(mesh.matrixWorld);
+          } else if (validCount > 0) {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            gizmoPos = centroidLocal
+              .multiply(new THREE.Vector3(..._interp.scale))
+              .applyEuler(new THREE.Euler(..._interp.rotation))
+              .add(new THREE.Vector3(..._interp.position));
+          } else if (mesh) {
+            mesh.getWorldPosition(gizmoPos);
+          } else {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            gizmoPos.fromArray(_interp.position);
+          }
+        } else if (mesh) {
+          mesh.getWorldPosition(gizmoPos);
+        } else {
+          const _interp = getInterpolatedTransform(selObj, currentTime);
+          gizmoPos.fromArray(_interp.position);
+        }
+      } else if (['VERTEX','FACE','EDGE'].includes(editMode)) {
         if (!selectedVertexIndices.length) return;
         if (!mesh) return;
 
@@ -4890,15 +5386,22 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
       }
 
-      const layout = computeGizmoLayout(gizmoPos, cameraRef.current, w, h, transformSpace, selObj);
+      const isNurbsCpSelected = !!(
+        selObj &&
+        (selObj.nurbsSurface || selObj.nurbsCurve) &&
+        (selObj.selectedNurbsControlPoint || selObj.selectedNurbsControlPoints?.length)
+      );
+
+      const layout = computeGizmoLayout(gizmoPos, cameraRef.current, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined);
       if (!layout) return;
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const gs = gizmoStateRef.current;
 
-      const showTranslate = transformMode === 'translate' || transformMode === 'universal';
-      const showRotate = transformMode === 'rotate' || transformMode === 'universal';
-      const showScale = transformMode === 'scale' || transformMode === 'universal';
-      const showPlanes = transformMode === 'translate' || transformMode === 'universal';
+      const showTranslate = isNurbsCpSelected ? true : (transformMode === 'translate' || transformMode === 'universal');
+      const showRotate = isNurbsCpSelected ? false : (transformMode === 'rotate' || transformMode === 'universal');
+      const showScale = isNurbsCpSelected ? false : (transformMode === 'scale' || transformMode === 'universal');
+      const showPlanes = isNurbsCpSelected ? true : (transformMode === 'translate' || transformMode === 'universal');
+      const showOuterRing = !isNurbsCpSelected && (transformMode === 'rotate' || transformMode === 'universal' || transformMode === 'scale');
 
       // 1. Draw 2D translation corner plane handles (small, neat, non-cluttering)
       if (showPlanes) {
@@ -5034,17 +5537,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // 5. Draw Outer Trackball Ring
-      const OUTER_R = AXIS_LEN * 1.15;
-      const isOuterHov = gs.hoveredAxis === 'ROT_VIEW' || gs.activeAxis === 'ROT_VIEW' || gs.hoveredAxis === 'SCALE_UNIFORM' || gs.activeAxis === 'SCALE_UNIFORM';
-      ctx.save();
-      ctx.globalAlpha = isOuterHov ? 0.85 : 0.25;
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = isOuterHov ? 1.5 : 0.9;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.arc(cx, cy, OUTER_R, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
+      if (showOuterRing) {
+        const OUTER_R = AXIS_LEN * 1.15;
+        const isOuterHov = gs.hoveredAxis === 'ROT_VIEW' || gs.activeAxis === 'ROT_VIEW' || gs.hoveredAxis === 'SCALE_UNIFORM' || gs.activeAxis === 'SCALE_UNIFORM';
+        ctx.save();
+        ctx.globalAlpha = isOuterHov ? 0.85 : 0.25;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = isOuterHov ? 1.5 : 0.9;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.arc(cx, cy, OUTER_R, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
 
       // 6. Draw center FREE handle
       const isFreeHov = gs.hoveredAxis === 'FREE' || gs.activeAxis === 'FREE';

@@ -6,6 +6,8 @@
  */
 
 import { MaterialPanel } from './MaterialPanel';
+import { ConfigPanel } from './ConfigPanel';
+import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
@@ -33,7 +35,9 @@ import {
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   Image as ImageIcon, Upload, Download, FileDown,
   Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split, Grid,
-  ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route
+  ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route,
+  Spline, Waves, Orbit, Sparkles, RefreshCw, RotateCcw, ArrowRightLeft, GitMerge, FileDigit,
+  SlidersHorizontal, Keyboard
 } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
@@ -50,6 +54,13 @@ const TYPE_LABELS: Record<string, string> = {
   WEDGE: 'Cuña', HEMISPHERE: 'Hemisferio',
   PLANE: 'Plano', CIRCLE: 'Círculo', RING: 'Anillo',
   SHAPE: 'Forma 2D', MESH: 'Malla',
+  NURBS_CURVE: 'Curva NURBS',
+  NURBS_CIRCLE: 'Círculo NURBS',
+  NURBS_SURFACE: 'Superficie NURBS',
+  NURBS_CYLINDER: 'Cilindro NURBS',
+  NURBS_CONE: 'Cono NURBS',
+  NURBS_SPHERE: 'Esfera NURBS',
+  NURBS_TORUS: 'Toroide NURBS',
 };
 
 const TYPE_COLORS: Record<string, string> = {
@@ -74,6 +85,13 @@ const TYPE_COLORS: Record<string, string> = {
   RING: 'bg-zinc-700/60 text-zinc-300',
   SHAPE: 'bg-indigo-900/60 text-indigo-300',
   MESH: 'bg-amber-900/60 text-amber-300',
+  NURBS_CURVE: 'bg-cyan-900/60 text-cyan-300',
+  NURBS_CIRCLE: 'bg-sky-900/60 text-sky-300',
+  NURBS_SURFACE: 'bg-teal-900/60 text-teal-300',
+  NURBS_CYLINDER: 'bg-blue-900/60 text-blue-300',
+  NURBS_CONE: 'bg-amber-900/60 text-amber-300',
+  NURBS_SPHERE: 'bg-indigo-900/60 text-indigo-300',
+  NURBS_TORUS: 'bg-violet-900/60 text-violet-300',
 };
 
 const OPERATION_COLORS: Record<string, string> = {
@@ -237,6 +255,521 @@ const RotationXYZRow: React.FC<{
         ))}
       </div>
     </div>
+  );
+};
+
+// ─── NURBS Section ────────────────────────────────────────────────────────────
+
+const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const isNurbs = obj.isNurbs || !!obj.nurbsCurve || !!obj.nurbsSurface || obj.type.startsWith('NURBS_');
+  if (!isNurbs) return null;
+
+  const editMode = useStore(s => s.editMode);
+  const setEditMode = useStore(s => s.setEditMode);
+  const selectNurbsControlPoint = useStore(s => s.selectNurbsControlPoint);
+  const updateNurbsControlPoint = useStore(s => s.updateNurbsControlPoint);
+  const setNurbsControlPointWeight = useStore(s => s.setNurbsControlPointWeight);
+  const updateNurbsControlPointAttributes = useStore(s => (s as any).updateNurbsControlPointAttributes);
+  const subdivideNurbsObject = useStore(s => s.subdivideNurbsObject);
+  const extrudeNurbsObject = useStore(s => s.extrudeNurbsObject);
+  const revolveNurbsObject = useStore(s => s.revolveNurbsObject);
+  const loftNurbsObjects = useStore(s => s.loftNurbsObjects);
+  const fillNurbsObject = useStore(s => s.fillNurbsObject);
+  const switchNurbsDirectionObject = useStore(s => s.switchNurbsDirectionObject);
+  const convertNurbsToMesh = useStore(s => s.convertNurbsToMesh);
+  const setNurbsDegree = useStore(s => s.setNurbsDegree);
+  const setNurbsResolution = useStore(s => s.setNurbsResolution);
+  const setNurbsOrderAction = useStore(s => (s as any).setNurbsOrderAction);
+  const toggleNurbsEndpointAction = useStore(s => (s as any).toggleNurbsEndpointAction);
+  const toggleNurbsCyclicAction = useStore(s => (s as any).toggleNurbsCyclicAction);
+  const setNurbsKnotTypeAction = useStore(s => (s as any).setNurbsKnotTypeAction);
+  const smoothNurbsObject = useStore(s => (s as any).smoothNurbsObject);
+  const resetNurbsWeightsObject = useStore(s => (s as any).resetNurbsWeightsObject);
+  const resetNurbsTiltsAndRadiiObject = useStore(s => (s as any).resetNurbsTiltsAndRadiiObject);
+  const project = useStore(s => s.project);
+
+  const isSurface = !!obj.nurbsSurface;
+  const isCurve = !!obj.nurbsCurve;
+
+  const curveData = obj.nurbsCurve;
+  const surfaceData = obj.nurbsSurface;
+
+  // Selected control point
+  const selCp = obj.selectedNurbsControlPoint || { u: 0, v: 0 };
+  const uSel = selCp.u ?? 0;
+  const vSel = selCp.v ?? 0;
+
+  // Active control point data
+  const currentCP = isSurface && surfaceData
+    ? surfaceData.controlPoints[uSel]?.[vSel]
+    : isCurve && curveData
+      ? curveData.controlPoints[uSel]
+      : null;
+
+  // Other curve objects in project for lofting
+  const otherCurves = project.objects.filter(o => o.id !== obj.id && (o.nurbsCurve || o.type === 'NURBS_CURVE' || o.type === 'NURBS_CIRCLE'));
+
+  return (
+    <Section
+      title="Estructura NURBS (Blender)"
+      icon={<Waves size={12} className="text-cyan-400" />}
+      defaultOpen
+      badge={
+        <span className="text-[8px] bg-cyan-950/80 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800/60 font-bold uppercase tracking-wider">
+          {isSurface ? 'Superficie' : 'Curva'}
+        </span>
+      }
+    >
+      <div className="space-y-3">
+        {/* Modo Edición toggle (Tab) */}
+        <div className="bg-zinc-800/80 border border-zinc-700/60 rounded-lg p-2 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${editMode === 'VERTEX' ? 'bg-amber-400 animate-pulse' : 'bg-zinc-500'}`} />
+            <div>
+              <span className="text-[10px] font-bold text-zinc-200">Jaula de Control (Hull)</span>
+              <p className="text-[8px] text-zinc-400">Presiona <kbd className="px-1 py-0.5 bg-zinc-700 rounded text-[8px] font-mono text-zinc-200">Tab</kbd> para alternar</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setEditMode(editMode === 'VERTEX' ? 'OBJECT' : 'VERTEX')}
+            className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition-all ${
+              editMode === 'VERTEX'
+                ? 'bg-amber-500 text-zinc-950 hover:bg-amber-400 shadow-md shadow-amber-500/20'
+                : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+            }`}
+          >
+            {editMode === 'VERTEX' ? 'Modo Edición ON' : 'Editar Puntos'}
+          </button>
+        </div>
+
+        {/* ─── ESTRUCTURA DEL VECTOR DE NUDOS (KNOTS & ENDPOINTS) ─── */}
+        <div className="space-y-2 bg-zinc-900/60 rounded-lg p-2.5 border border-zinc-800">
+          <span className="text-[9px] font-bold text-cyan-400 uppercase tracking-wider block flex items-center justify-between">
+            <span>Estructura de Nudos (Knot Vector)</span>
+            <span className="text-[8px] text-zinc-500 lowercase font-normal">Blender Manual</span>
+          </span>
+
+          {isCurve && curveData && (
+            <div className="space-y-2 text-xs">
+              {/* Tipo de Nudo */}
+              <div className="flex items-center justify-between">
+                <span className="text-zinc-300 text-[10px]">Tipo de Nudo</span>
+                <select
+                  value={curveData.knotsType || 'ENDPOINT'}
+                  onChange={e => setNurbsKnotTypeAction(obj.id, e.target.value as any, 'U')}
+                  className="bg-zinc-800 border border-zinc-700 text-[10px] text-zinc-100 rounded px-2 py-0.5 focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="ENDPOINT">Endpoint (Extremos Sujetos)</option>
+                  <option value="UNIFORM">Uniform (B-Spline Libre)</option>
+                  <option value="BEZIER">Bézier (Tramos Cúbicos)</option>
+                </select>
+              </div>
+
+              {/* Switches Endpoint & Cyclic */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-zinc-300 select-none">
+                  <input
+                    type="checkbox"
+                    checked={curveData.endpoint !== false}
+                    onChange={() => toggleNurbsEndpointAction(obj.id, 'U')}
+                    className="accent-cyan-500 w-3 h-3 rounded"
+                  />
+                  <span>Endpoint Clamping</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer text-[10px] text-zinc-300 select-none">
+                  <input
+                    type="checkbox"
+                    checked={!!curveData.closed}
+                    onChange={() => toggleNurbsCyclicAction(obj.id, 'U')}
+                    className="accent-cyan-500 w-3 h-3 rounded"
+                  />
+                  <span>Cíclico (Cyclic U)</span>
+                </label>
+              </div>
+
+              {/* Orden (Order = Degree + 1) */}
+              <NumRow
+                label="Orden (Order = p + 1)"
+                value={curveData.degree + 1}
+                onChange={v => setNurbsOrderAction(obj.id, Math.round(v))}
+                min={2}
+                max={Math.min(6, curveData.controlPoints.length)}
+                step={1}
+                slider
+              />
+              <p className="text-[8px] text-zinc-500 italic">Grado polinómico: p = {curveData.degree}</p>
+            </div>
+          )}
+
+          {isSurface && surfaceData && (
+            <div className="space-y-2.5 text-xs">
+              {/* Dirección U */}
+              <div className="p-1.5 bg-zinc-950/40 rounded border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[10px] font-bold text-zinc-300">
+                  <span>Dirección U</span>
+                  <select
+                    value={surfaceData.knotsTypeU || 'ENDPOINT'}
+                    onChange={e => setNurbsKnotTypeAction(obj.id, e.target.value as any, 'U')}
+                    className="bg-zinc-800 border border-zinc-700 text-[9px] text-zinc-100 rounded px-1.5 py-0.5"
+                  >
+                    <option value="ENDPOINT">Endpoint</option>
+                    <option value="UNIFORM">Uniform</option>
+                    <option value="BEZIER">Bézier</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-zinc-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={surfaceData.endpointU !== false}
+                      onChange={() => toggleNurbsEndpointAction(obj.id, 'U')}
+                      className="accent-cyan-500 w-3 h-3 rounded"
+                    />
+                    <span>Endpoint U</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-zinc-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!surfaceData.closedU}
+                      onChange={() => toggleNurbsCyclicAction(obj.id, 'U')}
+                      className="accent-cyan-500 w-3 h-3 rounded"
+                    />
+                    <span>Cíclico U</span>
+                  </label>
+                </div>
+                <NumRow
+                  label="Orden U"
+                  value={surfaceData.degreeU + 1}
+                  onChange={v => setNurbsOrderAction(obj.id, Math.round(v), surfaceData.degreeV + 1)}
+                  min={2}
+                  max={Math.min(6, surfaceData.controlPoints.length)}
+                  step={1}
+                  slider
+                />
+              </div>
+
+              {/* Dirección V */}
+              <div className="p-1.5 bg-zinc-950/40 rounded border border-zinc-800/80 space-y-1.5">
+                <div className="flex items-center justify-between text-[10px] font-bold text-zinc-300">
+                  <span>Dirección V</span>
+                  <select
+                    value={surfaceData.knotsTypeV || 'ENDPOINT'}
+                    onChange={e => setNurbsKnotTypeAction(obj.id, e.target.value as any, 'V')}
+                    className="bg-zinc-800 border border-zinc-700 text-[9px] text-zinc-100 rounded px-1.5 py-0.5"
+                  >
+                    <option value="ENDPOINT">Endpoint</option>
+                    <option value="UNIFORM">Uniform</option>
+                    <option value="BEZIER">Bézier</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-zinc-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={surfaceData.endpointV !== false}
+                      onChange={() => toggleNurbsEndpointAction(obj.id, 'V')}
+                      className="accent-cyan-500 w-3 h-3 rounded"
+                    />
+                    <span>Endpoint V</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-[9px] text-zinc-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!surfaceData.closedV}
+                      onChange={() => toggleNurbsCyclicAction(obj.id, 'V')}
+                      className="accent-cyan-500 w-3 h-3 rounded"
+                    />
+                    <span>Cíclico V</span>
+                  </label>
+                </div>
+                <NumRow
+                  label="Orden V"
+                  value={surfaceData.degreeV + 1}
+                  onChange={v => setNurbsOrderAction(obj.id, surfaceData.degreeU + 1, Math.round(v))}
+                  min={2}
+                  max={Math.min(6, (surfaceData.controlPoints[0]?.length || 4))}
+                  step={1}
+                  slider
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Resolución de Muestreo / Teselado */}
+        <div className="space-y-1.5 bg-zinc-800/40 rounded-lg p-2 border border-zinc-700/40">
+          <span className="text-[9px] font-bold text-zinc-400 uppercase tracking-wider block">Resolución / Densidad de Muestreo</span>
+          {isCurve && (
+            <NumRow
+              label="Resolución (Segmentos)"
+              value={obj.parameters.segments ?? 32}
+              onChange={v => setNurbsResolution(obj.id, Math.round(v))}
+              min={8}
+              max={128}
+              step={4}
+              slider
+            />
+          )}
+          {isSurface && surfaceData && (
+            <>
+              <NumRow
+                label="Resolución U"
+                value={surfaceData.resolutionU}
+                onChange={v => setNurbsResolution(obj.id, Math.round(v), surfaceData.resolutionV)}
+                min={4}
+                max={64}
+                step={2}
+                slider
+              />
+              <NumRow
+                label="Resolución V"
+                value={surfaceData.resolutionV}
+                onChange={v => setNurbsResolution(obj.id, surfaceData.resolutionU, Math.round(v))}
+                min={4}
+                max={64}
+                step={2}
+                slider
+              />
+            </>
+          )}
+        </div>
+
+        {/* ─── PUNTO DE CONTROL ACTIVO Y SUS ATRIBUTOS DE ESTRUCTURA ─── */}
+        <div className="space-y-2 bg-cyan-950/20 border border-cyan-800/30 rounded-lg p-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold text-cyan-300 flex items-center gap-1">
+              <Orbit size={11} />
+              Punto de Control Activo
+            </span>
+            <span className="text-[9px] text-cyan-400 font-mono">
+              {isSurface
+                ? `[${uSel}, ${vSel}] de ${surfaceData?.controlPoints.length}×${surfaceData?.controlPoints[0]?.length}`
+                : `[${uSel}] de ${curveData?.controlPoints.length}`}
+            </span>
+          </div>
+
+          {/* Point Grid / List Selector */}
+          {isSurface && surfaceData && (
+            <div className="max-h-24 overflow-y-auto p-1 bg-zinc-900/60 rounded border border-zinc-800 custom-scrollbar">
+              <div className="grid gap-1" style={{ gridTemplateColumns: `repeat(${surfaceData.controlPoints[0]?.length || 4}, minmax(0, 1fr))` }}>
+                {surfaceData.controlPoints.map((row, rIdx) =>
+                  row.map((cp, cIdx) => {
+                    const isSelected = uSel === rIdx && vSel === cIdx;
+                    return (
+                      <button
+                        key={`${rIdx}-${cIdx}`}
+                        onClick={() => selectNurbsControlPoint(obj.id, rIdx, cIdx)}
+                        className={`h-6 text-[8px] font-mono font-bold rounded transition-all flex items-center justify-center ${
+                          isSelected
+                            ? 'bg-amber-500 text-zinc-950 ring-2 ring-amber-300'
+                            : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+                        }`}
+                        title={`Punto [${rIdx},${cIdx}] (x:${cp.point[0].toFixed(1)}, y:${cp.point[1].toFixed(1)}, z:${cp.point[2].toFixed(1)}, w:${cp.weight.toFixed(2)})`}
+                      >
+                        {rIdx},{cIdx}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+
+          {isCurve && curveData && (
+            <div className="flex gap-1 overflow-x-auto p-1 bg-zinc-900/60 rounded border border-zinc-800 custom-scrollbar">
+              {curveData.controlPoints.map((cp, idx) => {
+                const isSelected = uSel === idx;
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => selectNurbsControlPoint(obj.id, idx)}
+                    className={`px-2 py-1 text-[9px] font-mono font-bold rounded shrink-0 transition-all ${
+                      isSelected
+                        ? 'bg-amber-500 text-zinc-950 ring-2 ring-amber-300'
+                        : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+                    }`}
+                  >
+                    P{idx} (w:{cp.weight.toFixed(1)})
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Coordinate & Structural Attributes Editing for current CP */}
+          {currentCP && (
+            <div className="space-y-2 pt-1">
+              <XYZRow
+                label="Posición CP"
+                values={currentCP.point}
+                onChange={newPt => updateNurbsControlPointAttributes(obj.id, uSel, vSel, { point: newPt })}
+                step={0.05}
+              />
+
+              {/* Peso Racional (Weight) */}
+              <NumRow
+                label="Peso Racional (Weight w)"
+                value={currentCP.weight}
+                onChange={w => updateNurbsControlPointAttributes(obj.id, uSel, vSel, { weight: w })}
+                min={0.01}
+                max={10.0}
+                step={0.05}
+                slider
+              />
+              <div className="flex gap-1">
+                {[
+                  { label: 'w=1 (Normal)', val: 1.0 },
+                  { label: 'w=0.71 (Círculo)', val: 0.7071 },
+                  { label: 'w=2.0 (Fuerte)', val: 2.0 },
+                  { label: 'w=0.3 (Débil)', val: 0.3 },
+                ].map(pre => (
+                  <button
+                    key={pre.label}
+                    onClick={() => updateNurbsControlPointAttributes(obj.id, uSel, vSel, { weight: pre.val })}
+                    className={`flex-1 py-0.5 text-[8px] font-mono rounded bg-zinc-800 hover:bg-cyan-700 hover:text-white transition-colors ${
+                      Math.abs(currentCP.weight - pre.val) < 0.05 ? 'border border-cyan-400 text-cyan-300' : 'text-zinc-400'
+                    }`}
+                  >
+                    {pre.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Radio Local (Radius Alt+S) & Inclinación (Tilt Ctrl+T) */}
+              <div className="pt-1 grid grid-cols-2 gap-2">
+                <NumRow
+                  label="Radio (Alt+S)"
+                  value={currentCP.radius ?? 1.0}
+                  onChange={r => updateNurbsControlPointAttributes(obj.id, uSel, vSel, { radius: r })}
+                  min={0.05}
+                  max={10.0}
+                  step={0.05}
+                  slider
+                />
+                <NumRow
+                  label="Inclinación / Tilt (°)"
+                  value={currentCP.tilt ?? 0}
+                  onChange={t => updateNurbsControlPointAttributes(obj.id, uSel, vSel, { tilt: t })}
+                  min={-180}
+                  max={180}
+                  step={5}
+                  slider
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ─── BARRA DE HERRAMIENTAS Y OPERADORES DE ESTRUCTURA ─── */}
+        <div className="space-y-2">
+          <span className="text-[9px] font-bold text-zinc-400 uppercase tracking-wider block">Operadores de Estructura (Blender)</span>
+
+          {/* Quick Structure Cleansers & Smoothers */}
+          <div className="grid grid-cols-3 gap-1.5">
+            <button
+              onClick={() => smoothNurbsObject(obj.id)}
+              className="py-1 px-1.5 bg-zinc-800/90 hover:bg-cyan-600 rounded text-[9px] font-semibold text-zinc-300 hover:text-white flex items-center justify-center gap-1 border border-zinc-700/60 transition-all"
+              title="Suavizar puntos de control usando relajación laplaciana (Laplacian Smoothing)"
+            >
+              <Sparkles size={11} />
+              Suavizar
+            </button>
+            <button
+              onClick={() => resetNurbsWeightsObject(obj.id)}
+              className="py-1 px-1.5 bg-zinc-800/90 hover:bg-cyan-600 rounded text-[9px] font-semibold text-zinc-300 hover:text-white flex items-center justify-center gap-1 border border-zinc-700/60 transition-all"
+              title="Restablece todos los pesos racionales a 1.0 (Uniform B-Spline)"
+            >
+              <RotateCcw size={11} />
+              Reset Pesos
+            </button>
+            <button
+              onClick={() => resetNurbsTiltsAndRadiiObject(obj.id)}
+              className="py-1 px-1.5 bg-zinc-800/90 hover:bg-cyan-600 rounded text-[9px] font-semibold text-zinc-300 hover:text-white flex items-center justify-center gap-1 border border-zinc-700/60 transition-all"
+              title="Restablece radio a 1.0 e inclinación (tilt) a 0°"
+            >
+              <RefreshCw size={11} />
+              Reset Tilt
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            {/* Subdividir */}
+            <button
+              onClick={() => subdivideNurbsObject(obj.id, 'BOTH')}
+              className="py-1.5 px-2 bg-zinc-800 hover:bg-cyan-600 rounded text-[10px] font-bold text-zinc-200 hover:text-white flex items-center justify-center gap-1.5 border border-zinc-700/60 hover:border-cyan-400 transition-all cursor-pointer"
+              title="Añade nuevos puntos de control intermedios refinando la curvatura matemática"
+            >
+              <GitMerge size={12} />
+              Subdividir
+            </button>
+
+            {/* Extruir */}
+            <button
+              onClick={() => extrudeNurbsObject(obj.id, [0, 0.6, 0])}
+              className="py-1.5 px-2 bg-zinc-800 hover:bg-cyan-600 rounded text-[10px] font-bold text-zinc-200 hover:text-white flex items-center justify-center gap-1.5 border border-zinc-700/60 hover:border-cyan-400 transition-all cursor-pointer"
+              title="Extruye la curva hacia una superficie 3D o expande la fila de control"
+            >
+              <ArrowUpFromLine size={12} />
+              Extruir [E]
+            </button>
+
+            {/* Revolución (Revolve) para Curvas */}
+            {isCurve && (
+              <button
+                onClick={() => revolveNurbsObject(obj.id, 360, 'y')}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-cyan-600 rounded text-[10px] font-bold text-zinc-200 hover:text-white flex items-center justify-center gap-1.5 border border-zinc-700/60 hover:border-cyan-400 transition-all cursor-pointer"
+                title="Genera una superficie 3D de revolución 360° alrededor del eje vertical"
+              >
+                <RotateCw size={12} />
+                Revolución 360°
+              </button>
+            )}
+
+            {/* Cerrar / Rellenar (Fill) */}
+            <button
+              onClick={() => fillNurbsObject(obj.id)}
+              className="py-1.5 px-2 bg-zinc-800 hover:bg-cyan-600 rounded text-[10px] font-bold text-zinc-200 hover:text-white flex items-center justify-center gap-1.5 border border-zinc-700/60 hover:border-cyan-400 transition-all cursor-pointer"
+              title="Alterna entre curva/superficie abierta y cerrada (Fill / Cyclic)"
+            >
+              <Target size={12} />
+              Rellenar / Cerrar [F]
+            </button>
+
+            {/* Invertir Dirección */}
+            <button
+              onClick={() => switchNurbsDirectionObject(obj.id, 'U')}
+              className="py-1.5 px-2 bg-zinc-800 hover:bg-cyan-600 rounded text-[10px] font-bold text-zinc-200 hover:text-white flex items-center justify-center gap-1.5 border border-zinc-700/60 hover:border-cyan-400 transition-all cursor-pointer"
+              title="Invierte la dirección matemática del spline (Switch Direction)"
+            >
+              <ArrowRightLeft size={12} />
+              Invertir Dirección
+            </button>
+
+            {/* Loft con otras curvas */}
+            {isCurve && otherCurves.length > 0 && (
+              <button
+                onClick={() => loftNurbsObjects([obj.id, ...otherCurves.map(c => c.id)])}
+                className="py-1.5 px-2 bg-cyan-900/60 hover:bg-cyan-600 text-cyan-200 hover:text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 border border-cyan-700/60 transition-all cursor-pointer"
+                title="Crea una superficie uniendo todas las curvas NURBS del escenario"
+              >
+                <Spline size={12} />
+                Loft ({otherCurves.length + 1} curvas)
+              </button>
+            )}
+          </div>
+
+          {/* Convertir a Malla (Convert to Mesh) */}
+          <button
+            onClick={() => convertNurbsToMesh(obj.id)}
+            className="w-full mt-2 py-2 px-3 bg-amber-600/20 hover:bg-amber-600/40 border border-amber-500/50 text-amber-300 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+            title="Convierte la geometría NURBS en una malla poligonal tradicional para esculpir, aplicar modificadores (Biselado, Twist, Bend) o CSG"
+          >
+            <FileDigit size={13} />
+            Convertir a Malla Poligonal (Convert to Mesh)
+          </button>
+        </div>
+      </div>
+    </Section>
   );
 };
 
@@ -2149,7 +2682,9 @@ export const PropertiesPanel: React.FC = () => {
     removeLight, removeCamera, selectLight, selectCamera, updateLight
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'MATERIALS' | 'SCENE'>('PROPERTIES');
+  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
+  const [shortcutsFloating, setShortcutsFloating] = useState(false);
   const obj = project.objects.find(o => o.id === selectedObjectId);
   const [isExporting, setIsExporting] = useState(false);
 
@@ -2256,27 +2791,39 @@ export const PropertiesPanel: React.FC = () => {
       <div className="flex border-b border-zinc-800 bg-zinc-900/50">
         <button 
           onClick={() => setActiveTab('PROPERTIES')}
-          className={`flex-1 flex items-center justify-center gap-2 py-3 text-[10px] font-bold uppercase tracking-widest transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'PROPERTIES' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
+          title="Propiedades del objeto seleccionado"
         >
-          <Settings size={14} /> Propiedades
+          <Settings size={13} /> Propiedades
         </button>
         <button 
           onClick={() => setActiveTab('MATERIALS')}
-          className={`flex-1 flex items-center justify-center gap-2 py-3 text-[10px] font-bold uppercase tracking-widest transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'MATERIALS' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
+          title="Biblioteca y edición de materiales PBR"
         >
-          <Palette size={14} /> Materiales
+          <Palette size={13} /> Materiales
         </button>
         <button 
           onClick={() => setActiveTab('SCENE')}
-          className={`flex-1 flex items-center justify-center gap-2 py-3 text-[10px] font-bold uppercase tracking-widest transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'SCENE' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
+          title="Iluminación, cámaras y entorno de la escena"
         >
-          <Globe size={14} /> Escena
+          <Globe size={13} /> Escena
+        </button>
+        <button 
+          onClick={() => setActiveTab('CONFIG')}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
+            activeTab === 'CONFIG' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+          title="Configuración, atajos de teclado y preferencias"
+        >
+          <SlidersHorizontal size={13} /> Configuración
         </button>
       </div>
 
@@ -2284,6 +2831,13 @@ export const PropertiesPanel: React.FC = () => {
         <MaterialPanel />
       ) : activeTab === 'SCENE' ? (
         <SceneManager />
+      ) : activeTab === 'CONFIG' ? (
+        <ConfigPanel
+          onOpenShortcutsModal={(floating) => {
+            setShortcutsFloating(floating ?? false);
+            setShowShortcutsModal(true);
+          }}
+        />
       ) : (
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* ── Propiedades del objeto ─────────────────────────────────────────── */}
@@ -2382,6 +2936,7 @@ export const PropertiesPanel: React.FC = () => {
                   </button>
                 </Section>
 
+                <NurbsSection obj={obj}/>
                 <ParametersSection obj={obj}/>
                 <GeneratedSection obj={obj}/>
                 <AlignSection obj={obj}/>
@@ -2446,6 +3001,13 @@ export const PropertiesPanel: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* ── Modal / Panel Flotante de Atajos de Teclado ── */}
+      <KeyboardShortcutsModal
+        isOpen={showShortcutsModal}
+        onClose={() => setShowShortcutsModal(false)}
+        isFloatingInitially={shortcutsFloating}
+      />
     </div>
   );
 };
