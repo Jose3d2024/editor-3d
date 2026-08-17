@@ -9,7 +9,7 @@ import {
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
   Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split,
-  Keyboard
+  Keyboard, Cloud, Wind, Flame, Waves
 } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
@@ -39,6 +39,7 @@ import {
 import { SiluetaTab } from './SiluetaTab';
 import { RenderModal } from './RenderModal';
 import { CodeExporterModal } from './CodeExporterModal';
+import { VOLUMETRIC_PRESETS } from '../utils/volumetricRaymarch';
 
 // ── Import helper: BufferGeometry → CSGObject ─────────────────────────────────
 const textureToDataURL = (texture: THREE.Texture): string | undefined => {
@@ -450,7 +451,7 @@ export const Toolbar: React.FC = () => {
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
-    'primitivo'|'nurbs'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
+    'primitivo'|'nurbs'|'volumetric'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
   >('primitivo');
   const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'acciones'>('seleccion');
 
@@ -1090,6 +1091,7 @@ export const Toolbar: React.FC = () => {
                     {([
                       {id:'primitivo', label:'Figuras',  icon:'⬛'},
                       {id:'nurbs',     label:'NURBS',    icon:'〰️'},
+                      {id:'volumetric',label:'Nubes 3D', icon:'☁️'},
                       {id:'dibujar',   label:'Dibujar',  icon:'✏️'},
                       {id:'geometria', label:'Geometría',icon:'⬡'},
                       {id:'generar',   label:'Generar',  icon:'🌀'},
@@ -1127,6 +1129,48 @@ export const Toolbar: React.FC = () => {
                               <span className="text-2xl group-hover:scale-110 transition-transform">{p.icon}</span>
                               <span className="text-[10px] font-bold text-center leading-tight text-zinc-200 group-hover:text-white">{p.label}</span>
                               <span className="text-[8px] text-zinc-400 group-hover:text-violet-200 text-center">{p.desc}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {/* ════ NUBES 3D (RAYMARCHING) ════ */}
+                    {createTab==='volumetric'&&(
+                      <>
+                        <PTitle icon="☁️" title="Nubes Volumétricas (Raymarching)" desc="Añade nubes y gases mediante shaders volumétricos avanzados."/>
+                        <div className="grid grid-cols-2 gap-2">
+                          {[
+                            { label: 'Nube Cúmulo', icon: <Cloud size={24} />, desc: 'Algodonosa Blanca', preset: VOLUMETRIC_PRESETS[0].config, color: '#0284c7' },
+                            { label: 'Tormenta 3D', icon: <Zap size={24} />, desc: 'Densa y Oscura', preset: VOLUMETRIC_PRESETS[1].config, color: '#334155' },
+                            { label: 'Humo Denso', icon: <Wind size={24} />, desc: 'Humo Industrial', preset: VOLUMETRIC_PRESETS[2].config, color: '#475569' },
+                            { label: 'Nebulosa 3D', icon: <Sparkles size={24} />, desc: 'Gas Cósmico', preset: VOLUMETRIC_PRESETS[3].config, color: '#7c3aed' },
+                            { label: 'Gas Ígneo', icon: <Flame size={24} />, desc: 'Fuego Volumétrico', preset: VOLUMETRIC_PRESETS[4].config, color: '#ea580c' },
+                            { label: 'Aurora 3D', icon: <Waves size={24} />, desc: 'Velo Esmeralda', preset: VOLUMETRIC_PRESETS[5].config, color: '#059669' },
+                          ].map((p, i) => (
+                            <button key={i} onClick={() => {
+                              addObject('VOLUME_CLOUD');
+                              setTimeout(() => {
+                                const selId = useStore.getState().selectedObjectId;
+                                if (selId) {
+                                  useStore.getState().updateObject(selId, {
+                                    name: `${p.label} ${useStore.getState().project.objects.length}`,
+                                    isVolumetric: true,
+                                    volumetric: p.preset,
+                                    color: p.preset.color || p.color,
+                                    parameters: { isVolumetric: true, volumetric: p.preset }
+                                  });
+                                  useStore.getState().saveHistory();
+                                }
+                              }, 20);
+                              setShowMainCreate(false);
+                            }}
+                              className="flex items-center gap-3 p-3 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-zinc-500 transition-all group cursor-pointer text-left">
+                              <div className="text-white drop-shadow-md" style={{ color: p.color }}>{p.icon}</div>
+                              <div>
+                                <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-white leading-tight">{p.label}</span>
+                                <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300">{p.desc}</span>
+                              </div>
                             </button>
                           ))}
                         </div>
@@ -1522,16 +1566,49 @@ export const Toolbar: React.FC = () => {
                     {editTab==='modificar'&&(
                       <>
                         <PTitle icon="🔨" title="Modificadores" desc="Operaciones booleanas y de malla."/>
-                        <div className="grid grid-cols-2 gap-2 mb-4">
-                          <button onClick={()=>{useStore.getState().applyBoolean('ADD');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Combine size={14}/> Unión</button>
-                          <button onClick={()=>{useStore.getState().applyBoolean('SUBTRACT');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Scissors size={14}/> Diferencia</button>
-                          <button onClick={()=>{useStore.getState().applyBoolean('INTERSECT');setShowMainEdit(false);}} className="flex items-center gap-2 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 rounded text-[11px] font-bold"><Target size={14}/> Intersección</button>
-                          <button onClick={async ()=>{
-                            const selId = useStore.getState().selectedObjectId;
-                            if (selId) await useStore.getState().ungroupSelectedObject(selId);
-                            setShowMainEdit(false);
-                          }} className="flex items-center gap-2 px-3 py-2 bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 rounded text-[11px] font-bold transition-all cursor-pointer"><Split size={14}/> Desagrupar</button>
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <button 
+                            onClick={()=>{useStore.getState().applyBoolean('SUBTRACT');setShowMainEdit(false);}} 
+                            className="flex items-center gap-2 px-3 py-2 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/40 rounded text-[11px] font-bold text-rose-200"
+                            title="Resta / Diferencia: Abre un hueco en el objeto base restando el objeto cortador"
+                          >
+                            <Scissors size={14} className="text-rose-400"/> Diferencia (A − B)
+                          </button>
+                          <button 
+                            onClick={()=>{useStore.getState().applyBoolean('ADD');setShowMainEdit(false);}} 
+                            className="flex items-center gap-2 px-3 py-2 bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-800/40 rounded text-[11px] font-bold text-emerald-200"
+                            title="Unión: Fusiona ambos objetos en una única pieza sólida"
+                          >
+                            <Combine size={14} className="text-emerald-400"/> Unión (A + B)
+                          </button>
+                          <button 
+                            onClick={()=>{useStore.getState().applyBoolean('INTERSECT');setShowMainEdit(false);}} 
+                            className="flex items-center gap-2 px-3 py-2 bg-sky-950/40 hover:bg-sky-900/60 border border-sky-800/40 rounded text-[11px] font-bold text-sky-200"
+                            title="Intersección: Conserva solo el volumen común compartido"
+                          >
+                            <Target size={14} className="text-sky-400"/> Intersección
+                          </button>
+                          <button 
+                            onClick={async ()=>{
+                              const selId = useStore.getState().selectedObjectId;
+                              if (selId) await useStore.getState().ungroupSelectedObject(selId);
+                              setShowMainEdit(false);
+                            }} 
+                            className="flex items-center gap-2 px-3 py-2 bg-purple-900/60 hover:bg-purple-800 text-purple-200 border border-purple-500/30 rounded text-[11px] font-bold transition-all cursor-pointer"
+                          >
+                            <Split size={14}/> Desagrupar
+                          </button>
                         </div>
+                        <button
+                          onClick={() => {
+                            useStore.getState().openBooleanModal();
+                            setShowMainEdit(false);
+                          }}
+                          className="w-full mb-4 py-1.5 px-2.5 bg-indigo-600/30 hover:bg-indigo-600 border border-indigo-500/40 text-indigo-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                        >
+                          <Sparkles size={12} className="text-indigo-300" />
+                          Abrir Estudio Booleano Completo (CSG)
+                        </button>
 
                         <PTitle icon="📤" title="Extrusión" desc="Crea volumen a partir de formas o caras."/>
                         <div className="p-3 bg-zinc-900/50 rounded-lg border border-zinc-800 space-y-3">

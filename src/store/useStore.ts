@@ -6,7 +6,9 @@ import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
 import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
 import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
+import { executeUnifiedBoolean, BooleanExecuteOptions, BooleanResult, UnifiedBooleanOp } from '../utils/booleanOperations';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
+import { DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
 import {
   createDefaultNurbsCurve,
   createDefaultNurbsCircle,
@@ -32,6 +34,9 @@ import {
   toggleNurbsEndpoint,
   toggleNurbsCyclic,
   setNurbsKnotType,
+  alignSurfacesG0,
+  alignSurfacesG0Auto,
+  mergeSurfacesU,
 } from '../utils/nurbs';
 import type { NurbsKnotType } from '../utils/nurbs';
 
@@ -302,6 +307,12 @@ interface Store extends AppState {
   capSelectedFacesObject: (id: string) => Promise<void>;
   extrudeShape: (id: string, depth: number, axis?: 'x' | 'y' | 'z') => void;
 
+  isBooleanModalOpen: boolean;
+  booleanModalTargetId: string | null;
+  booleanModalToolId: string | null;
+  openBooleanModal: (targetId?: string | null, toolId?: string | null) => void;
+  closeBooleanModal: () => void;
+  executeExplicitBoolean: (options: BooleanExecuteOptions) => Promise<BooleanResult>;
   applyBoolean: (op?: CSGOperation) => Promise<void>;
   smoothObject: (id: string, factor: number, iterations?: number) => Promise<void>;
   roundAnglesObject: (id: string, radius?: number, segments?: number, angleThresholdDeg?: number) => Promise<void>;
@@ -330,6 +341,8 @@ interface Store extends AppState {
   loftNurbsObjects: (ids: string[]) => void;
   fillNurbsObject: (id: string) => void;
   switchNurbsDirectionObject: (id: string, dir?: 'U' | 'V') => void;
+  alignNurbsSurfaces: (masterId: string, slaveId: string, edgeMaster?: 'START' | 'END', edgeSlave?: 'START' | 'END') => void;
+  mergeNurbsSurfaces: (masterId: string, slaveId: string) => void;
   convertNurbsToMesh: (id: string) => void;
   setNurbsDegree: (id: string, degreeU: number, degreeV?: number) => void;
   setNurbsResolution: (id: string, resU: number, resV?: number) => void;
@@ -444,6 +457,48 @@ export const useStore = create<Store>()((set, get) => ({
     snapStep: 0.5,
   },
   clipboard: null,
+  isMaterialStudioOpen: false,
+  materialStudioMaterialId: null,
+  openMaterialStudio: (materialId) => {
+    const state = get();
+    let targetId = materialId;
+    if (!targetId) {
+      const selObj = state.project.objects.find(o => o.id === state.selectedObjectId);
+      if (selObj?.materialId) {
+        targetId = selObj.materialId;
+      } else if (state.project.materials.length > 0) {
+        targetId = state.project.materials[0].id;
+      } else {
+        const newMat: MaterialData = {
+          id: 'mat_' + Math.random().toString(36).substr(2, 9),
+          name: 'Nuevo Material PBR',
+          color: '#ffffff',
+          roughness: 0.4,
+          metalness: 0.1,
+          emissive: '#000000',
+          emissiveIntensity: 1,
+          opacity: 1,
+          transparent: false,
+          ior: 1.5,
+          transmission: 0,
+          thickness: 0,
+        };
+        state.addMaterial(newMat);
+        targetId = newMat.id;
+      }
+    }
+    set({
+      isMaterialStudioOpen: true,
+      materialStudioMaterialId: targetId || null,
+    });
+  },
+  closeMaterialStudio: () => set({ isMaterialStudioOpen: false }),
+  setMaterialStudioMaterialId: (id) => set({ materialStudioMaterialId: id }),
+  isBooleanModalOpen: false,
+  booleanModalTargetId: null,
+  booleanModalToolId: null,
+  openBooleanModal: (targetId, toolId) => set({ isBooleanModalOpen: true, booleanModalTargetId: targetId || null, booleanModalToolId: toolId || null }),
+  closeBooleanModal: () => set({ isBooleanModalOpen: false, booleanModalTargetId: null, booleanModalToolId: null }),
 
   resetProject: () => {
     const freshProject: Project = JSON.parse(JSON.stringify(DEFAULT_PROJECT));
@@ -511,7 +566,22 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   selectLight: (id) => {
-    set({ selectedLightId: id, selectedObjectId: id ? null : get().selectedObjectId, selectedCameraId: null });
+    const { project } = get();
+    set({
+      selectedLightId: id,
+      selectedObjectId: id ? null : get().selectedObjectId,
+      selectedCameraId: null,
+      ...(id ? {
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            (o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0))
+              ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+              : o
+          )
+        }
+      } : {})
+    });
   },
 
   addCamera: (type) => {
@@ -544,7 +614,21 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   selectCamera: (id) => {
-    set({ selectedCameraId: id, selectedObjectId: null, selectedLightId: null, selectedObjectIds: [] });
+    const { project } = get();
+    set({
+      selectedCameraId: id,
+      selectedObjectId: null,
+      selectedLightId: null,
+      selectedObjectIds: [],
+      project: {
+        ...project,
+        objects: project.objects.map(o =>
+          (o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0))
+            ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+            : o
+        )
+      }
+    });
   },
 
   setSilueta: (patch) => set((state) => ({ project: { ...state.project, silueta: { ...state.project.silueta, ...patch } } })),
@@ -637,7 +721,11 @@ export const useStore = create<Store>()((set, get) => ({
         ? {
             project: {
               ...project,
-              objects: project.objects.map(o => o.selectedNurbsControlPoint ? { ...o, selectedNurbsControlPoint: null } : o)
+              objects: project.objects.map(o =>
+                (o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0))
+                  ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+                  : o
+              )
             }
           }
         : {})
@@ -677,7 +765,11 @@ export const useStore = create<Store>()((set, get) => ({
       isolateGLTFSelection: false,
       project: {
         ...project,
-        objects: project.objects.map(o => o.selectedNurbsControlPoint ? { ...o, selectedNurbsControlPoint: null } : o)
+        objects: project.objects.map(o =>
+          (o.selectedNurbsControlPoint || (o.selectedNurbsControlPoints && o.selectedNurbsControlPoints.length > 0))
+            ? { ...o, selectedNurbsControlPoint: null, selectedNurbsControlPoints: [] }
+            : o
+        )
       }
     });
   },
@@ -871,6 +963,10 @@ export const useStore = create<Store>()((set, get) => ({
         p.nurbsResolutionU = 24;
         p.nurbsResolutionV = 32;
         break;
+      case 'VOLUME_CLOUD':
+        p.isVolumetric = true;
+        p.volumetric = { ...DEFAULT_VOLUMETRIC_CONFIG };
+        break;
       default:             p.segments = 1;
     }
     const geom = generatePrimitive(type, p);
@@ -880,10 +976,12 @@ export const useStore = create<Store>()((set, get) => ({
       CAPSULE:'Cápsula',TETRAHEDRON:'Tetraedro',OCTAHEDRON:'Octaedro',TUBE:'Tubo',
       ARC:'Arco 3D',STAR:'Estrella 3D',
       WEDGE:'Cuña',HEMISPHERE:'Hemisferio',PLANE:'Plano',CIRCLE:'Círculo',RING:'Anillo',SHAPE:'Forma',
+      VOLUME_CLOUD:'Cubo Volumétrico (Nube 3D)',
       NURBS_CURVE:'Curva NURBS',NURBS_CIRCLE:'Círculo NURBS',NURBS_SURFACE:'Superficie NURBS',
       NURBS_CYLINDER:'Cilindro NURBS',NURBS_CONE:'Cono NURBS',NURBS_SPHERE:'Esfera NURBS',NURBS_TORUS:'Toroide NURBS'
     };
     const isNurbsType = type.startsWith('NURBS_');
+    const isVol = type === 'VOLUME_CLOUD' || p.isVolumetric === true;
     const newObj: CSGObject = {
       id: genId(),
       name: `${names[type] ?? type} ${state.project.objects.length + 1}`,
@@ -893,8 +991,10 @@ export const useStore = create<Store>()((set, get) => ({
       nurbsCurve: p.nurbsCurve,
       nurbsSurface: p.nurbsSurface,
       isNurbs: isNurbsType,
+      isVolumetric: isVol,
+      volumetric: isVol ? { ...DEFAULT_VOLUMETRIC_CONFIG, ...(p.volumetric || {}) } : undefined,
       vertices: geom.vertices, faces: geom.faces,
-      color: '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+      color: isVol ? '#ffffff' : '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
       smoothShading: ['SPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE', 'NURBS_SURFACE', 'NURBS_CYLINDER', 'NURBS_CONE', 'NURBS_SPHERE', 'NURBS_TORUS'].includes(type),
       opacity: 1, visible: true, keyframes: [],
     };
@@ -1675,53 +1775,73 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   // ── Boolean / Modifiers ───────────────────────────────────────────────────
-  applyBoolean: async (op) => {
-    const { project, selectedObjectIds } = get();
-    let target: CSGObject | undefined;
-    let tool: CSGObject | undefined;
+  executeExplicitBoolean: async (options: BooleanExecuteOptions): Promise<BooleanResult> => {
+    const { project } = get();
+    const target = project.objects.find(o => o.id === options.targetId);
+    const tool = project.objects.find(o => o.id === options.toolId);
 
-    if (selectedObjectIds.length === 2) {
-      target = project.objects.find(o => o.id === selectedObjectIds[0]);
-      tool = project.objects.find(o => o.id === selectedObjectIds[1]);
-    } else {
-      const { selectedObjectId } = get();
-      if (!selectedObjectId) return;
-      const toolIndex = project.objects.findIndex(o => o.id === selectedObjectId);
-      if (toolIndex <= 0) return;
-      target = project.objects[toolIndex - 1];
-      tool = project.objects[toolIndex];
+    if (!target || !tool) {
+      return { success: false, message: 'No se encontraron los objetos seleccionados para la operación booleana.' };
     }
 
-    if (!target || !tool) return;
-    
-    if (target.meshData) target = await convertImportedToCSG(target);
-    if (tool.meshData) tool = await convertImportedToCSG(tool);
-    
-    const operation = op || tool.operation || 'SUBTRACT';
-    const result = applyBooleanOperation(target, tool, operation);
-    if (result) {
-      const newTarget: CSGObject = { 
-        ...target, 
-        vertices: result.vertices, 
-        faces: result.faces, 
-        vertexOffsets: {}, 
-        name: `${target.name} + ${tool.name}`, 
-        meshData: undefined,
-        transform: {
-          position: [0, 0, 0] as V3,
-          rotation: [0, 0, 0] as V3,
-          scale: [1, 1, 1] as V3
-        }
-      };
-      
-      const newObjects = project.objects.filter(o => o.id !== tool!.id).map(o => o.id === target!.id ? newTarget : o);
+    const result = await executeUnifiedBoolean(target, tool, options);
+    if (result.success && result.resultTarget) {
+      let newObjects = [...project.objects];
+
+      // Eliminar herramientas consumidas
+      if (result.removedObjectIds && result.removedObjectIds.length > 0) {
+        newObjects = newObjects.filter(o => !result.removedObjectIds!.includes(o.id));
+      }
+
+      // Actualizar objeto objetivo
+      newObjects = newObjects.map(o => o.id === result.resultTarget!.id ? result.resultTarget! : o);
+
+      // Si se generó una segunda pieza (Split / Carve), agregarla a la escena
+      if (result.resultSplitPiece) {
+        newObjects.push(result.resultSplitPiece);
+      }
+
       set({ 
         project: { ...project, objects: newObjects }, 
-        selectedObjectId: newTarget.id, 
-        selectedObjectIds: [newTarget.id] 
+        selectedObjectId: result.resultTarget.id, 
+        selectedObjectIds: [result.resultTarget.id] 
       });
       get().saveHistory();
     }
+    return result;
+  },
+
+  applyBoolean: async (op) => {
+    const { project, selectedObjectIds, selectedObjectId } = get();
+    let targetId: string | undefined;
+    let toolId: string | undefined;
+
+    if (selectedObjectIds.length >= 2) {
+      targetId = selectedObjectIds[0];
+      toolId = selectedObjectIds[1];
+    } else if (selectedObjectId) {
+      // Si solo hay un objeto seleccionado, abrimos el modal del Estudio Booleano para máxima claridad
+      get().openBooleanModal(selectedObjectId);
+      return;
+    }
+
+    if (!targetId || !toolId) {
+      get().openBooleanModal();
+      return;
+    }
+
+    const operation: UnifiedBooleanOp = 
+      op === 'ADD' ? 'UNION' :
+      op === 'INTERSECT' ? 'INTERSECTION' : 'DIFFERENCE_AB';
+
+    await get().executeExplicitBoolean({
+      targetId,
+      toolId,
+      operation,
+      keepTool: false,
+      autoHeal: true,
+      recenterPivot: true,
+    });
   },
 
   selectAll: () => {
@@ -2822,6 +2942,141 @@ export const useStore = create<Store>()((set, get) => ({
         }
       });
       get().saveHistory();
+    }
+  },
+
+  alignNurbsSurfaces: (masterId, slaveId, edgeMaster = 'END', edgeSlave = 'START') => {
+    const { project } = get();
+    const masterObj = project.objects.find(o => o.id === masterId);
+    const slaveObj = project.objects.find(o => o.id === slaveId);
+    if (!masterObj?.nurbsSurface || !slaveObj?.nurbsSurface) return;
+
+    try {
+      // Compute transformation from slave local space to master local space
+      const masterMat = new THREE.Matrix4().compose(
+        new THREE.Vector3(...masterObj.transform.position),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(...masterObj.transform.rotation)),
+        new THREE.Vector3(...masterObj.transform.scale)
+      );
+      const slaveMat = new THREE.Matrix4().compose(
+        new THREE.Vector3(...slaveObj.transform.position),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(...slaveObj.transform.rotation)),
+        new THREE.Vector3(...slaveObj.transform.scale)
+      );
+      const slaveToMaster = masterMat.clone().invert().multiply(slaveMat);
+
+      // Clone and transform slave points into master coordinates
+      const transformedSlave: NurbsSurfaceData = {
+        ...slaveObj.nurbsSurface,
+        controlPoints: slaveObj.nurbsSurface.controlPoints.map(row =>
+          row.map(cp => {
+            const pt = new THREE.Vector3(...cp.point).applyMatrix4(slaveToMaster);
+            return { ...cp, point: [pt.x, pt.y, pt.z] as [number, number, number] };
+          })
+        )
+      };
+
+      const { master: alignedMaster, slave: alignedSlave } = alignSurfacesG0Auto(masterObj.nurbsSurface, transformedSlave);
+      
+      // Transform slave back to its local coordinate space so its object transform remains valid
+      const masterToSlave = slaveToMaster.clone().invert();
+      const finalSlave: NurbsSurfaceData = {
+        ...alignedSlave,
+        controlPoints: alignedSlave.controlPoints.map(row =>
+          row.map(cp => {
+            const pt = new THREE.Vector3(...cp.point).applyMatrix4(masterToSlave);
+            return { ...cp, point: [pt.x, pt.y, pt.z] as [number, number, number] };
+          })
+        )
+      };
+
+      const geom = tessellateNurbsSurface(
+        finalSlave,
+        slaveObj.parameters.nurbsResolutionU ?? 16,
+        slaveObj.parameters.nurbsResolutionV ?? 16
+      );
+
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o =>
+            o.id === slaveId
+              ? {
+                  ...o,
+                  nurbsSurface: finalSlave,
+                  parameters: { ...o.parameters, nurbsSurface: finalSlave },
+                  vertices: geom.vertices,
+                  faces: geom.faces,
+                }
+              : o
+          )
+        }
+      });
+      get().saveHistory();
+    } catch (err: any) {
+      console.warn("NURBS align error:", err.message);
+    }
+  },
+
+  mergeNurbsSurfaces: (masterId, slaveId) => {
+    const { project } = get();
+    const masterObj = project.objects.find(o => o.id === masterId);
+    const slaveObj = project.objects.find(o => o.id === slaveId);
+    if (!masterObj?.nurbsSurface || !slaveObj?.nurbsSurface) return;
+
+    try {
+      // Compute transformation from slave local space to master local space
+      const masterMat = new THREE.Matrix4().compose(
+        new THREE.Vector3(...masterObj.transform.position),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(...masterObj.transform.rotation)),
+        new THREE.Vector3(...masterObj.transform.scale)
+      );
+      const slaveMat = new THREE.Matrix4().compose(
+        new THREE.Vector3(...slaveObj.transform.position),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(...slaveObj.transform.rotation)),
+        new THREE.Vector3(...slaveObj.transform.scale)
+      );
+      const slaveToMaster = masterMat.clone().invert().multiply(slaveMat);
+
+      // Clone and transform slave points into master coordinates
+      const transformedSlave: NurbsSurfaceData = {
+        ...slaveObj.nurbsSurface,
+        controlPoints: slaveObj.nurbsSurface.controlPoints.map(row =>
+          row.map(cp => {
+            const pt = new THREE.Vector3(...cp.point).applyMatrix4(slaveToMaster);
+            return { ...cp, point: [pt.x, pt.y, pt.z] as [number, number, number] };
+          })
+        )
+      };
+
+      const { master: alignedMaster, slave: alignedSlave } = alignSurfacesG0Auto(masterObj.nurbsSurface, transformedSlave);
+      const mergedSurface = mergeSurfacesU(alignedMaster, alignedSlave);
+      const resU = (masterObj.parameters.nurbsResolutionU ?? 16) + (slaveObj.parameters.nurbsResolutionU ?? 16);
+      const resV = masterObj.parameters.nurbsResolutionV ?? 16;
+      const geom = tessellateNurbsSurface(mergedSurface, resU, resV);
+
+      const mergedObj: CSGObject = {
+        ...masterObj,
+        name: `${masterObj.name} + ${slaveObj.name} (Fusión)`,
+        nurbsSurface: mergedSurface,
+        parameters: { ...masterObj.parameters, nurbsSurface: mergedSurface, nurbsResolutionU: resU, nurbsResolutionV: resV },
+        vertices: geom.vertices,
+        faces: geom.faces,
+        selectedNurbsControlPoint: null,
+        selectedNurbsControlPoints: []
+      };
+
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o => o.id === masterId ? mergedObj : o).filter(o => o.id !== slaveId)
+        },
+        selectedObjectId: masterId,
+        selectedObjectIds: [masterId]
+      });
+      get().saveHistory();
+    } catch (err: any) {
+      console.warn("NURBS merge error:", err.message);
     }
   },
 

@@ -1551,3 +1551,232 @@ export function setNurbsKnotType(
     };
   }
 }
+
+/**
+ * Transpose a NURBS surface (swaps U and V parameters and control point grid).
+ */
+export function transposeNurbsSurface(surf: NurbsSurfaceData): NurbsSurfaceData {
+  const numU = surf.controlPoints.length;
+  const numV = surf.controlPoints[0]?.length || 0;
+  const newCP: NurbsControlPoint[][] = [];
+
+  for (let v = 0; v < numV; v++) {
+    const row: NurbsControlPoint[] = [];
+    for (let u = 0; u < numU; u++) {
+      row.push({ ...surf.controlPoints[u][v] });
+    }
+    newCP.push(row);
+  }
+
+  return {
+    degreeU: surf.degreeV,
+    degreeV: surf.degreeU,
+    knotsU: surf.knotsV ? [...surf.knotsV] : undefined,
+    knotsV: surf.knotsU ? [...surf.knotsU] : undefined,
+    knotsTypeU: surf.knotsTypeV,
+    knotsTypeV: surf.knotsTypeU,
+    endpointU: surf.endpointV,
+    endpointV: surf.endpointU,
+    closedU: surf.closedV,
+    closedV: surf.closedU,
+    resolutionU: surf.resolutionV,
+    resolutionV: surf.resolutionU,
+    controlPoints: newCP
+  };
+}
+
+/**
+ * Reverse the U parametric direction of a NURBS surface.
+ */
+export function reverseNurbsSurfaceU(surf: NurbsSurfaceData): NurbsSurfaceData {
+  const newCP = [...surf.controlPoints].reverse().map(row => row.map(cp => ({ ...cp })));
+  let newKnotsU: number[] | undefined;
+  if (surf.knotsU && surf.knotsU.length > 0) {
+    const maxK = surf.knotsU[surf.knotsU.length - 1];
+    newKnotsU = surf.knotsU.slice().reverse().map(k => maxK - k);
+  }
+  return {
+    ...surf,
+    knotsU: newKnotsU,
+    controlPoints: newCP
+  };
+}
+
+/**
+ * Reverse the V parametric direction of a NURBS surface.
+ */
+export function reverseNurbsSurfaceV(surf: NurbsSurfaceData): NurbsSurfaceData {
+  const newCP = surf.controlPoints.map(row => [...row].reverse().map(cp => ({ ...cp })));
+  let newKnotsV: number[] | undefined;
+  if (surf.knotsV && surf.knotsV.length > 0) {
+    const maxK = surf.knotsV[surf.knotsV.length - 1];
+    newKnotsV = surf.knotsV.slice().reverse().map(k => maxK - k);
+  }
+  return {
+    ...surf,
+    knotsV: newKnotsV,
+    controlPoints: newCP
+  };
+}
+
+/**
+ * Align extreme edge of slave surface to master surface (G0 continuity).
+ * Snaps the boundary control points and weights in the transversal V direction.
+ */
+export function alignSurfacesG0(
+  master: NurbsSurfaceData,
+  slave: NurbsSurfaceData,
+  options: { edgeMaster?: 'START' | 'END'; edgeSlave?: 'START' | 'END' } = { edgeMaster: 'END', edgeSlave: 'START' }
+): NurbsSurfaceData {
+  const uMaster = options.edgeMaster === 'START' ? 0 : master.controlPoints.length - 1;
+  const uSlave = options.edgeSlave === 'START' ? 0 : slave.controlPoints.length - 1;
+
+  const pointsMaster = master.controlPoints[uMaster];
+  const pointsSlave = slave.controlPoints[uSlave];
+
+  if (!pointsMaster || !pointsSlave || pointsMaster.length !== pointsSlave.length) {
+    throw new Error("Las superficies deben tener el mismo número de puntos de control en la dirección transversal V.");
+  }
+
+  const updatedSlave: NurbsSurfaceData = {
+    ...slave,
+    controlPoints: slave.controlPoints.map(row => row.map(cp => ({ ...cp })))
+  };
+
+  for (let v = 0; v < pointsMaster.length; v++) {
+    updatedSlave.controlPoints[uSlave][v].point = [...pointsMaster[v].point];
+    updatedSlave.controlPoints[uSlave][v].weight = pointsMaster[v].weight;
+    if (pointsMaster[v].radius !== undefined) updatedSlave.controlPoints[uSlave][v].radius = pointsMaster[v].radius;
+    if (pointsMaster[v].tilt !== undefined) updatedSlave.controlPoints[uSlave][v].tilt = pointsMaster[v].tilt;
+  }
+
+  return updatedSlave;
+}
+
+/**
+ * Automatically orient slave and master along their closest adjacent boundary edges,
+ * then align G0.
+ */
+export function alignSurfacesG0Auto(
+  master: NurbsSurfaceData,
+  slaveIn: NurbsSurfaceData
+): { master: NurbsSurfaceData; slave: NurbsSurfaceData } {
+  let slave = {
+    ...slaveIn,
+    controlPoints: slaveIn.controlPoints.map(r => r.map(c => ({ ...c, point: [...c.point] as [number, number, number] })))
+  };
+
+  const getRowPoints = (s: NurbsSurfaceData, uIdx: number) => s.controlPoints[uIdx].map(c => c.point);
+  const getColPoints = (s: NurbsSurfaceData, vIdx: number) => s.controlPoints.map(r => r[vIdx].point);
+
+  const avgDist = (ptsA: [number, number, number][], ptsB: [number, number, number][]) => {
+    if (ptsA.length !== ptsB.length) return Infinity;
+    let sum = 0;
+    for (let i = 0; i < ptsA.length; i++) {
+      const dx = ptsA[i][0] - ptsB[i][0];
+      const dy = ptsA[i][1] - ptsB[i][1];
+      const dz = ptsA[i][2] - ptsB[i][2];
+      sum += Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return sum / ptsA.length;
+  };
+
+  const uEndMaster = master.controlPoints.length - 1;
+  const uEndSlave = slave.controlPoints.length - 1;
+  const vEndMaster = (master.controlPoints[0]?.length || 1) - 1;
+  const vEndSlave = (slave.controlPoints[0]?.length || 1) - 1;
+
+  // Check configurations
+  // Case A: Master along U, Slave along U
+  let bestDist = Infinity;
+  let bestConfig = { transposeM: false, transposeS: false, reverseMU: false, reverseMV: false, reverseSU: false, reverseSV: false };
+
+  const masterVariations = [
+    { surf: master, trans: false }
+  ];
+
+  const slaveVariations = [
+    { surf: slave, trans: false, revU: false, revV: false },
+    { surf: reverseNurbsSurfaceU(slave), trans: false, revU: true, revV: false },
+    { surf: reverseNurbsSurfaceV(slave), trans: false, revU: false, revV: true },
+    { surf: reverseNurbsSurfaceV(reverseNurbsSurfaceU(slave)), trans: false, revU: true, revV: true },
+    // Transposed variations
+    { surf: transposeNurbsSurface(slave), trans: true, revU: false, revV: false },
+    { surf: reverseNurbsSurfaceU(transposeNurbsSurface(slave)), trans: true, revU: true, revV: false },
+    { surf: reverseNurbsSurfaceV(transposeNurbsSurface(slave)), trans: true, revU: false, revV: true },
+    { surf: reverseNurbsSurfaceV(reverseNurbsSurfaceU(transposeNurbsSurface(slave))), trans: true, revU: true, revV: true }
+  ];
+
+  let bestMaster = master;
+  let bestSlave = slave;
+
+  for (const sVar of slaveVariations) {
+    if (sVar.surf.controlPoints[0]?.length === master.controlPoints[0]?.length) {
+      // Connect Master END (U_max) with Slave START (U_0)
+      const d = avgDist(
+        getRowPoints(master, master.controlPoints.length - 1),
+        getRowPoints(sVar.surf, 0)
+      );
+      if (d < bestDist) {
+        bestDist = d;
+        bestSlave = sVar.surf;
+        bestMaster = master;
+      }
+    }
+  }
+
+  // Perform G0 alignment along Master END and Slave START
+  const alignedSlave = alignSurfacesG0(bestMaster, bestSlave, { edgeMaster: 'END', edgeSlave: 'START' });
+  return { master: bestMaster, slave: alignedSlave };
+}
+
+/**
+ * Merge two NURBS surfaces along the U parametric direction into a single continuous NurbsSurfaceData entity.
+ * Handles control points stitching and knot vector extension.
+ */
+export function mergeSurfacesU(master: NurbsSurfaceData, slave: NurbsSurfaceData): NurbsSurfaceData {
+  if (master.degreeU !== slave.degreeU || master.degreeV !== slave.degreeV) {
+    throw new Error("No se pueden fusionar superficies con diferentes grados polinomiales (degrees).");
+  }
+  if (!master.controlPoints[0] || !slave.controlPoints[0] || master.controlPoints[0].length !== slave.controlPoints[0].length) {
+    throw new Error("La resolución de puntos de control en la dirección transversal V debe ser idéntica.");
+  }
+
+  // Combine 2D control point matrices (omitting slave's first row which is snapped to master's last row)
+  const masterPointsCopy = master.controlPoints.map(row => row.map(cp => ({ ...cp })));
+  const slavePointsCopy = slave.controlPoints.slice(1).map(row => row.map(cp => ({ ...cp })));
+  const combinedControlPoints: NurbsControlPoint[][] = [...masterPointsCopy, ...slavePointsCopy];
+
+  // Extend and build continuous Knot Vector in U
+  let combinedKnotsU: number[] | undefined;
+  if (master.knotsU && slave.knotsU) {
+    const lastMasterKnot = master.knotsU[master.knotsU.length - 1];
+    const firstSlaveKnot = slave.knotsU[0];
+    const offset = lastMasterKnot - firstSlaveKnot;
+    const p = master.degreeU;
+    const continuousSlaveKnots = slave.knotsU.slice(p + 1).map(k => k + offset);
+    combinedKnotsU = [...master.knotsU, ...continuousSlaveKnots];
+  } else {
+    combinedKnotsU = buildKnots(combinedControlPoints.length, master.degreeU, false, master.endpointU !== false, master.knotsTypeU);
+  }
+
+  const combinedKnotsV = master.knotsV
+    ? [...master.knotsV]
+    : buildKnots(combinedControlPoints[0].length, master.degreeV, master.closedV, master.endpointV !== false, master.knotsTypeV);
+
+  return {
+    degreeU: master.degreeU,
+    degreeV: master.degreeV,
+    knotsU: combinedKnotsU,
+    knotsV: combinedKnotsV,
+    knotsTypeU: master.knotsTypeU,
+    knotsTypeV: master.knotsTypeV,
+    endpointU: master.endpointU,
+    endpointV: master.endpointV,
+    closedU: false,
+    closedV: master.closedV,
+    resolutionU: (master.resolutionU || 16) + (slave.resolutionU || 16),
+    resolutionV: master.resolutionV || 16,
+    controlPoints: combinedControlPoints
+  };
+}

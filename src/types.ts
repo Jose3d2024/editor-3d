@@ -21,7 +21,23 @@ export type PrimitiveType =
   | 'TUBE' | 'WEDGE' | 'HEMISPHERE' | 'ARC' | 'STAR'
   | 'PLANE' | 'CIRCLE' | 'RING'
   | 'SHAPE' | 'MESH'
+  | 'VOLUME_CLOUD'
   | 'NURBS_CURVE' | 'NURBS_SURFACE' | 'NURBS_CIRCLE' | 'NURBS_CYLINDER' | 'NURBS_CONE' | 'NURBS_SPHERE' | 'NURBS_TORUS';
+
+export interface VolumetricConfig {
+  enabled?: boolean;
+  density?: number;        // uCloudDensity (e.g. 1.5)
+  lightIntensity?: number; // uLightIntensity (e.g. 1.2)
+  scale?: number;         // uCloudScale (e.g. 2.0)
+  color?: string;         // uCloudColor (e.g. '#ffffff')
+  threshold?: number;     // uThreshold (smoothstep min cutoff, e.g. 0.4)
+  thresholdMax?: number;  // uThresholdMax (smoothstep max, e.g. 0.8)
+  absorption?: number;    // uAbsorption (Beer-Lambert attenuation, e.g. 2.0)
+  steps?: number;         // Raymarch steps (e.g. 32)
+  shadowSteps?: number;   // Shadow steps (e.g. 6)
+  windSpeed?: number;     // Animation drift speed
+  windDirection?: [number, number, number]; // Wind vector
+}
 
 export interface ShapeParameters {
   segments?:        number;
@@ -71,6 +87,11 @@ export interface ShapeParameters {
   genN?:            number;
   genAxis?:         'x' | 'y' | 'z';
   genAngle?:        number;
+  
+  // Volumetric Raymarching
+  isVolumetric?:    boolean;
+  volumetric?:      VolumetricConfig;
+
   [key: string]:    any;
 }
 
@@ -186,6 +207,8 @@ export interface MaterialData {
     scratches: number;
     dirt: number;
   };
+  isVolumetric?: boolean;
+  volumetric?: VolumetricConfig;
 }
 
 export type LightType = 'POINT' | 'DIRECTIONAL' | 'SPOT' | 'RECTAREA' | 'AMBIENT';
@@ -234,6 +257,8 @@ export interface CSGObject {
   mirrorAxis?: 'none' | 'x' | 'y' | 'z';
   smoothShading?: boolean;
   uvDebug?: boolean;
+  isVolumetric?: boolean;
+  volumetric?: VolumetricConfig;
   color:    string;
   opacity?: number;
   visible:  boolean;
@@ -420,4 +445,9 @@ export interface AppState {
   resetViewportSplits: () => void;
   history:      Project[];
   historyIndex: number;
+  isMaterialStudioOpen: boolean;
+  materialStudioMaterialId: string | null;
+  openMaterialStudio: (materialId?: string | null) => void;
+  closeMaterialStudio: () => void;
+  setMaterialStudioMaterialId: (id: string) => void;
 }

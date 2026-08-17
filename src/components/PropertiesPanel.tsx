@@ -37,8 +37,11 @@ import {
   Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split, Grid,
   ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route,
   Spline, Waves, Orbit, Sparkles, RefreshCw, RotateCcw, ArrowRightLeft, GitMerge, FileDigit,
-  SlidersHorizontal, Keyboard
+  SlidersHorizontal, Keyboard, Scissors, Combine, ArrowLeftRight, Cloud, Wind, Flame, Zap
 } from 'lucide-react';
+import { UnifiedBooleanOp } from '../utils/booleanOperations';
+import { VOLUMETRIC_PRESETS, DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
+import type { VolumetricConfig } from '../types';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
 import { hasChildrenOrSubObjects } from '../utils/ungroup';
@@ -286,6 +289,8 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const smoothNurbsObject = useStore(s => (s as any).smoothNurbsObject);
   const resetNurbsWeightsObject = useStore(s => (s as any).resetNurbsWeightsObject);
   const resetNurbsTiltsAndRadiiObject = useStore(s => (s as any).resetNurbsTiltsAndRadiiObject);
+  const alignNurbsSurfaces = useStore(s => s.alignNurbsSurfaces);
+  const mergeNurbsSurfaces = useStore(s => s.mergeNurbsSurfaces);
   const project = useStore(s => s.project);
 
   const isSurface = !!obj.nurbsSurface;
@@ -308,6 +313,8 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
   // Other curve objects in project for lofting
   const otherCurves = project.objects.filter(o => o.id !== obj.id && (o.nurbsCurve || o.type === 'NURBS_CURVE' || o.type === 'NURBS_CIRCLE'));
+  // Other surface objects in project for align/merge
+  const otherSurfaces = project.objects.filter(o => o.id !== obj.id && !!o.nurbsSurface);
 
   return (
     <Section
@@ -754,6 +761,30 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               >
                 <Spline size={12} />
                 Loft ({otherCurves.length + 1} curvas)
+              </button>
+            )}
+
+            {/* Alineación G0 con otra superficie */}
+            {isSurface && otherSurfaces.length > 0 && (
+              <button
+                onClick={() => alignNurbsSurfaces(obj.id, otherSurfaces[0].id, 'END', 'START')}
+                className="py-1.5 px-2 bg-indigo-900/60 hover:bg-indigo-600 text-indigo-200 hover:text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 border border-indigo-700/60 transition-all cursor-pointer"
+                title={`Alinear borde G0 con '${otherSurfaces[0].name}'`}
+              >
+                <Target size={12} />
+                Alinear G0 ({otherSurfaces[0].name.slice(0, 10)})
+              </button>
+            )}
+
+            {/* Fusión (Merge) con otra superficie */}
+            {isSurface && otherSurfaces.length > 0 && (
+              <button
+                onClick={() => mergeNurbsSurfaces(obj.id, otherSurfaces[0].id)}
+                className="py-1.5 px-2 bg-emerald-900/60 hover:bg-emerald-600 text-emerald-200 hover:text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 border border-emerald-700/60 transition-all cursor-pointer"
+                title={`Fusionar matemáticamente en una sola superficie con '${otherSurfaces[0].name}'`}
+              >
+                <GitMerge size={12} />
+                Fusionar ({otherSurfaces[0].name.slice(0, 10)})
               </button>
             )}
           </div>
@@ -1314,7 +1345,7 @@ const AlignSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 };
 
 const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () => void }> = ({ obj, onOpenMaterialTab }) => {
-  const { project, updateObject, assignMaterialToObjects, updateMaterial, addMaterial } = useStore();
+  const { project, updateObject, assignMaterialToObjects, updateMaterial, addMaterial, openMaterialStudio } = useStore();
   const m = obj.material;
   const assignedMat = project.materials.find(mat => mat.id === obj.materialId);
 
@@ -1337,7 +1368,7 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
     };
     addMaterial(newMat);
     assignMaterialToObjects([obj.id], newMat.id);
-    onOpenMaterialTab();
+    openMaterialStudio(newMat.id);
   };
 
   const updateProp = (field: string, val: any) => {
@@ -1356,10 +1387,10 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
           <div className="flex items-center justify-between">
             <label className="text-[9px] font-bold text-zinc-400 uppercase tracking-widest">Material Asignado</label>
             <button
-              onClick={onOpenMaterialTab}
+              onClick={() => openMaterialStudio(assignedMat?.id)}
               className="text-[9px] text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wider flex items-center gap-1 transition-colors"
             >
-              <Palette size={11} /> Ir a la Pestaña Materiales
+              <Palette size={11} /> Abrir en Visor 3D
             </button>
           </div>
           <select 
@@ -1377,17 +1408,17 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
         {/* Botón de acceso directo al editor PBR */}
         {assignedMat ? (
           <button
-            onClick={onOpenMaterialTab}
+            onClick={() => openMaterialStudio(assignedMat.id)}
             className="w-full py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20 active:scale-98"
           >
-            <Palette size={13} /> Editar "{assignedMat.name}" en Editor PBR
+            <Palette size={13} /> Editar en Visor 3D de Materiales
           </button>
         ) : (
           <button
             onClick={handleCreateMaterialFromObject}
             className="w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-md active:scale-98"
           >
-            <Plus size={13} className="text-indigo-400" /> Crear Material PBR del Proyecto
+            <Plus size={13} className="text-indigo-400" /> Crear Material PBR y Abrir Visor 3D
           </button>
         )}
 
@@ -2674,6 +2705,433 @@ const UngroupHeaderButton: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   );
 };
 
+const BooleanOperationsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const { project, openBooleanModal, executeExplicitBoolean } = useStore();
+  const [selectedToolId, setSelectedToolId] = useState<string>('');
+  const [keepTool, setKeepTool] = useState(false);
+  const [autoHeal, setAutoHeal] = useState(true);
+  const [isWorking, setIsWorking] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const candidateObjects = useMemo(() => {
+    return project.objects.filter(o => o.id !== obj.id);
+  }, [project.objects, obj.id]);
+
+  useEffect(() => {
+    if (candidateObjects.length > 0 && (!selectedToolId || !candidateObjects.some(o => o.id === selectedToolId))) {
+      setSelectedToolId(candidateObjects[0].id);
+    }
+  }, [candidateObjects, selectedToolId]);
+
+  const toolObj = useMemo(() => project.objects.find(o => o.id === selectedToolId), [project.objects, selectedToolId]);
+
+  const handleQuickOp = async (op: UnifiedBooleanOp) => {
+    if (!selectedToolId) {
+      setFeedback({ type: 'error', message: 'Selecciona un objeto cortador / herramienta.' });
+      return;
+    }
+
+    setIsWorking(true);
+    setFeedback(null);
+    try {
+      const res = await executeExplicitBoolean({
+        targetId: obj.id,
+        toolId: selectedToolId,
+        operation: op,
+        keepTool,
+        autoHeal,
+        recenterPivot: true,
+      });
+
+      if (res.success) {
+        setFeedback({
+          type: 'success',
+          message: `${res.message}`,
+        });
+        setTimeout(() => setFeedback(null), 4000);
+      } else {
+        setFeedback({ type: 'error', message: res.message });
+      }
+    } catch (e: any) {
+      setFeedback({ type: 'error', message: e.message || String(e) });
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  return (
+    <Section
+      title="Operaciones Booleanas (CSG)"
+      icon={<Scissors size={14} className="text-rose-400" />}
+      defaultOpen={true}
+      badge={
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            openBooleanModal(obj.id, selectedToolId || undefined);
+          }}
+          className="px-2 py-0.5 rounded text-[9px] font-bold bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600 hover:text-white border border-indigo-500/30 transition-all flex items-center gap-1 cursor-pointer"
+          title="Abrir el Estudio Booleano completo"
+        >
+          <Sparkles size={10} />
+          Estudio
+        </button>
+      }
+    >
+      <div className="space-y-3">
+        {candidateObjects.length === 0 ? (
+          <div className="p-3 bg-zinc-900/60 border border-zinc-800 rounded-xl text-center space-y-1.5">
+            <p className="text-[11px] text-zinc-300 font-semibold">Se necesitan al menos 2 objetos</p>
+            <p className="text-[10px] text-zinc-500">
+              Añade otra figura o superficie para perforar, restar o fusionar con este objeto.
+            </p>
+          </div>
+        ) : (
+          <>
+            {/* Roles configuration card */}
+            <div className="p-2.5 bg-zinc-900/70 border border-zinc-800/80 rounded-xl space-y-2">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="font-bold text-blue-400 uppercase tracking-wide flex items-center gap-1">
+                  <span className="w-3.5 h-3.5 rounded-full bg-blue-950 border border-blue-500/40 flex items-center justify-center text-[8px] text-blue-300 font-bold">A</span>
+                  Objeto Base (Este):
+                </span>
+                <span className="text-zinc-200 font-medium truncate max-w-[130px]">{obj.name}</span>
+              </div>
+
+              <div className="space-y-1 pt-1.5 border-t border-zinc-800/80">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="font-bold text-rose-400 uppercase tracking-wide flex items-center gap-1">
+                    <span className="w-3.5 h-3.5 rounded-full bg-rose-950 border border-rose-500/40 flex items-center justify-center text-[8px] text-rose-300 font-bold">B</span>
+                    Objeto Cortador / Herramienta:
+                  </span>
+                </div>
+                <select
+                  value={selectedToolId}
+                  onChange={(e) => {
+                    setSelectedToolId(e.target.value);
+                    setFeedback(null);
+                  }}
+                  className="w-full bg-zinc-950 border border-zinc-700 hover:border-zinc-500 rounded-lg px-2 py-1.5 text-[11px] text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors font-medium"
+                >
+                  {candidateObjects.map(cand => (
+                    <option key={cand.id} value={cand.id}>
+                      {cand.name || `Objeto (${cand.type})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Direct 1-Click Boolean Buttons */}
+            <div className="space-y-1.5">
+              <p className="text-[9px] font-bold uppercase text-zinc-400 tracking-wider">Acciones Rápidas:</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {/* 1. A - B */}
+                <button
+                  disabled={isWorking}
+                  onClick={() => handleQuickOp('DIFFERENCE_AB')}
+                  className="p-2 rounded-lg bg-zinc-900 hover:bg-rose-950/60 border border-zinc-800 hover:border-rose-500/50 text-left transition-all group cursor-pointer"
+                  title={`Restar "${toolObj?.name}" de "${obj.name}". Abre un hueco con la forma de B.`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-zinc-200 group-hover:text-rose-300 flex items-center gap-1">
+                      <Scissors size={12} className="text-rose-400" />
+                      Resta (A − B)
+                    </span>
+                  </div>
+                  <p className="text-[8px] text-zinc-500 group-hover:text-zinc-400 mt-0.5">Abre hueco con B</p>
+                </button>
+
+                {/* 2. B - A */}
+                <button
+                  disabled={isWorking}
+                  onClick={() => handleQuickOp('DIFFERENCE_BA')}
+                  className="p-2 rounded-lg bg-zinc-900 hover:bg-amber-950/60 border border-zinc-800 hover:border-amber-500/50 text-left transition-all group cursor-pointer"
+                  title={`Restar "${obj.name}" de "${toolObj?.name}".`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-zinc-200 group-hover:text-amber-300 flex items-center gap-1">
+                      <Scissors size={12} className="text-amber-400 rotate-180" />
+                      Invertida (B − A)
+                    </span>
+                  </div>
+                  <p className="text-[8px] text-zinc-500 group-hover:text-zinc-400 mt-0.5">Resta A de B</p>
+                </button>
+
+                {/* 3. A + B */}
+                <button
+                  disabled={isWorking}
+                  onClick={() => handleQuickOp('UNION')}
+                  className="p-2 rounded-lg bg-zinc-900 hover:bg-emerald-950/60 border border-zinc-800 hover:border-emerald-500/50 text-left transition-all group cursor-pointer"
+                  title="Fusionar ambos objetos en un único cuerpo sólido"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-zinc-200 group-hover:text-emerald-300 flex items-center gap-1">
+                      <Combine size={12} className="text-emerald-400" />
+                      Unión (A + B)
+                    </span>
+                  </div>
+                  <p className="text-[8px] text-zinc-500 group-hover:text-zinc-400 mt-0.5">Fusionar sólidos</p>
+                </button>
+
+                {/* 4. A ∩ B */}
+                <button
+                  disabled={isWorking}
+                  onClick={() => handleQuickOp('INTERSECTION')}
+                  className="p-2 rounded-lg bg-zinc-900 hover:bg-sky-950/60 border border-zinc-800 hover:border-sky-500/50 text-left transition-all group cursor-pointer"
+                  title="Conservar únicamente el volumen en común"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-zinc-200 group-hover:text-sky-300 flex items-center gap-1">
+                      <Target size={12} className="text-sky-400" />
+                      Intersección
+                    </span>
+                  </div>
+                  <p className="text-[8px] text-zinc-500 group-hover:text-zinc-400 mt-0.5">Zona común (A ∩ B)</p>
+                </button>
+              </div>
+            </div>
+
+            {/* Options */}
+            <div className="flex items-center justify-between text-[10px] pt-1 text-zinc-400">
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={keepTool}
+                  onChange={(e) => setKeepTool(e.target.checked)}
+                  className="accent-indigo-500 rounded"
+                />
+                <span>Conservar B</span>
+              </label>
+
+              <label className="flex items-center gap-1.5 cursor-pointer hover:text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={autoHeal}
+                  onChange={(e) => setAutoHeal(e.target.checked)}
+                  className="accent-indigo-500 rounded"
+                />
+                <span>Auto-Curar</span>
+              </label>
+            </div>
+
+            {/* Open Full Studio Button */}
+            <button
+              onClick={() => openBooleanModal(obj.id, selectedToolId || undefined)}
+              className="w-full py-1.5 px-2 bg-indigo-600/20 hover:bg-indigo-600 border border-indigo-500/30 hover:border-indigo-500 text-indigo-300 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer"
+            >
+              <Sparkles size={12} />
+              Abrir Estudio Booleano Completo
+            </button>
+
+            {/* Diagnostic Message */}
+            {feedback && (
+              <div
+                className={`p-2 rounded-lg text-[10px] border leading-tight ${
+                  feedback.type === 'success'
+                    ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-950/70 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                {feedback.message}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Section>
+  );
+};
+
+const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const { updateObject, saveHistory } = useStore();
+  const isVol = obj.type === 'VOLUME_CLOUD' || !!obj.isVolumetric || !!obj.parameters?.isVolumetric;
+  const volConfig: VolumetricConfig = {
+    ...DEFAULT_VOLUMETRIC_CONFIG,
+    ...(obj.volumetric || {}),
+    ...(obj.parameters?.volumetric || {}),
+  };
+
+  const handleToggle = (enabled: boolean) => {
+    updateObject(obj.id, {
+      isVolumetric: enabled,
+      volumetric: { ...volConfig, enabled },
+      parameters: {
+        ...(obj.parameters || {}),
+        isVolumetric: enabled,
+        volumetric: { ...volConfig, enabled },
+      }
+    });
+    saveHistory();
+  };
+
+  const updateVol = (patch: Partial<VolumetricConfig>) => {
+    const updated = { ...volConfig, ...patch };
+    updateObject(obj.id, {
+      isVolumetric: true,
+      volumetric: updated,
+      parameters: {
+        ...(obj.parameters || {}),
+        isVolumetric: true,
+        volumetric: updated,
+      }
+    });
+    saveHistory();
+  };
+
+  const applyPreset = (preset: typeof VOLUMETRIC_PRESETS[0]) => {
+    updateVol({ ...preset.config });
+  };
+
+  return (
+    <Section 
+      title="Nube Volumétrica 3D (Raymarching)" 
+      icon={<Cloud size={12} className={isVol ? "text-sky-400" : "text-zinc-400"} />}
+      defaultOpen={isVol}
+    >
+      <div className="space-y-3">
+        <div className="flex items-center justify-between p-2 bg-zinc-950/60 rounded-lg border border-zinc-800">
+          <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-zinc-200">Shader Raymarching 3D</span>
+            <span className="text-[8px] text-zinc-400">Calcula densidad de gas FBM en cubo contenedor</span>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input 
+              type="checkbox" 
+              checked={isVol} 
+              onChange={e => handleToggle(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-8 h-4 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-sky-500"></div>
+          </label>
+        </div>
+
+        {isVol && (
+          <div className="space-y-3 pt-1">
+            {/* Presets */}
+            <div className="space-y-1.5">
+              <span className="text-[9px] font-bold text-sky-400 uppercase tracking-wider block">Presets de Gas / Nube</span>
+              <div className="grid grid-cols-3 gap-1">
+                {VOLUMETRIC_PRESETS.map((p, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => applyPreset(p)}
+                    className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/60 hover:border-sky-500 rounded text-[9px] font-medium text-zinc-200 transition-all flex flex-col items-center gap-1 cursor-pointer"
+                    title={p.desc}
+                  >
+                    <span className="truncate w-full text-center font-bold text-[9px]">{p.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sliders */}
+            <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+              <NumRow
+                label="Densidad de Nube"
+                value={volConfig.density ?? 1.5}
+                onChange={v => updateVol({ density: v })}
+                min={0.1}
+                max={8.0}
+                step={0.1}
+                slider
+              />
+              <NumRow
+                label="Escala Ruido FBM"
+                value={volConfig.scale ?? 2.0}
+                onChange={v => updateVol({ scale: v })}
+                min={0.5}
+                max={10.0}
+                step={0.1}
+                slider
+              />
+              <NumRow
+                label="Intensidad Iluminación"
+                value={volConfig.lightIntensity ?? 1.2}
+                onChange={v => updateVol({ lightIntensity: v })}
+                min={0.1}
+                max={4.0}
+                step={0.1}
+                slider
+              />
+              <NumRow
+                label="Corte Umbral Mín."
+                value={volConfig.threshold ?? 0.38}
+                onChange={v => updateVol({ threshold: v })}
+                min={0.0}
+                max={0.9}
+                step={0.02}
+                slider
+              />
+              <NumRow
+                label="Corte Umbral Máx."
+                value={volConfig.thresholdMax ?? 0.82}
+                onChange={v => updateVol({ thresholdMax: v })}
+                min={0.1}
+                max={1.0}
+                step={0.02}
+                slider
+              />
+              <NumRow
+                label="Absorción de Luz (Beer)"
+                value={volConfig.absorption ?? 2.0}
+                onChange={v => updateVol({ absorption: v })}
+                min={0.1}
+                max={6.0}
+                step={0.1}
+                slider
+              />
+              <NumRow
+                label="Pasos de Raymarching"
+                value={volConfig.steps ?? 32}
+                onChange={v => updateVol({ steps: Math.round(v) })}
+                min={16}
+                max={96}
+                step={4}
+                slider
+              />
+              <NumRow
+                label="Pasos de Sombra"
+                value={volConfig.shadowSteps ?? 6}
+                onChange={v => updateVol({ shadowSteps: Math.round(v) })}
+                min={2}
+                max={16}
+                step={1}
+                slider
+              />
+              <NumRow
+                label="Velocidad Viento / Deriva"
+                value={volConfig.windSpeed ?? 0.08}
+                onChange={v => updateVol({ windSpeed: v })}
+                min={0.0}
+                max={1.0}
+                step={0.01}
+                slider
+              />
+            </div>
+
+            {/* Colors */}
+            <div className="bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+              <div className="space-y-1">
+                <span className="text-[9px] text-zinc-400 font-bold uppercase block">Color Nube / Gas</span>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="color"
+                    value={volConfig.color || '#ffffff'}
+                    onChange={e => updateVol({ color: e.target.value })}
+                    className="w-6 h-6 rounded bg-transparent cursor-pointer border border-zinc-700"
+                  />
+                  <span className="text-[9px] font-mono text-zinc-300">{volConfig.color || '#ffffff'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+};
+
 export const PropertiesPanel: React.FC = () => {
   const {
     project, selectedObjectId, selectedObjectIds, updateObject, removeObject, removeObjects,
@@ -2940,6 +3398,8 @@ export const PropertiesPanel: React.FC = () => {
                 <ParametersSection obj={obj}/>
                 <GeneratedSection obj={obj}/>
                 <AlignSection obj={obj}/>
+                <BooleanOperationsSection obj={obj}/>
+                <VolumetricSection obj={obj}/>
                 <ObjectMaterialSection obj={obj} onOpenMaterialTab={() => setActiveTab('MATERIALS')}/>
                 <MeshModifiersSection obj={obj}/>
                 <ValidationSection obj={obj}/>

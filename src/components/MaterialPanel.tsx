@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useStore } from '../store/useStore';
 import { MaterialData } from '../types';
 import { MaterialThumbnail } from './MaterialThumbnail';
@@ -35,7 +35,7 @@ import {
   Sliders,
   RotateCw,
   Copy,
-  Image as ImageIcon,
+  Image as ImageIcon, Cloud,
   Check
 } from 'lucide-react';
 import { createORMMap } from '../utils/materialUtils';
@@ -46,6 +46,7 @@ import {
   MATERIAL_CATEGORIES, 
   generateMaterial, 
   generateMaterialWithFilters,
+  applyImperfectionsToCustomMaps,
   MaterialFilters,
   generateAllThumbnails,
   generateAllThumbnailsAsync,
@@ -60,13 +61,48 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
   description: string;
   apply: Partial<MaterialData>;
 }[] = [
-  // Metales PBR
+  // Metales PBR (Substance 3D Core)
   {
     name: 'Oro 24K',
     category: 'Metales',
     icon: '🪙',
     description: 'Metal noble reflectante calibrado',
     apply: { color: '#ffd700', metalness: 1.0, roughness: 0.08, specularIntensity: 1.0, clearcoat: 0, transmission: 0, sheen: 0, anisotropy: 0, iridescence: 0 }
+  },
+  {
+    name: 'Acero de Damasco (Substance)',
+    category: 'Metales',
+    icon: '🗡️',
+    description: 'Pliegues de forja con anisotropía a 45°',
+    apply: { color: '#cbd5e1', metalness: 1.0, roughness: 0.22, specularIntensity: 1.0, anisotropy: 0.75, anisotropyRotation: 45, normalScale: 1.8 }
+  },
+  {
+    name: 'Bronce con Pátina (Substance)',
+    category: 'Metales',
+    icon: '🏛️',
+    description: 'Bronce envejecido con cardenillo turquesa',
+    apply: { color: '#a87343', metalness: 0.8, roughness: 0.42, specularIntensity: 0.9, normalScale: 2.2 }
+  },
+  {
+    name: 'Hierro Fundido Forjado (Substance)',
+    category: 'Metales',
+    icon: '🔨',
+    description: 'Textura granulada de fundición al carbono',
+    apply: { color: '#27272a', metalness: 0.95, roughness: 0.62, specularIntensity: 0.8, normalScale: 2.5 }
+  },
+  {
+    name: 'Titanio Anodizado Arcoíris (Substance)',
+    category: 'Metales',
+    icon: '🌈',
+    description: 'Titanio electroquímico con interferencia óptica',
+    apply: { color: '#e2e8f0', metalness: 1.0, roughness: 0.12, iridescence: 1.0, iridescenceIOR: 2.2, iridescenceThicknessRange: [200, 750] }
+  },
+  {
+    name: 'Blindaje Sci-Fi Hull (Substance)',
+    category: 'Metales',
+    icon: '🚀',
+    description: 'Paneles de blindaje modular para naves',
+    apply: { color: '#475569', metalness: 0.9, roughness: 0.35, clearcoat: 0.3, normalScale: 3.0 }
   },
   {
     name: 'Cobre Puro',
@@ -95,6 +131,64 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     icon: '💿',
     description: 'Surcos circulares con anisotropía a 90°',
     apply: { color: '#18181b', metalness: 0.75, roughness: 0.3, anisotropy: 1.0, anisotropyRotation: 90, transmission: 0 }
+  },
+
+  // Maderas & Arquitectura (Substance 3D)
+  {
+    name: 'Shou Sugi Ban Quemado (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🔥',
+    description: 'Madera de cedro carbonizada a fuego vivo',
+    apply: { color: '#18181b', metalness: 0.1, roughness: 0.78, normalScale: 3.5, displacementScale: 0.05 }
+  },
+  {
+    name: 'Teca Marina de Cubierta (Substance)',
+    category: 'Madera & Piedra',
+    icon: '⛵',
+    description: 'Listones aceitados con juntas de calafateo',
+    apply: { color: '#b45309', metalness: 0.0, roughness: 0.38, normalScale: 1.5, specularIntensity: 0.7 }
+  },
+  {
+    name: 'Bambú Tejido / Rattan (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🎋',
+    description: 'Esterilla de bambú trenzado natural',
+    apply: { color: '#d97706', metalness: 0.0, roughness: 0.42, normalScale: 2.8, sheen: 0.3 }
+  },
+  {
+    name: 'Corcho Natural Prensado (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🍾',
+    description: 'Aglomerado de corteza porosa mate',
+    apply: { color: '#b45309', metalness: 0.0, roughness: 0.88, normalScale: 3.2 }
+  },
+  {
+    name: 'Hormigón Visto Encofrado (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🏢',
+    description: 'Hormigón arquitectónico con veta de madera',
+    apply: { color: '#94a3b8', metalness: 0.0, roughness: 0.75, normalScale: 2.0 }
+  },
+  {
+    name: 'Terrazo Veneciano Pulido (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🪨',
+    description: 'Aglomerado de mármol con barniz vítreo',
+    apply: { color: '#f8fafc', metalness: 0.0, roughness: 0.15, clearcoat: 0.85, clearcoatRoughness: 0.05, normalScale: 0.4 }
+  },
+  {
+    name: 'Ladrillo Rústico Artesanal (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🧱',
+    description: 'Terracota cocida con mortero arenoso',
+    apply: { color: '#b91c1c', metalness: 0.0, roughness: 0.85, normalScale: 3.5, displacementScale: 0.04 }
+  },
+  {
+    name: 'Mármol Calacatta Gold (Substance)',
+    category: 'Madera & Piedra',
+    icon: '🏛️',
+    description: 'Mármol blanco puro con vetas ocres y grises',
+    apply: { color: '#ffffff', metalness: 0.0, roughness: 0.08, clearcoat: 0.9, clearcoatRoughness: 0.04, normalScale: 0.6 }
   },
 
   // Vidrios & Gemas
@@ -208,6 +302,86 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     icon: '🦪',
     description: 'Reflejos irisados nacarados',
     apply: { color: '#fdfcfb', roughness: 0.22, metalness: 0.05, sheen: 0.45, sheenColor: '#fbcfe8', iridescence: 0.8, iridescenceIOR: 1.5, iridescenceThicknessRange: [200, 500], transmission: 0 }
+  },
+
+  // Volumétricos 3D (Raymarching)
+  {
+    name: 'Nube Cúmulo 3D',
+    category: 'Volumétricos 3D',
+    icon: '☁️',
+    description: 'Nube algodonosa blanca con absorción Beer-Lambert',
+    apply: {
+      color: '#ffffff',
+      emissive: '#000000',
+      emissiveIntensity: 0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        density: 1.6,
+        scale: 2.2,
+        lightIntensity: 1.2,
+        color: '#ffffff',
+        threshold: 0.38,
+        thresholdMax: 0.82,
+        absorption: 2.2,
+        steps: 32,
+        shadowSteps: 6,
+        windSpeed: 0.08,
+        windDirection: [0.1, 0.05, 0.0],
+      }
+    }
+  },
+  {
+    name: 'Tormenta Oscura 3D',
+    category: 'Volumétricos 3D',
+    icon: '🌩️',
+    description: 'Nube densa de tormenta con absorción alta',
+    apply: {
+      color: '#64748b',
+      emissive: '#000000',
+      emissiveIntensity: 0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        density: 3.2,
+        scale: 2.8,
+        lightIntensity: 0.9,
+        color: '#64748b',
+        threshold: 0.32,
+        thresholdMax: 0.78,
+        absorption: 3.5,
+        steps: 40,
+        shadowSteps: 8,
+        windSpeed: 0.18,
+        windDirection: [0.2, 0.1, 0.0],
+      }
+    }
+  },
+  {
+    name: 'Nebulosa Cósmica 3D',
+    category: 'Volumétricos 3D',
+    icon: '🌌',
+    description: 'Gas espacial púrpura con dispersión anisotrópica',
+    apply: {
+      color: '#c084fc',
+      emissive: '#000000',
+      emissiveIntensity: 0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        density: 1.8,
+        scale: 1.6,
+        lightIntensity: 1.6,
+        color: '#c084fc',
+        threshold: 0.35,
+        thresholdMax: 0.80,
+        absorption: 1.2,
+        steps: 36,
+        shadowSteps: 6,
+        windSpeed: 0.04,
+        windDirection: [0.05, 0.02, 0.08],
+      }
+    }
   }
 ];
 
@@ -477,14 +651,29 @@ const PBRImportModal: React.FC<{
 
 
 export const MaterialPanel: React.FC = () => {
-  const { project, updateMaterial, addMaterial, removeMaterial, selectedObjectId, selectedObjectIds, assignMaterialToObjects } = useStore();
+  const {
+    project,
+    updateMaterial,
+    addMaterial,
+    removeMaterial,
+    selectedObjectId,
+    selectedObjectIds,
+    assignMaterialToObjects,
+    isMaterialStudioOpen,
+    openMaterialStudio,
+    closeMaterialStudio,
+    materialStudioMaterialId,
+    setMaterialStudioMaterialId,
+  } = useStore();
   const { materials, objects } = project;
   
   const selectedObject = objects.find(o => o.id === selectedObjectId);
   const activeMaterialId = selectedObject?.materialId;
   
-  const [editingMaterialId, setEditingMaterialId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'library' | 'textures' | 'edit'>('library');
+  const [editingMaterialId, setEditingMaterialId] = useState<string | null>(materialStudioMaterialId || activeMaterialId || null);
+  const [activeTab, setActiveTab] = useState<'library' | 'cloud' | 'textures' | 'edit'>(
+    (isMaterialStudioOpen || (materialStudioMaterialId || activeMaterialId)) ? 'edit' : 'library'
+  );
   const [showPBRImport, setShowPBRImport] = useState(false);
 
   // Categorías y filtrado de la librería procedimental
@@ -506,14 +695,16 @@ export const MaterialPanel: React.FC = () => {
     });
   }, []);
 
-  // Sync editingMaterialId with activeMaterialId when selection changes
+  // Sync editingMaterialId with materialStudioMaterialId or activeMaterialId
   useEffect(() => {
-    if (activeMaterialId) {
+    if (materialStudioMaterialId) {
+      setEditingMaterialId(materialStudioMaterialId);
+    } else if (activeMaterialId && !isMaterialStudioOpen) {
       setEditingMaterialId(activeMaterialId);
     }
-  }, [activeMaterialId]);
+  }, [materialStudioMaterialId, activeMaterialId, isMaterialStudioOpen]);
 
-  const currentMaterialId = editingMaterialId || activeMaterialId;
+  const currentMaterialId = editingMaterialId || materialStudioMaterialId || activeMaterialId;
   const activeMaterial = materials.find(m => m.id === currentMaterialId);
 
   const handleSelectProceduralMaterial = (pMat: ProceduralMaterial) => {
@@ -564,6 +755,8 @@ export const MaterialPanel: React.FC = () => {
       assignMaterialToObjects(ids, newMat.id);
     }
     setEditingMaterialId(newMat.id);
+    setMaterialStudioMaterialId(newMat.id);
+    openMaterialStudio(newMat.id);
     setActiveTab('edit');
   };
 
@@ -571,20 +764,46 @@ export const MaterialPanel: React.FC = () => {
     if (!activeMaterial) return;
     const currentFilters = activeMaterial.filters || { rust: 0, scratches: 0, dirt: 0 };
     const newFilters: MaterialFilters = { ...currentFilters, [filterKey]: val };
-    const baseId = activeMaterial.proceduralBaseId || 'rusted_iron';
-    const maps = generateMaterial(baseId, 512, 512, newFilters);
-    if (maps) {
-      updateMaterial(activeMaterial.id, {
-        proceduralBaseId: baseId,
-        filters: newFilters,
-        map: maps.albedo,
-        normalMap: maps.normal,
-        roughnessMap: maps.roughness,
-        metalnessMap: maps.metallic,
-        aoMap: maps.ao,
-        displacementMap: maps.displacement,
-      });
+    
+    // 1. If active material has a procedural base ID, generate directly from library
+    if (activeMaterial.proceduralBaseId) {
+      const maps = generateMaterial(activeMaterial.proceduralBaseId, 512, 512, newFilters);
+      if (maps) {
+        updateMaterial(activeMaterial.id, {
+          filters: newFilters,
+          map: maps.albedo,
+          normalMap: maps.normal,
+          roughnessMap: maps.roughness,
+          metalnessMap: maps.metallic,
+          aoMap: maps.ao,
+          displacementMap: maps.displacement,
+        });
+        return;
+      }
     }
+
+    // 2. Otherwise apply imperfections to custom maps or base properties
+    const customMaps = applyImperfectionsToCustomMaps({
+      albedo: activeMaterial.map,
+      normal: activeMaterial.normalMap,
+      roughness: activeMaterial.roughnessMap,
+      metallic: activeMaterial.metalnessMap,
+      ao: activeMaterial.aoMap,
+      displacement: activeMaterial.displacementMap,
+      baseColorHex: activeMaterial.color,
+      baseRoughness: activeMaterial.roughness,
+      baseMetalness: activeMaterial.metalness,
+    }, newFilters);
+
+    updateMaterial(activeMaterial.id, {
+      filters: newFilters,
+      map: customMaps.albedo,
+      normalMap: customMaps.normal,
+      roughnessMap: customMaps.roughness,
+      metalnessMap: customMaps.metallic,
+      aoMap: customMaps.ao,
+      displacementMap: customMaps.displacement,
+    });
   };
 
   const handleExportMaterial = () => {
@@ -830,6 +1049,96 @@ export const MaterialPanel: React.FC = () => {
     setTimeout(() => setCopiedNotification(null), 2500);
   }, [selectedObjectId, objects, addMaterial, assignMaterialToObjects, setEditingMaterialId, updateMaterial, textureSlotTarget]);
 
+
+  if (activeTab === 'cloud') {
+    return (
+      <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
+        {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
+        <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
+          <button
+            onClick={() => setActiveTab('library')}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
+          >
+            <Sparkles size={12} />
+            <span className="hidden sm:inline">Materiales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('cloud')}
+            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-sky-600 text-white shadow-md shadow-sky-600/30"
+          >
+            <Cloud size={12} />
+            <span className="hidden sm:inline">Nube</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('textures')}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
+          >
+            <ImageIcon size={12} />
+            <span className="hidden sm:inline">Texturas</span>
+          </button>
+          <button
+            onClick={() => {
+              if (activeMaterial) setActiveTab('edit');
+              else if (materials.length > 0) { setEditingMaterialId(materials[0].id); setActiveTab('edit'); }
+              else handleCreateMaterial();
+            }}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
+          >
+            <Settings size={12} />
+            <span className="hidden sm:inline">Editor PBR</span>
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div className="p-4 bg-sky-900/20 border border-sky-500/20 rounded-xl flex items-center gap-4">
+            <div className="p-3 bg-sky-500/20 text-sky-400 rounded-lg">
+              <Cloud size={24} />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-sky-300">Substance 3D Library</h3>
+              <p className="text-xs text-zinc-400 mt-1 leading-relaxed">Explora materiales PBR inspirados en Adobe Substance 3D. Selecciona para importar a tu proyecto local.</p>
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { id: 'sub_gold', name: 'Oro Martillado', desc: 'Metal precioso con relieve', color: '#ffb833', type: 'metal' },
+              { id: 'sub_carbon', name: 'Fibra de Carbono', desc: 'Patrón trenzado industrial', color: '#1a1a1a', type: 'synthetic' },
+              { id: 'sub_leather', name: 'Cuero Envejecido', desc: 'Textura orgánica realista', color: '#5c3a21', type: 'organic' },
+              { id: 'sub_wood', name: 'Nogal Barnizado', desc: 'Madera fina con anillos', color: '#3d2314', type: 'wood' },
+              { id: 'sub_concrete', name: 'Hormigón Armado', desc: 'Concreto gris poroso', color: '#888888', type: 'stone' },
+              { id: 'sub_ceramic', name: 'Cerámica Esmaltada', desc: 'Superficie vítrea brillante', color: '#f0f0f0', type: 'stone' }
+            ].map(mat => (
+              <div key={mat.id} className="p-3 border border-white/5 bg-zinc-900 rounded-xl hover:bg-zinc-800 transition-colors flex flex-col items-center text-center gap-2 group cursor-pointer" onClick={() => {
+                const newId = mat.id + '_' + Math.random().toString(36).substr(2,6);
+                addMaterial({
+                  id: newId,
+                  name: mat.name,
+                  color: mat.color,
+                  roughness: mat.type === 'metal' ? 0.2 : 0.6,
+                  metalness: mat.type === 'metal' ? 1.0 : 0.0,
+                  emissive: '#000000',
+                  emissiveIntensity: 0,
+                  opacity: 1,
+                  transparent: false,
+                  uvwMapping: 'BOX'
+                });
+                setActiveTab('library');
+              }}>
+                <div className="w-16 h-16 rounded-full border-2 border-white/10 shadow-lg shadow-black/50 group-hover:scale-110 transition-transform duration-300" style={{backgroundColor: mat.color}} />
+                <div>
+                  <h4 className="text-[11px] font-bold text-zinc-200">{mat.name}</h4>
+                  <p className="text-[9px] text-zinc-500 line-clamp-2 mt-0.5 leading-tight">{mat.desc}</p>
+                </div>
+                <div className="mt-2 px-3 py-1 text-[9px] font-bold bg-sky-500/20 text-sky-300 rounded hover:bg-sky-500 hover:text-white transition-colors w-full">Descargar</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (activeTab === 'library') {
     return (
       <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
@@ -851,6 +1160,13 @@ export const MaterialPanel: React.FC = () => {
           >
             <Sparkles size={12} />
             <span>Materiales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('cloud')}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
+          >
+            <Cloud size={12} />
+            <span className="hidden sm:inline">Nube</span>
           </button>
           <button
             onClick={() => setActiveTab('textures')}
@@ -913,6 +1229,27 @@ export const MaterialPanel: React.FC = () => {
 
         {/* Buscador y Filtro por Categoría */}
         <div className="p-3 border-b border-white/5 space-y-2.5 bg-[#16161a]">
+          {/* Botón de Acceso al Visor de Materiales 3D Aislado */}
+          {!isMaterialStudioOpen ? (
+            <button
+              onClick={() => openMaterialStudio(activeMaterial?.id || (materials.length > 0 ? materials[0].id : undefined))}
+              className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-700 hover:from-indigo-500 hover:to-purple-600 text-white font-bold text-xs shadow-lg shadow-indigo-600/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.01] active:scale-98 border border-indigo-400/30"
+              title="Abrir el visor de materiales 3D con esfera PBR e iluminación general (Ahorra recursos del editor)"
+            >
+              <Sparkles size={14} className="text-indigo-200" />
+              <span>Abrir en Visor de Materiales 3D</span>
+            </button>
+          ) : (
+            <button
+              onClick={closeMaterialStudio}
+              className="w-full py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold text-xs flex items-center justify-center gap-2 border border-white/10 transition-colors"
+              title="Regresar a la escena 3D principal"
+            >
+              <ArrowLeft size={13} />
+              <span>Volver al Editor 3D</span>
+            </button>
+          )}
+
           {/* Barra de búsqueda */}
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-2.5 text-zinc-500" />
@@ -1034,6 +1371,8 @@ export const MaterialPanel: React.FC = () => {
                     const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
                     if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
                     setEditingMaterialId(mat.id);
+                    setMaterialStudioMaterialId(mat.id);
+                    openMaterialStudio(mat.id);
                     setActiveTab('edit');
                   }}
                   className={`group relative flex flex-col items-center p-2 rounded-xl border transition-all text-left overflow-hidden min-h-[96px] ${
@@ -1097,6 +1436,13 @@ export const MaterialPanel: React.FC = () => {
           >
             <Sparkles size={12} />
             <span>Materiales</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('cloud')}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
+          >
+            <Cloud size={12} />
+            <span className="hidden sm:inline">Nube</span>
           </button>
           <button
             onClick={() => setActiveTab('textures')}
@@ -1357,6 +1703,13 @@ export const MaterialPanel: React.FC = () => {
             <span>Materiales</span>
           </button>
           <button
+            onClick={() => setActiveTab('cloud')}
+            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
+          >
+            <Cloud size={12} />
+            <span className="hidden sm:inline">Nube</span>
+          </button>
+          <button
             onClick={() => setActiveTab('textures')}
             className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
           >
@@ -1479,6 +1832,16 @@ export const MaterialPanel: React.FC = () => {
 
         {/* Bloque de Botones de Acción Derecho */}
         <div className="flex items-center gap-1 flex-shrink-0 ml-1">
+          {!isMaterialStudioOpen && (
+            <button 
+              onClick={() => openMaterialStudio(activeMaterial.id)}
+              className="p-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 hover:text-white transition-all flex-shrink-0 border border-indigo-500/30" 
+              title="Abrir en Visor de Materiales 3D Aislado (Esfera PBR)"
+            >
+              <Sparkles size={13} />
+            </button>
+          )}
+
           <button 
             onClick={() => {
               const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
@@ -2606,19 +2969,49 @@ const TextureSlot: React.FC<{
   label: string; 
   texture?: string; 
   onDrop: (e: React.DragEvent) => void; 
+  onDropFile?: (file: File) => void;
   onClear: () => void;
   isLarge?: boolean;
-}> = ({ label, texture, onDrop, onClear, isLarge }) => {
+}> = ({ label, texture, onDrop, onDropFile, onClear, isLarge }) => {
   const [isOver, setIsOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleClick = () => {
+    inputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onDropFile) {
+      onDropFile(file);
+    } else if (file) {
+      // Fallback if no specific handler provided, simulate drop (not ideal but works for our case if we modify onDrop logic, wait, we can just trigger a reader here)
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dummyEvent = {
+          dataTransfer: {
+            getData: () => ev.target?.result as string,
+            files: [file]
+          },
+          preventDefault: () => {},
+          stopPropagation: () => {}
+        } as unknown as React.DragEvent;
+        onDrop(dummyEvent);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
 
   return (
     <div className={`space-y-1.5 ${isLarge ? 'col-span-2' : ''}`}>
       <label className="text-[9px] text-zinc-500 font-bold uppercase tracking-tighter truncate block" title={label}>{label}</label>
+      <input type="file" ref={inputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
       <div
+        onClick={handleClick}
         onDragOver={e => { e.preventDefault(); setIsOver(true); }}
         onDragLeave={() => setIsOver(false)}
-        onDrop={e => { onDrop(e); setIsOver(false); }}
-        className={`relative group aspect-square rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center overflow-hidden ${
+        onDrop={e => { e.preventDefault(); e.stopPropagation(); onDrop(e); setIsOver(false); }}
+        className={`relative group cursor-pointer aspect-square rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center overflow-hidden ${
           texture 
             ? 'border-indigo-500/50 bg-indigo-500/5' 
             : isOver ? 'border-indigo-400 bg-indigo-400/10' : 'border-white/5 bg-white/5 hover:border-white/10'
@@ -2628,7 +3021,7 @@ const TextureSlot: React.FC<{
           <>
             <img src={texture} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-40 transition-opacity" />
             <button 
-              onClick={onClear}
+              onClick={(e) => { e.stopPropagation(); onClear(); }}
               className="absolute top-2 right-2 p-1 rounded-md bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500"
             >
               <Trash2 size={12} />

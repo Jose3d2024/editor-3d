@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Box, Circle, Cylinder, Triangle, Hexagon, Spline, Waves, Orbit, Sparkles, Cone } from 'lucide-react';
-import { PrimitiveType } from '../types';
+import { Box, Circle, Cylinder, Triangle, Hexagon, Spline, Waves, Orbit, Sparkles, Cone, Cloud, Wind, Flame, Zap } from 'lucide-react';
+import { PrimitiveType, VolumetricConfig } from '../types';
 import { useStore } from '../store/useStore';
+import { VOLUMETRIC_PRESETS, DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
 
 interface ShapeItemProps {
   type: PrimitiveType;
@@ -9,21 +10,46 @@ interface ShapeItemProps {
   icon: React.ReactNode;
   color: string;
   desc?: string;
+  customVolumetric?: VolumetricConfig;
 }
 
-const ShapeItem: React.FC<ShapeItemProps> = ({ type, label, icon, color, desc }) => {
+const ShapeItem: React.FC<ShapeItemProps> = ({ type, label, icon, color, desc, customVolumetric }) => {
   const addObject = useStore(s => s.addObject);
+  const updateObject = useStore(s => s.updateObject);
+  const saveHistory = useStore(s => s.saveHistory);
 
   const handleDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData('shapeType', type);
     e.dataTransfer.effectAllowed = 'copy';
   };
 
+  const handleAdd = () => {
+    addObject(type);
+    if (customVolumetric) {
+      setTimeout(() => {
+        const selId = useStore.getState().selectedObjectId;
+        if (selId) {
+          updateObject(selId, {
+            name: `${label} ${useStore.getState().project.objects.length}`,
+            isVolumetric: true,
+            volumetric: customVolumetric,
+            color: customVolumetric.color || '#ffffff',
+            parameters: {
+              isVolumetric: true,
+              volumetric: customVolumetric,
+            }
+          });
+          saveHistory();
+        }
+      }, 20);
+    }
+  };
+
   return (
     <div 
       draggable 
       onDragStart={handleDragStart}
-      onClick={() => addObject(type)}
+      onClick={handleAdd}
       className="flex flex-col items-center gap-1.5 p-2 cursor-pointer active:cursor-grabbing hover:bg-zinc-800/80 rounded-lg border border-transparent hover:border-zinc-700 transition-all group"
       title={`Añadir ${label} (o arrastra al visor 3D)`}
     >
@@ -42,7 +68,7 @@ const ShapeItem: React.FC<ShapeItemProps> = ({ type, label, icon, color, desc })
 };
 
 export const ShapesPanel: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'MESH' | 'NURBS' | 'TEXTURES'>('MESH');
+  const [activeTab, setActiveTab] = useState<'MESH' | 'NURBS' | 'VOLUME' | 'TEXTURES'>('MESH');
   const project = useStore(s => s.project);
   const setViewMode = useStore(s => s.setViewMode);
   const updateObject = useStore(s => s.updateObject);
@@ -62,10 +88,10 @@ export const ShapesPanel: React.FC = () => {
   return (
     <div className="h-full bg-zinc-900 border-l border-zinc-800 flex flex-col">
       {/* Category Tabs */}
-      <div className="grid grid-cols-3 border-b border-zinc-800 bg-zinc-950">
+      <div className="grid grid-cols-4 border-b border-zinc-800 bg-zinc-950">
         <button
           onClick={() => setActiveTab('MESH')}
-          className={`py-2 text-[10px] font-bold tracking-wider uppercase transition-colors ${
+          className={`py-2 text-[9px] font-bold tracking-wider uppercase transition-colors ${
             activeTab === 'MESH' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-zinc-900/60' : 'text-zinc-500 hover:text-zinc-300'
           }`}
         >
@@ -73,16 +99,25 @@ export const ShapesPanel: React.FC = () => {
         </button>
         <button
           onClick={() => setActiveTab('NURBS')}
-          className={`py-2 text-[10px] font-bold tracking-wider uppercase transition-colors flex items-center justify-center gap-1 ${
+          className={`py-2 text-[9px] font-bold tracking-wider uppercase transition-colors flex items-center justify-center gap-0.5 ${
             activeTab === 'NURBS' ? 'text-cyan-400 border-b-2 border-cyan-500 bg-zinc-900/60' : 'text-zinc-500 hover:text-zinc-300'
           }`}
         >
-          <Waves size={11} />
+          <Waves size={10} />
           NURBS
         </button>
         <button
+          onClick={() => setActiveTab('VOLUME')}
+          className={`py-2 text-[9px] font-bold tracking-wider uppercase transition-colors flex items-center justify-center gap-0.5 ${
+            activeTab === 'VOLUME' ? 'text-sky-400 border-b-2 border-sky-500 bg-zinc-900/60' : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          <Cloud size={10} />
+          Nubes 3D
+        </button>
+        <button
           onClick={() => setActiveTab('TEXTURES')}
-          className={`py-2 text-[10px] font-bold tracking-wider uppercase transition-colors ${
+          className={`py-2 text-[9px] font-bold tracking-wider uppercase transition-colors ${
             activeTab === 'TEXTURES' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-zinc-900/60' : 'text-zinc-500 hover:text-zinc-300'
           }`}
         >
@@ -95,6 +130,7 @@ export const ShapesPanel: React.FC = () => {
         {activeTab === 'MESH' && (
           <div className="grid grid-cols-2 gap-2">
             <ShapeItem type="CUBE" label="Cubo" color="#ef4444" icon={<Box size={22} />} />
+            <ShapeItem type="VOLUME_CLOUD" label="Nube 3D" color="#0284c7" desc="Raymarching" icon={<Cloud size={22} />} />
             <ShapeItem type="SPHERE" label="Esfera" color="#3b82f6" icon={<Circle size={22} />} />
             <ShapeItem type="CYLINDER" label="Cilindro" color="#f97316" icon={<Cylinder size={22} />} />
             <ShapeItem type="CONE" label="Cono" color="#a855f7" icon={<Triangle size={22} />} />
@@ -140,6 +176,71 @@ export const ShapesPanel: React.FC = () => {
           </div>
         )}
 
+        {activeTab === 'VOLUME' && (
+          <div className="space-y-3">
+            <div className="bg-sky-950/40 border border-sky-800/40 rounded-lg p-2.5">
+              <span className="text-[11px] font-bold text-sky-300 flex items-center gap-1.5 mb-1">
+                <Cloud size={13} />
+                Raymarching Volumétrico 3D
+              </span>
+              <p className="text-[9px] text-sky-400/80 leading-relaxed">
+                Nubes y gases continuos calculados dentro de un contenedor cúbico con ruido FBM 3D y absorción de luz interna (Beer-Lambert).
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Nube Cúmulo" 
+                color="#0284c7" 
+                desc="Algodonosa Blanca"
+                icon={<Cloud size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[0].config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Tormenta 3D" 
+                color="#334155" 
+                desc="Densa y Oscura"
+                icon={<Zap size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[1].config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Humo Denso" 
+                color="#475569" 
+                desc="Humo Industrial"
+                icon={<Wind size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[2].config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Nebulosa 3D" 
+                color="#7c3aed" 
+                desc="Gas Cósmico"
+                icon={<Sparkles size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[3].config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Gas Ígneo" 
+                color="#ea580c" 
+                desc="Fuego Volumétrico"
+                icon={<Flame size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[4].config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Aurora 3D" 
+                color="#059669" 
+                desc="Velo Esmeralda"
+                icon={<Waves size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS[5].config}
+              />
+            </div>
+          </div>
+        )}
+
         {activeTab === 'TEXTURES' && (
           <div className="grid grid-cols-2 gap-2">
             {DEFAULT_TEXTURES.map((url, i) => (
@@ -171,3 +272,4 @@ export const ShapesPanel: React.FC = () => {
     </div>
   );
 };
+

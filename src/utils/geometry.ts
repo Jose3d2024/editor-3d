@@ -381,6 +381,9 @@ export function generatePrimitive(type: PT, params: Record<string, any>): Primit
     case 'PLANE':
       return buildPlane(Math.max(1, Math.round(p.segments ?? 1)));
 
+    case 'VOLUME_CLOUD':
+      return extractAndMergeQuads(new THREE.BoxGeometry(1, 1, 1));
+
     case 'RING':
       return buildRing(
         p.innerRadius ?? 0.25,

@@ -147,6 +147,7 @@ const PARAM_DEFS: Record<PrimitiveType, {
     { key: 'height',      label: 'Altura',         min: 0.05, max: 10,  step: 0.05 },
   ],
   PLANE:        [{ key: 'segments',       label: 'Subdivisión',     min: 1,    max: 256, step: 1,    integer: true }],
+  VOLUME_CLOUD: [],
   CIRCLE:       [{ key: 'segments',       label: 'Segmentos',       min: 3,    max: 256, step: 1,    integer: true }],
   RING: [
     { key: 'innerRadius',   label: 'Radio interior', min: 0.01, max: 10, step: 0.05 },

@@ -3,7 +3,10 @@ import { Toolbar } from './components/Toolbar';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { Timeline } from './components/Timeline';
 import { MultiViewport } from './components/MultiViewport';
+import { MaterialStudioViewport } from './components/MaterialStudioViewport';
 import { MeshProgressModal } from './components/MeshProgressModal';
+import { BooleanStudioModal } from './components/BooleanStudioModal';
+import { useStore } from './store/useStore';
 import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp, Film } from 'lucide-react';
 import { generateAllThumbnailsAsync } from './utils/proceduralTextures';
 
@@ -12,6 +15,14 @@ export default function App() {
   const [loadingStatus, setLoadingStatus] = useState('Inicializando motor 3D...');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isTimelineCollapsed, setIsTimelineCollapsed] = useState(true);
+
+  const {
+    isBooleanModalOpen,
+    closeBooleanModal,
+    booleanModalTargetId,
+    booleanModalToolId,
+    isMaterialStudioOpen,
+  } = useStore();
 
   useEffect(() => {
     const initApplication = async () => {
@@ -57,6 +68,16 @@ export default function App() {
           <div className="absolute top-0 bottom-0 left-0 bg-indigo-500 animate-pulse w-full" />
         </div>
       </div>
+    );
+  }
+
+  // ── MODO VISOR DE MATERIALES AISLADO (Ahorro del 100% de recursos de la escena 3D) ──
+  if (isMaterialStudioOpen) {
+    return (
+      <>
+        <MaterialStudioViewport />
+        <MeshProgressModal />
+      </>
     );
   }
 
@@ -165,6 +186,14 @@ export default function App() {
 
       {/* ── Mesh Operation Progress Modal ── */}
       <MeshProgressModal />
+
+      {/* ── Unified CSG Boolean Studio Modal ── */}
+      <BooleanStudioModal
+        isOpen={isBooleanModalOpen}
+        onClose={closeBooleanModal}
+        initialTargetId={booleanModalTargetId}
+        initialToolId={booleanModalToolId}
+      />
     </div>
   );
 }

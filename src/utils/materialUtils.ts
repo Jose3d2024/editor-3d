@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { MaterialData } from '../types';
+import { createRaymarchedCloudMaterial } from './volumetricRaymarch';
 
 /**
  * Combines AO, Roughness, and Metalness maps into a single ORM texture.
@@ -132,7 +133,15 @@ export function updateORMUniforms(material: THREE.Material, data: MaterialData) 
 /**
  * Creates a Three.js material from MaterialData.
  */
-export function createPBRMaterial(data: MaterialData): THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial {
+export function createPBRMaterial(data: MaterialData): THREE.Material {
+  if (data.isVolumetric || data.volumetric?.enabled) {
+    const volConfig = {
+      ...(data.volumetric || {}),
+      color: data.color || data.volumetric?.color || '#ffffff',
+    };
+    return createRaymarchedCloudMaterial(volConfig);
+  }
+
   const isVelvet = Boolean(
     (data.id && data.id.includes('velvet')) ||
     (data.name && data.name.toLowerCase().includes('terciopelo')) ||

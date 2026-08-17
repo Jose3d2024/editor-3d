@@ -22,6 +22,7 @@ import { computeSmoothNormalsByPosition } from '../utils/meshUtils';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
+import { createRaymarchedCloudMaterial } from '../utils/volumetricRaymarch';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
@@ -838,7 +839,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     if (containerRef.current) {
       while (containerRef.current.firstChild) containerRef.current.removeChild(containerRef.current.firstChild);
       containerRef.current.appendChild(renderer.domElement);
@@ -1264,6 +1265,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   // ── 1.5 Animation Loop ───────────────────────────────────────────────────
   useEffect(() => {
     let id: number;
+    const clock = new THREE.Clock();
     const animate = () => {
       id = requestAnimationFrame(animate);
       try {
@@ -1366,13 +1368,25 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           });
 
-          // 4. Actualizar la posición de la cámara en materiales de paralaje
+          // 4. Actualizar la posición de la cámara y uniforms en materiales de paralaje y shaders volumétricos
+          const elapsedTime = performance.now() * 0.001;
+          const mainLight = currentScene.getObjectByName('editorDirectionalLight') as THREE.DirectionalLight;
+          const lightPos = mainLight ? mainLight.position : new THREE.Vector3(5, 10, 5);
+
           currentScene.traverse((child) => {
             if (child instanceof THREE.Mesh) {
               const materials = Array.isArray(child.material) ? child.material : [child.material];
               materials.forEach(mat => {
-                if (mat.uniforms && mat.uniforms.uCameraPos) {
-                  mat.uniforms.uCameraPos.value.copy(currentCamera.position);
+                if (mat.uniforms) {
+                  if (mat.uniforms.uCameraPos) {
+                    mat.uniforms.uCameraPos.value.copy(currentCamera.position);
+                  }
+                  if (mat.uniforms.uTime) {
+                    mat.uniforms.uTime.value = elapsedTime;
+                  }
+                  if (mat.uniforms.uLightPosition) {
+                    mat.uniforms.uLightPosition.value.copy(lightPos);
+                  }
                 }
               });
             }
@@ -1659,6 +1673,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           transparent: finalMData.transparent,
           normalScale: finalMData.normalScale ?? 1,
         });
+      }
+
+      // ── VOLUMETRIC RAYMARCHING MATERIAL ──
+      const isVolumetricObj = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || obj.parameters?.isVolumetric || finalMData.isVolumetric || finalMData.volumetric?.enabled;
+      if (isVolumetricObj) {
+        const volCfg = {
+          ...(obj.parameters?.volumetric || {}),
+          ...(obj.volumetric || {}),
+          ...(finalMData.volumetric || {}),
+          color: finalMData.color || obj.color || '#ffffff',
+        };
+        return createRaymarchedCloudMaterial(volCfg);
       }
 
       // ── LA MEJORA MAESTRA: CREAR EL MATERIAL PBR BASE ──
@@ -3997,7 +4023,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (!hitSomething && event.button === 0) {
         // Record pending marquee start — actual marquee only activates after 5px drag
         pendingMarqueeRef.current = { x: mx, y: my };
-        (mouseRef.current as any)._pendingDeselect=true;
+        (mouseRef.current as any)._pendingDeselect = true;
+        (mouseRef.current as any).pointerDownPos = { x: event.clientX, y: event.clientY };
+        gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
       }
 
       if ((mouseRef.current as any)._pendingExpand) {
@@ -4859,9 +4887,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (gizmoDisplayRef.current) gizmoDisplayRef.current.style.display = 'none';
       
       if ((mouseRef.current as any)._pendingDeselect) {
-        const dx = event.clientX - gizmoStateRef.current.startScreenPos.x;
-        const dy = event.clientY - gizmoStateRef.current.startScreenPos.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
+        const startPos = (mouseRef.current as any).pointerDownPos || gizmoStateRef.current.startScreenPos || { x: event.clientX, y: event.clientY };
+        const dx = event.clientX - startPos.x;
+        const dy = event.clientY - startPos.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
         
         if (dist < 5) {
           // It was a click, not a drag. Perform selection raycast here.
@@ -5043,8 +5072,21 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               selectObject(null);
               selectLight(null);
               selectCamera(null);
+            } else {
+              const curObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+              const hasSubSelection =
+                selectedVertexIndices.length > 0 ||
+                selectedFaceIndices.length > 0 ||
+                selectedEdgeIndices.length > 0 ||
+                !!(curObj?.selectedNurbsControlPoint || (curObj?.selectedNurbsControlPoints && curObj.selectedNurbsControlPoints.length > 0));
+              if (hasSubSelection) {
+                clearSelection();
+              } else {
+                selectObject(null);
+                selectLight(null);
+                selectCamera(null);
+              }
             }
-            else clearSelection();
           }
         }
         (mouseRef.current as any)._pendingDeselect = false;

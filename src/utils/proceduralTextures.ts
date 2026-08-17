@@ -495,11 +495,16 @@ export function heightToNormal(heightField: Float32Array, w: number, h: number, 
   return rgba;
 }
 
+// ── IN-MEMORY BUFFER CACHE FOR FAST INSTANT FILTERING & RE-RENDERING ──
+const globalBufferCache = new Map<string, Uint8ClampedArray>();
+
 function rgbaToDataURL(rgba:Uint8ClampedArray,w:number,h:number):string{
   const c=document.createElement('canvas');c.width=w;c.height=h;
   const ctx=c.getContext('2d')!;
   const img=ctx.createImageData(w,h);img.data.set(rgba);ctx.putImageData(img,0,0);
-  return c.toDataURL('image/png');
+  const dataUrl = c.toDataURL('image/png');
+  globalBufferCache.set(dataUrl, new Uint8ClampedArray(rgba));
+  return dataUrl;
 }
 
 function grayFieldBuffer(field: Float32Array, w: number, h: number, invert = false): Uint8ClampedArray {
@@ -584,6 +589,8 @@ export interface ProceduralMaterial {
     transmission?: number;
     ior?: number;
     thickness?: number;
+    anisotropy?: number;
+    anisotropyRotation?: number;
   };
   generate(width: number, height: number): GeneratedMaps;
   generateRawBuffers?(width: number, height: number): RawMaps;
@@ -683,20 +690,64 @@ export function applyProceduralFilters(
   }
 }
 
-function decodeDataUrlToBufferSync(dataUrl: string, w: number, h: number): Uint8ClampedArray {
+export function decodeDataUrlToBufferSync(dataUrl: string, w: number, h: number): Uint8ClampedArray {
   if (!dataUrl) return uniformMapBuffer(w, h, 0);
+  if (globalBufferCache.has(dataUrl)) {
+    return new Uint8ClampedArray(globalBufferCache.get(dataUrl)!);
+  }
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
   const ctx = canvas.getContext('2d');
   if (!ctx) return uniformMapBuffer(w, h, 0);
+  
+  // Create an image or deterministic fallback
   const img = new Image();
   img.src = dataUrl;
-  try {
-    ctx.drawImage(img, 0, 0, w, h);
-    return ctx.getImageData(0, 0, w, h).data;
-  } catch {
-    return uniformMapBuffer(w, h, 0);
+  if (img.complete && img.naturalWidth > 0) {
+    try {
+      ctx.drawImage(img, 0, 0, w, h);
+      const data = ctx.getImageData(0, 0, w, h).data;
+      globalBufferCache.set(dataUrl, new Uint8ClampedArray(data));
+      return data;
+    } catch {
+      return uniformMapBuffer(w, h, 0);
+    }
   }
+
+  // If async not loaded yet, check if it is a base64 string we can parse or return fallback
+  return uniformMapBuffer(w, h, 128);
+}
+
+/**
+ * Async decoder that reliably loads any DataURL or external image URL into a pixel buffer.
+ */
+export function decodeDataUrlToBufferAsync(dataUrl: string, w: number, h: number): Promise<Uint8ClampedArray> {
+  return new Promise((resolve) => {
+    if (!dataUrl) return resolve(uniformMapBuffer(w, h, 0));
+    if (globalBufferCache.has(dataUrl)) {
+      return resolve(new Uint8ClampedArray(globalBufferCache.get(dataUrl)!));
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(uniformMapBuffer(w, h, 0));
+      try {
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        globalBufferCache.set(dataUrl, new Uint8ClampedArray(data));
+        resolve(data);
+      } catch {
+        resolve(uniformMapBuffer(w, h, 0));
+      }
+    };
+    img.onerror = () => {
+      resolve(uniformMapBuffer(w, h, 0));
+    };
+    img.src = dataUrl;
+  });
 }
 
 export function getRawBuffersForMaterial(mat: ProceduralMaterial, w: number, h: number): RawMaps {
@@ -711,6 +762,101 @@ export function getRawBuffersForMaterial(mat: ProceduralMaterial, w: number, h: 
     metallicArray: decodeDataUrlToBufferSync(maps.metallic, w, h),
     aoArray: decodeDataUrlToBufferSync(maps.ao, w, h),
     displacementArray: decodeDataUrlToBufferSync(maps.displacement, w, h),
+  };
+}
+
+/**
+ * Applies procedural imperfection filters (rust, scratches, dirt) directly to any active material's maps.
+ */
+export function applyImperfectionsToCustomMaps(
+  maps: {
+    albedo?: string;
+    normal?: string;
+    roughness?: string;
+    metallic?: string;
+    ao?: string;
+    displacement?: string;
+    baseColorHex?: string;
+    baseRoughness?: number;
+    baseMetalness?: number;
+  },
+  filters: MaterialFilters,
+  w = 512,
+  h = 512
+): GeneratedMaps {
+  // Parse base color hex if provided
+  let defaultR = 200, defaultG = 200, defaultB = 200;
+  if (maps.baseColorHex) {
+    const hex = maps.baseColorHex.replace('#', '');
+    if (hex.length === 6) {
+      defaultR = parseInt(hex.substring(0, 2), 16) || 200;
+      defaultG = parseInt(hex.substring(2, 4), 16) || 200;
+      defaultB = parseInt(hex.substring(4, 6), 16) || 200;
+    }
+  }
+
+  // Create baseline buffers
+  let albedoBuf: Uint8ClampedArray;
+  if (maps.albedo && globalBufferCache.has(maps.albedo)) {
+    albedoBuf = new Uint8ClampedArray(globalBufferCache.get(maps.albedo)!);
+  } else {
+    albedoBuf = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      albedoBuf[i * 4] = defaultR;
+      albedoBuf[i * 4 + 1] = defaultG;
+      albedoBuf[i * 4 + 2] = defaultB;
+      albedoBuf[i * 4 + 3] = 255;
+    }
+  }
+
+  let normalBuf: Uint8ClampedArray;
+  if (maps.normal && globalBufferCache.has(maps.normal)) {
+    normalBuf = new Uint8ClampedArray(globalBufferCache.get(maps.normal)!);
+  } else {
+    normalBuf = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      normalBuf[i * 4] = 128;     // X = 0
+      normalBuf[i * 4 + 1] = 128; // Y = 0
+      normalBuf[i * 4 + 2] = 255; // Z = +1
+      normalBuf[i * 4 + 3] = 255;
+    }
+  }
+
+  let roughBuf: Uint8ClampedArray;
+  if (maps.roughness && globalBufferCache.has(maps.roughness)) {
+    roughBuf = new Uint8ClampedArray(globalBufferCache.get(maps.roughness)!);
+  } else {
+    const rVal = Math.round((maps.baseRoughness ?? 0.5) * 255);
+    roughBuf = uniformMapBuffer(w, h, rVal);
+  }
+
+  let metalBuf: Uint8ClampedArray;
+  if (maps.metallic && globalBufferCache.has(maps.metallic)) {
+    metalBuf = new Uint8ClampedArray(globalBufferCache.get(maps.metallic)!);
+  } else {
+    const mVal = Math.round((maps.baseMetalness ?? 0.0) * 255);
+    metalBuf = uniformMapBuffer(w, h, mVal);
+  }
+
+  let aoBuf: Uint8ClampedArray;
+  if (maps.ao && globalBufferCache.has(maps.ao)) {
+    aoBuf = new Uint8ClampedArray(globalBufferCache.get(maps.ao)!);
+  } else {
+    aoBuf = uniformMapBuffer(w, h, 255);
+  }
+
+  // Apply filters
+  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
+    applyProceduralFilters(w, h, albedoBuf, normalBuf, roughBuf, metalBuf, aoBuf, filters);
+  }
+
+  return {
+    albedo: rgbaToDataURL(albedoBuf, w, h),
+    normal: rgbaToDataURL(normalBuf, w, h),
+    roughness: rgbaToDataURL(roughBuf, w, h),
+    metallic: rgbaToDataURL(metalBuf, w, h),
+    ao: rgbaToDataURL(aoBuf, w, h),
+    displacement: maps.displacement || uniformMap(w, h, 0),
   };
 }
 
@@ -2601,35 +2747,1179 @@ const plasmaGas: ProceduralMaterial = {
   thumbnail() { return _thumb(this); }
 };
 
+// ── ADOBE SUBSTANCE 3D: METALES AVANZADOS ──────────────────────────────────────
+
+const damascusSteel: ProceduralMaterial = {
+  id: 'damascus_steel',
+  name: 'Acero de Damasco Plegado (Substance)',
+  category: 'metal',
+  icon: '🗡️',
+  defaults: {
+    roughness: 0.22,
+    metalness: 1.0,
+    normalScale: 1.8,
+    tiling: [3, 3],
+    anisotropy: 0.75,
+    anisotropyRotation: 45
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const metallic = uniformMapBuffer(w, h, 255);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Domain warping for fluid Damascus folds
+        const warp1 = fbm(nx * 6, ny * 6, 4, 10);
+        const warp2 = fbm(nx * 6 + warp1 * 2, ny * 6 + warp1 * 2, 4, 20);
+        const pattern = Math.sin((nx * 18 + ny * 12 + warp2 * 8) * Math.PI) * 0.5 + 0.5;
+        const microNoise = vNoise(nx * 80, ny * 80, 5) * 0.15;
+        const hVal = clamp(pattern * 0.85 + microNoise);
+
+        heightField[idx] = hVal;
+
+        // Dark acid-etched iron layers vs polished bright carbon steel
+        const isDarkBand = hVal < 0.45;
+        const c = isDarkBand ? lerp(42, 75, hVal / 0.45) : lerp(165, 230, (hVal - 0.45) / 0.55);
+        albedo[idx * 4] = clamp(c * 0.96) | 0;
+        albedo[idx * 4 + 1] = clamp(c * 0.98) | 0;
+        albedo[idx * 4 + 2] = clamp(c * 1.04) | 0;
+        albedo[idx * 4 + 3] = 255;
+
+        // Etched bands are rougher; bright bands are mirror-polished
+        const rVal = isDarkBand ? 95 : 35;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+
+        // Cavity AO in etched grooves
+        const aoVal = clamp(190 + hVal * 65) | 0;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: rgbaToDataURL(metallic, w, h),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const oxidizedBronze: ProceduralMaterial = {
+  id: 'oxidized_bronze',
+  name: 'Bronce con Pátina Cardenillo (Substance)',
+  category: 'metal',
+  icon: '🏛️',
+  defaults: {
+    roughness: 0.45,
+    metalness: 0.75,
+    normalScale: 2.2,
+    tiling: [2, 2]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const metallic = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        const surfaceNoise = fbm(nx * 8, ny * 8, 5, 42);
+        const { d1 } = voronoi(nx, ny, 6, 88);
+        const patinaMask = clamp((1.0 - surfaceNoise * 0.7 - d1 * 0.5) * 1.6);
+
+        heightField[idx] = surfaceNoise * 0.7 + patinaMask * 0.3;
+
+        // Base bronze vs turquoise / malachite patina
+        if (patinaMask > 0.45) {
+          // Powdery turquoise patina
+          const t = (patinaMask - 0.45) / 0.55;
+          albedo[idx * 4]     = clamp(lerp(45, 90, t)) | 0;   // R
+          albedo[idx * 4 + 1] = clamp(lerp(185, 220, t)) | 0; // G
+          albedo[idx * 4 + 2] = clamp(lerp(170, 205, t)) | 0; // B
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 235; // Non-metallic powdery
+          metallic[idx * 4] = metallic[idx * 4 + 1] = metallic[idx * 4 + 2] = 10;
+        } else {
+          // Polished statuary bronze metal
+          albedo[idx * 4]     = 165; // R
+          albedo[idx * 4 + 1] = 110; // G
+          albedo[idx * 4 + 2] = 68;  // B
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 55;
+          metallic[idx * 4] = metallic[idx * 4 + 1] = metallic[idx * 4 + 2] = 250;
+        }
+        albedo[idx * 4 + 3] = roughness[idx * 4 + 3] = metallic[idx * 4 + 3] = 255;
+
+        const aoVal = clamp(255 - patinaMask * 75) | 0;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 3.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: rgbaToDataURL(metallic, w, h),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const hammeredCastIron: ProceduralMaterial = {
+  id: 'cast_iron_hammered',
+  name: 'Hierro Fundido Forjado (Substance)',
+  category: 'metal',
+  icon: '🔨',
+  defaults: {
+    roughness: 0.62,
+    metalness: 0.95,
+    normalScale: 2.5,
+    tiling: [4, 4]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const metallic = uniformMapBuffer(w, h, 240);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Spherical hammer impressions
+        const { d1 } = voronoi(nx, ny, 10, 15);
+        const hammerDimple = Math.sin(clamp(d1 * Math.PI * 0.9)) * 0.6;
+        const microCastPitting = fbm(nx * 40, ny * 40, 4, 3) * 0.25;
+        const hVal = clamp(hammerDimple + microCastPitting);
+
+        heightField[idx] = hVal;
+
+        // Dark charcoal cast iron tones
+        const c = clamp(36 + hVal * 30) | 0;
+        albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        albedo[idx * 4 + 3] = 255;
+
+        // Dimple high points have slight rubbing shine
+        const rVal = clamp(170 - (1.0 - hVal) * 50) | 0;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: rgbaToDataURL(metallic, w, h),
+      ao: grayField(mapField(heightField, v => clamp(0.6 + v * 0.4)), w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const scifiHullArmor: ProceduralMaterial = {
+  id: 'scifi_hull_panels',
+  name: 'Blindaje Sci-Fi de Nave (Substance)',
+  category: 'metal',
+  icon: '🚀',
+  defaults: {
+    roughness: 0.35,
+    metalness: 0.9,
+    normalScale: 3.0,
+    tiling: [2, 2],
+    clearcoat: 0.3
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const metallic = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = (px / w) * 4, ny = (py / h) * 4;
+        const cellX = Math.floor(nx), cellY = Math.floor(ny);
+        const fx = nx - cellX, fy = ny - cellY;
+
+        // Seams and rivets
+        const isSeam = fx < 0.05 || fx > 0.95 || fy < 0.05 || fy > 0.95;
+        const isRivet = (fx < 0.15 || fx > 0.85) && (fy < 0.15 || fy > 0.85);
+
+        let hVal = 0.8;
+        if (isSeam) hVal = 0.1;
+        else if (isRivet) hVal = 1.0;
+
+        heightField[idx] = hVal;
+
+        // Dual-tone armor plating (alternating panels)
+        const isAccent = (cellX + cellY) % 2 === 0;
+        let c = isAccent ? 130 : 75;
+        if (isSeam) c = 20;
+
+        albedo[idx * 4]     = clamp(c * 0.92) | 0; // R
+        albedo[idx * 4 + 1] = clamp(c * 0.96) | 0; // G
+        albedo[idx * 4 + 2] = clamp(c * 1.08) | 0; // B
+        albedo[idx * 4 + 3] = 255;
+
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = isSeam ? 220 : 80;
+        roughness[idx * 4 + 3] = 255;
+
+        metallic[idx * 4] = metallic[idx * 4 + 1] = metallic[idx * 4 + 2] = isSeam ? 40 : 230;
+        metallic[idx * 4 + 3] = 255;
+
+        const aoVal = isSeam ? 40 : 255;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 5.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: rgbaToDataURL(metallic, w, h),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── ADOBE SUBSTANCE 3D: MADERAS & FIBRAS ───────────────────────────────────────
+
+const shouSugiBan: ProceduralMaterial = {
+  id: 'shou_sugi_ban',
+  name: 'Madera Quemada Shou Sugi Ban (Substance)',
+  category: 'wood',
+  icon: '🔥',
+  defaults: {
+    roughness: 0.78,
+    metalness: 0.12,
+    normalScale: 3.5,
+    displacementScale: 0.05,
+    tiling: [3, 3]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Alligator scale cracks (Voronoi + cellular crack ridges)
+        const { d1, d2 } = voronoi(nx, ny, 14, 7);
+        const crackEdge = clamp((d2 - d1) * 6.0);
+        const woodGrainFibre = vNoise(nx * 90, ny * 4, 3) * 0.2;
+        const hVal = clamp(crackEdge * 0.8 + woodGrainFibre);
+
+        heightField[idx] = hVal;
+
+        // Coal-black charred wood with subtle warm ash tones
+        const c = clamp(15 + hVal * 25) | 0;
+        albedo[idx * 4] = clamp(c + 4) | 0;
+        albedo[idx * 4 + 1] = c;
+        albedo[idx * 4 + 2] = clamp(c - 2) | 0;
+        albedo[idx * 4 + 3] = 255;
+
+        // Crack cavities are ultra-rough; charred scale crests have slight specular sheen
+        const rVal = clamp(240 - hVal * 60) | 0;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+
+        const aoVal = clamp(80 + hVal * 175) | 0;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 6.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 25),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const teakDeck: ProceduralMaterial = {
+  id: 'teak_deck',
+  name: 'Teca Marina de Cubierta (Substance)',
+  category: 'wood',
+  icon: '⛵',
+  defaults: {
+    roughness: 0.38,
+    metalness: 0.0,
+    normalScale: 1.5,
+    tiling: [4, 4]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    const plankCount = 6;
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        const plankPos = (nx * plankCount) % 1.0;
+        const isCaulking = plankPos < 0.06 || plankPos > 0.94;
+
+        if (isCaulking) {
+          heightField[idx] = 0.2;
+          // Black flexible rubber seam
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = 24;
+          albedo[idx * 4 + 3] = 255;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 210;
+          roughness[idx * 4 + 3] = 255;
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 90;
+          ao[idx * 4 + 3] = 255;
+        } else {
+          // Warm golden teak grain
+          const grain = vNoise(nx * 120, ny * 10, 8);
+          const wave = Math.sin(ny * 24 + grain * 4) * 0.5 + 0.5;
+          heightField[idx] = 0.8 + grain * 0.2;
+
+          const r = lerp(160, 205, wave);
+          const g = lerp(105, 140, wave);
+          const b = lerp(45, 65, wave);
+
+          albedo[idx * 4]     = clamp(r) | 0;
+          albedo[idx * 4 + 1] = clamp(g) | 0;
+          albedo[idx * 4 + 2] = clamp(b) | 0;
+          albedo[idx * 4 + 3] = 255;
+
+          const rVal = clamp(85 + grain * 35) | 0;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+          roughness[idx * 4 + 3] = 255;
+
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 250;
+          ao[idx * 4 + 3] = 255;
+        }
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 2.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const wovenBamboo: ProceduralMaterial = {
+  id: 'bamboo_weave',
+  name: 'Bambú Tejido / Rattan (Substance)',
+  category: 'wood',
+  icon: '🎋',
+  defaults: {
+    roughness: 0.42,
+    metalness: 0.0,
+    normalScale: 2.8,
+    tiling: [4, 4]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = (px / w) * 8, ny = (py / h) * 8;
+        const cellX = Math.floor(nx), cellY = Math.floor(ny);
+        const fx = nx - cellX, fy = ny - cellY;
+
+        const isHorizontal = (cellX + cellY) % 2 === 0;
+        let strip = isHorizontal ? Math.sin(fy * Math.PI) : Math.sin(fx * Math.PI);
+        const fibre = vNoise(nx * 40, ny * 40, 11) * 0.15;
+        const hVal = clamp(strip * 0.85 + fibre);
+
+        heightField[idx] = hVal;
+
+        // Natural golden-amber bamboo cane colors
+        const cR = lerp(195, 235, hVal);
+        const cG = lerp(155, 195, hVal);
+        const cB = lerp(95, 130, hVal);
+
+        albedo[idx * 4]     = clamp(cR) | 0;
+        albedo[idx * 4 + 1] = clamp(cG) | 0;
+        albedo[idx * 4 + 2] = clamp(cB) | 0;
+        albedo[idx * 4 + 3] = 255;
+
+        const rVal = clamp(90 + (1.0 - hVal) * 50) | 0;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+
+        const aoVal = clamp(110 + hVal * 145) | 0;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const pressedCork: ProceduralMaterial = {
+  id: 'pressed_cork',
+  name: 'Corcho Natural Prensado (Substance)',
+  category: 'wood',
+  icon: '🍾',
+  defaults: {
+    roughness: 0.88,
+    metalness: 0.0,
+    normalScale: 3.2,
+    tiling: [3, 3]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 230);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Agglomerated cork granules
+        const { d1, id } = voronoi(nx, ny, 28, 19);
+        const granuleTone = ((id * 9301 + 49297) % 233280) / 233280;
+        const microNoise = vNoise(nx * 80, ny * 80, 5) * 0.2;
+        const hVal = clamp((1.0 - d1 * 1.5) * 0.7 + microNoise);
+
+        heightField[idx] = hVal;
+
+        const r = lerp(165, 220, granuleTone);
+        const g = lerp(110, 160, granuleTone);
+        const b = lerp(60, 95, granuleTone);
+
+        albedo[idx * 4]     = clamp(r) | 0;
+        albedo[idx * 4 + 1] = clamp(g) | 0;
+        albedo[idx * 4 + 2] = clamp(b) | 0;
+        albedo[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.7 + v * 0.3)), w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── ADOBE SUBSTANCE 3D: ARQUITECTURA, HORMIGÓN & PIEDRA ────────────────────────
+
+const formworkConcrete: ProceduralMaterial = {
+  id: 'formwork_concrete',
+  name: 'Hormigón Visto Encofrado (Substance)',
+  category: 'stone',
+  icon: '🏢',
+  defaults: {
+    roughness: 0.75,
+    metalness: 0.0,
+    normalScale: 2.0,
+    tiling: [2, 2]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    const boardCount = 5;
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        const boardPos = (ny * boardCount) % 1.0;
+        const isBoardSeam = boardPos < 0.03 || boardPos > 0.97;
+
+        // Wood grain imprint + air bubbles
+        const woodTransfer = vNoise(nx * 60, ny * 15, 22) * 0.15;
+        const airBubble = fbm(nx * 45, ny * 45, 4, 99);
+        const isBubblePore = airBubble > 0.72;
+
+        let hVal = 0.6 + woodTransfer;
+        if (isBoardSeam) hVal -= 0.35;
+        if (isBubblePore) hVal -= 0.25;
+
+        heightField[idx] = clamp(hVal);
+
+        // Concrete grey mineral tones
+        const c = clamp(140 + woodTransfer * 80 - (isBoardSeam ? 35 : 0) - (isBubblePore ? 40 : 0)) | 0;
+        albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        albedo[idx * 4 + 3] = 255;
+
+        const rVal = clamp(180 + (1.0 - hVal) * 50) | 0;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+
+        const aoVal = isBoardSeam ? 100 : (isBubblePore ? 120 : 255);
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 3.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const venetianTerrazzo: ProceduralMaterial = {
+  id: 'venetian_terrazzo',
+  name: 'Terrazo Veneciano con Mármol (Substance)',
+  category: 'stone',
+  icon: '🪨',
+  defaults: {
+    roughness: 0.15,
+    metalness: 0.0,
+    clearcoat: 0.85,
+    clearcoatRoughness: 0.05,
+    normalScale: 0.4,
+    tiling: [3, 3]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 40);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Voronoi marble chips
+        const { d1, id } = voronoi(nx, ny, 16, 33);
+        const isChip = d1 < 0.65;
+        const chipType = (id % 5);
+
+        heightField[idx] = isChip ? 0.55 : 0.5;
+
+        if (isChip) {
+          // Colorful stone aggregate chips
+          if (chipType === 0) {
+            // Nero Marquina (Black)
+            albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = 30;
+          } else if (chipType === 1) {
+            // Rosso Verona (Terracotta red)
+            albedo[idx * 4] = 195; albedo[idx * 4 + 1] = 85; albedo[idx * 4 + 2] = 65;
+          } else if (chipType === 2) {
+            // Carrara White
+            albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = 245;
+          } else if (chipType === 3) {
+            // Jade Green
+            albedo[idx * 4] = 60; albedo[idx * 4 + 1] = 145; albedo[idx * 4 + 2] = 115;
+          } else {
+            // Golden Ochre
+            albedo[idx * 4] = 215; albedo[idx * 4 + 1] = 165; albedo[idx * 4 + 2] = 85;
+          }
+        } else {
+          // Off-white cement matrix
+          const cementGrain = vNoise(nx * 100, ny * 100, 2) * 15;
+          const c = clamp(225 - cementGrain) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        }
+        albedo[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 1.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const rusticBrick: ProceduralMaterial = {
+  id: 'rustic_brick',
+  name: 'Ladrillo Rústico Artesanal (Substance)',
+  category: 'stone',
+  icon: '🧱',
+  defaults: {
+    roughness: 0.85,
+    metalness: 0.0,
+    normalScale: 3.5,
+    displacementScale: 0.04,
+    tiling: [3, 3]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    const rows = 6, cols = 4;
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const ny = (py / h) * rows;
+        const rowIdx = Math.floor(ny);
+        const rowFrac = ny - rowIdx;
+
+        // Staggered running bond pattern
+        const nx = (px / w) * cols + (rowIdx % 2 === 0 ? 0.0 : 0.5);
+        const colIdx = Math.floor(nx);
+        const colFrac = nx - colIdx;
+
+        // Mortar joint margin
+        const isMortar = rowFrac < 0.12 || colFrac < 0.08;
+
+        if (isMortar) {
+          // Sandy grey mortar joint
+          const mortarNoise = vNoise(px * 0.2, py * 0.2, 5) * 20;
+          heightField[idx] = 0.2;
+          const c = clamp(170 + mortarNoise) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+          albedo[idx * 4 + 3] = 255;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 245;
+          roughness[idx * 4 + 3] = 255;
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 70;
+          ao[idx * 4 + 3] = 255;
+        } else {
+          // Weathered terracotta brick
+          const brickId = rowIdx * 100 + colIdx;
+          const brickVariation = ((brickId * 7919) % 100) / 100;
+          const pitNoise = fbm(px * 0.1, py * 0.1, 4, 12) * 0.3;
+          heightField[idx] = clamp(0.75 + pitNoise);
+
+          const r = lerp(165, 210, brickVariation) - pitNoise * 40;
+          const g = lerp(55, 85, brickVariation) - pitNoise * 20;
+          const b = lerp(35, 55, brickVariation) - pitNoise * 15;
+
+          albedo[idx * 4]     = clamp(r) | 0;
+          albedo[idx * 4 + 1] = clamp(g) | 0;
+          albedo[idx * 4 + 2] = clamp(b) | 0;
+          albedo[idx * 4 + 3] = 255;
+
+          const rVal = clamp(210 - pitNoise * 50) | 0;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+          roughness[idx * 4 + 3] = 255;
+
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 250;
+          ao[idx * 4 + 3] = 255;
+        }
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const calacattaGold: ProceduralMaterial = {
+  id: 'calacatta_gold',
+  name: 'Mármol Calacatta Gold (Substance)',
+  category: 'stone',
+  icon: '🏛️',
+  defaults: {
+    roughness: 0.08,
+    metalness: 0.0,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.04,
+    normalScale: 0.6,
+    tiling: [1, 1]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 20);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Dramatic sweeping gold and grey veins
+        const warp = fbm(nx * 4, ny * 4, 5, 88);
+        const vein1 = Math.abs(Math.sin((nx * 3 + ny * 5 + warp * 4) * Math.PI));
+        const vein2 = Math.abs(Math.sin((nx * 6 - ny * 3 + warp * 3) * Math.PI));
+        const isGoldVein = vein1 < 0.12;
+        const isGreyVein = vein2 < 0.18;
+
+        heightField[idx] = 0.5 + (isGoldVein || isGreyVein ? 0.08 : 0);
+
+        if (isGoldVein) {
+          // Warm ochre-gold vein
+          const t = vein1 / 0.12;
+          albedo[idx * 4]     = clamp(lerp(215, 250, t)) | 0;
+          albedo[idx * 4 + 1] = clamp(lerp(165, 250, t)) | 0;
+          albedo[idx * 4 + 2] = clamp(lerp(85, 250, t)) | 0;
+        } else if (isGreyVein) {
+          // Charcoal soft grey vein
+          const t = vein2 / 0.18;
+          const g = lerp(110, 250, t);
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = clamp(g) | 0;
+        } else {
+          // Pure white crystalline calcite
+          const subtleTone = vNoise(nx * 30, ny * 30, 4) * 6;
+          const c = clamp(255 - subtleTone) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        }
+        albedo[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 1.2), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── ADOBE SUBSTANCE 3D: TEXTILES, PIELES & COMPUESTOS ──────────────────────────
+
+const distressedLeather: ProceduralMaterial = {
+  id: 'distressed_leather',
+  name: 'Cuero Vintage Envejecido (Substance)',
+  category: 'textile',
+  icon: '👞',
+  defaults: {
+    roughness: 0.58,
+    metalness: 0.0,
+    normalScale: 2.8,
+    sheen: 0.6,
+    sheenRoughness: 0.4,
+    sheenColor: '#d97706',
+    tiling: [3, 3]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Fine leather grain cells + creasing wrinkles
+        const { d1 } = voronoi(nx, ny, 36, 44);
+        const wrinkle = fbm(nx * 8, ny * 8, 4, 18) * 0.35;
+        const hVal = clamp((1.0 - d1 * 1.8) * 0.65 + wrinkle);
+
+        heightField[idx] = hVal;
+
+        // Rich cognac pull-up leather (creases lighten to warm tan)
+        const r = lerp(85, 175, hVal);
+        const g = lerp(42, 95, hVal);
+        const b = lerp(18, 45, hVal);
+
+        albedo[idx * 4]     = clamp(r) | 0;
+        albedo[idx * 4 + 1] = clamp(g) | 0;
+        albedo[idx * 4 + 2] = clamp(b) | 0;
+        albedo[idx * 4 + 3] = 255;
+
+        // High points develop oily burnished sheen
+        const rVal = clamp(180 - hVal * 70) | 0;
+        roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = rVal;
+        roughness[idx * 4 + 3] = 255;
+
+        const aoVal = clamp(120 + hVal * 135) | 0;
+        ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = aoVal;
+        ao[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const denimTwill: ProceduralMaterial = {
+  id: 'denim_twill',
+  name: 'Tejido Denim Vaquero (Substance)',
+  category: 'textile',
+  icon: '👖',
+  defaults: {
+    roughness: 0.82,
+    metalness: 0.0,
+    normalScale: 2.2,
+    sheen: 0.7,
+    sheenRoughness: 0.5,
+    sheenColor: '#93c5fd',
+    tiling: [6, 6]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 210);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        // 3x1 diagonal twill pattern (indigo warp + ecru weft)
+        const twill = (px * 3 + py) % 4;
+        const isIndigo = twill !== 0;
+        const fuzz = vNoise(px * 0.5, py * 0.5, 9) * 20;
+
+        heightField[idx] = isIndigo ? 0.7 : 0.3;
+
+        if (isIndigo) {
+          // Deep indigo blue warp yarn
+          albedo[idx * 4]     = clamp(25 + fuzz * 0.4) | 0;
+          albedo[idx * 4 + 1] = clamp(55 + fuzz * 0.6) | 0;
+          albedo[idx * 4 + 2] = clamp(140 + fuzz) | 0;
+        } else {
+          // Off-white / ecru weft yarn
+          const c = clamp(210 + fuzz) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        }
+        albedo[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 3.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── ADOBE SUBSTANCE 3D: SINTÉTICOS, ELEMENTOS & SCI-FI ─────────────────────────
+
+const kintsugiCeramic: ProceduralMaterial = {
+  id: 'kintsugi_gold_seam',
+  name: 'Kintsugi Oro y Cerámica (Substance)',
+  category: 'synthetic',
+  icon: '✨',
+  defaults: {
+    roughness: 0.35,
+    metalness: 0.3,
+    normalScale: 3.0,
+    clearcoat: 0.6,
+    tiling: [2, 2]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const metallic = new Uint8ClampedArray(w * h * 4);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Ceramic fracture network
+        const { d1, d2 } = voronoi(nx, ny, 6, 91);
+        const crackEdge = (d2 - d1);
+        const isGoldSeam = crackEdge < 0.08;
+
+        if (isGoldSeam) {
+          // 24K pure gold repaired seam
+          heightField[idx] = 1.0;
+          albedo[idx * 4]     = 255; // R
+          albedo[idx * 4 + 1] = 215; // G
+          albedo[idx * 4 + 2] = 0;   // B
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 20;
+          metallic[idx * 4] = metallic[idx * 4 + 1] = metallic[idx * 4 + 2] = 255;
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 255;
+        } else {
+          // Matte dark Japanese Raku ceramic
+          heightField[idx] = 0.5;
+          const c = clamp(26 + vNoise(nx * 50, ny * 50, 7) * 12) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 130;
+          metallic[idx * 4] = metallic[idx * 4 + 1] = metallic[idx * 4 + 2] = 0;
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 240;
+        }
+        albedo[idx * 4 + 3] = roughness[idx * 4 + 3] = metallic[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: rgbaToDataURL(metallic, w, h),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const zelligeTiles: ProceduralMaterial = {
+  id: 'zellige_glazed_tiles',
+  name: 'Azulejos Zellige Esmaltados (Substance)',
+  category: 'synthetic',
+  icon: '🪞',
+  defaults: {
+    roughness: 0.06,
+    metalness: 0.0,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.03,
+    normalScale: 2.2,
+    tiling: [4, 4]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 18);
+    const ao = new Uint8ClampedArray(w * h * 4);
+
+    const cols = 5, rows = 5;
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = (px / w) * cols, ny = (py / h) * rows;
+        const cellX = Math.floor(nx), cellY = Math.floor(ny);
+        const fx = nx - cellX, fy = ny - cellY;
+        const isGrout = fx < 0.06 || fx > 0.94 || fy < 0.06 || fy > 0.94;
+
+        if (isGrout) {
+          heightField[idx] = 0.2;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = 200;
+          albedo[idx * 4 + 3] = 255;
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 80;
+          ao[idx * 4 + 3] = 255;
+        } else {
+          // Handcrafted Moroccan vitreous turquoise/emerald glaze
+          const tileSeed = cellX * 17 + cellY * 31;
+          const tileTone = ((tileSeed * 49297) % 100) / 100;
+          const cushion = Math.sin(fx * Math.PI) * Math.sin(fy * Math.PI);
+          heightField[idx] = 0.6 + cushion * 0.4;
+
+          const r = lerp(12, 45, tileTone);
+          const g = lerp(150, 205, tileTone);
+          const b = lerp(185, 230, tileTone);
+
+          albedo[idx * 4]     = clamp(r) | 0;
+          albedo[idx * 4 + 1] = clamp(g) | 0;
+          albedo[idx * 4 + 2] = clamp(b) | 0;
+          albedo[idx * 4 + 3] = 255;
+
+          ao[idx * 4] = ao[idx * 4 + 1] = ao[idx * 4 + 2] = 255;
+          ao[idx * 4 + 3] = 255;
+        }
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 3.5), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: rgbaToDataURL(ao, w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const tacticalPolymer: ProceduralMaterial = {
+  id: 'tactical_polymer',
+  name: 'Polímero Táctico Estriado (Substance)',
+  category: 'synthetic',
+  icon: '🛡️',
+  defaults: {
+    roughness: 0.72,
+    metalness: 0.0,
+    normalScale: 2.8,
+    tiling: [4, 4]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = uniformMapBuffer(w, h, 185);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Diamond stipple micro-traction pattern
+        const stipple = Math.sin(nx * 120) * Math.sin(ny * 120);
+        const microNoise = vNoise(nx * 60, ny * 60, 14) * 0.2;
+        const hVal = clamp(stipple * 0.5 + 0.5 + microNoise);
+
+        heightField[idx] = hVal;
+
+        // Tactical matte black/olive polymer
+        const c = clamp(35 + hVal * 18) | 0;
+        albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+        albedo[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 4.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.75 + v * 0.25)), w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const activeMagmaCrust: ProceduralMaterial = {
+  id: 'magma_crust',
+  name: 'Corteza de Lava Magma Activa (Substance)',
+  category: 'gaseous',
+  icon: '🌋',
+  defaults: {
+    roughness: 0.9,
+    metalness: 0.0,
+    normalScale: 4.5,
+    displacementScale: 0.06,
+    tiling: [2, 2]
+  },
+  generate(w, h) {
+    const heightField = new Float32Array(w * h);
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const nx = px / w, ny = py / h;
+        // Basalt crust breaking open
+        const { d1, d2 } = voronoi(nx, ny, 8, 55);
+        const crack = (d2 - d1);
+        const isFissure = crack < 0.15;
+
+        heightField[idx] = clamp(crack * 1.5);
+
+        if (isFissure) {
+          // Glowing incandescent 1500K molten lava
+          const heat = 1.0 - (crack / 0.15);
+          albedo[idx * 4]     = 255; // R
+          albedo[idx * 4 + 1] = clamp(lerp(60, 220, heat)) | 0; // G
+          albedo[idx * 4 + 2] = clamp(lerp(0, 80, heat)) | 0;   // B
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 20;
+        } else {
+          // Hardened basalt crust
+          const c = clamp(18 + vNoise(nx * 40, ny * 40, 2) * 20) | 0;
+          albedo[idx * 4] = albedo[idx * 4 + 1] = albedo[idx * 4 + 2] = c;
+          roughness[idx * 4] = roughness[idx * 4 + 1] = roughness[idx * 4 + 2] = 240;
+        }
+        albedo[idx * 4 + 3] = roughness[idx * 4 + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 6.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.6 + v * 0.4)), w, h),
+      displacement: grayField(heightField, w, h)
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
 // ── REESTRUCTURACIÓN DE LA BIBLIOTECA GENERAL ────────────────────────────────
 
 export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
-  // Wood
+  // Wood & Organic (Substance 3D Core Collection)
   oakPlanks, walnut, pine, mahogany, varnishedWood,
+  shouSugiBan, teakDeck, wovenBamboo, pressedCork,
   
-  // Stone / Minerals / Organic
+  // Stone, Concretes & Masonry (Substance 3D Architectural)
   marble, marbleBlack, greenMarble, granite, slate, concrete, wetConcrete, compactBone,
   largeRock, cliffRock, mossyRock, volcanicRock, desertRock,
+  formworkConcrete, venetianTerrazzo, rusticBrick, calacattaGold,
   
-  // Metal
+  // Metal & Alloys (Substance 3D PBR Metals)
   brushedSteel, brushedAluminum, rustedIron, chrome, copper, copperVerdigris, gold, galvanizedMetal,
+  damascusSteel, oxidizedBronze, hammeredCastIron, scifiHullArmor,
   
-  // Paint
+  // Paint & Coatings
   carPaintRed, carPaintBlue, carPaintBlack, carPaintGreen, matteWhite, matteGray, carLacquer,
   
-  // Textiles
+  // Textiles & Leathers
   velvetFabric, woolFabric, silkFabric, fabricCanvas, leather,
+  distressedLeather, denimTwill,
   
-  // Iridescent
+  // Iridescent & Optical
   tornasolMetal, pearlIridescent,
   
-  // Synthetic / Fluid / Volumetric
+  // Synthetic, Glazed & Ceramics
   carbonFiber, goldCarbonFiber, rubber, plasticGlossy, ceramicGlazed, naturalSponge,
+  kintsugiCeramic, zelligeTiles, tacticalPolymer,
   
-  // Gaseous / Plasma
-  plasmaGas,
+  // Gaseous, Plasma & Elements
+  plasmaGas, activeMagmaCrust,
 
-  // Ground
+  // Ground & Terrain
   gravel, sand, asphalt, dirt, rockyGroundMoss,
 ];
 
