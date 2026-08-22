@@ -1,5 +1,6 @@
 import React, { useRef } from 'react';
 import { Viewport } from './Viewport';
+import { PrecisionDrawToolbar } from './PrecisionDrawToolbar';
 import { useStore } from '../store/useStore';
 import { ViewportType, ViewportLayoutPreset } from '../types';
 import { Move, Check, RotateCcw } from 'lucide-react';
@@ -145,6 +146,9 @@ export const MultiViewport: React.FC = () => {
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
     >
+      {/* Precision Drawing and Vertex Draggable Micro Toolbar */}
+      <PrecisionDrawToolbar />
+
       {/* Viewport Slots */}
       {currentSlots.map((slot, index) => {
         const isMaximized = maximizedViewport !== null;

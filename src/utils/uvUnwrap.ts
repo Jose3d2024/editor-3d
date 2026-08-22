@@ -29,10 +29,14 @@ export interface UVUnwrapOptions {
  * Helper to calculate face normal
  */
 function getFaceNormal(vertices: V3[], faceIndices: number[]): THREE.Vector3 {
-  if (faceIndices.length < 3) return new THREE.Vector3(0, 1, 0);
-  const v0 = new THREE.Vector3(...vertices[faceIndices[0]]);
-  const v1 = new THREE.Vector3(...vertices[faceIndices[1]]);
-  const v2 = new THREE.Vector3(...vertices[faceIndices[2]]);
+  if (!faceIndices || faceIndices.length < 3) return new THREE.Vector3(0, 1, 0);
+  const vert0 = vertices[faceIndices[0]];
+  const vert1 = vertices[faceIndices[1]];
+  const vert2 = vertices[faceIndices[2]];
+  if (!vert0 || !vert1 || !vert2) return new THREE.Vector3(0, 1, 0);
+  const v0 = new THREE.Vector3(...vert0);
+  const v1 = new THREE.Vector3(...vert1);
+  const v2 = new THREE.Vector3(...vert2);
   const norm = new THREE.Vector3().crossVectors(v1.sub(v0), v2.sub(v0));
   if (norm.lengthSq() > 1e-8) {
     return norm.normalize();
@@ -44,12 +48,17 @@ function getFaceNormal(vertices: V3[], faceIndices: number[]): THREE.Vector3 {
  * Helper to calculate 3D face area
  */
 function getFaceArea(vertices: V3[], faceIndices: number[]): number {
-  if (faceIndices.length < 3) return 0;
+  if (!faceIndices || faceIndices.length < 3) return 0;
+  const vert0 = vertices[faceIndices[0]];
+  if (!vert0) return 0;
   let totalArea = 0;
-  const v0 = new THREE.Vector3(...vertices[faceIndices[0]]);
+  const v0 = new THREE.Vector3(...vert0);
   for (let i = 1; i < faceIndices.length - 1; i++) {
-    const v1 = new THREE.Vector3(...vertices[faceIndices[i]]);
-    const v2 = new THREE.Vector3(...vertices[faceIndices[i + 1]]);
+    const vert1 = vertices[faceIndices[i]];
+    const vert2 = vertices[faceIndices[i + 1]];
+    if (!vert1 || !vert2) continue;
+    const v1 = new THREE.Vector3(...vert1);
+    const v2 = new THREE.Vector3(...vert2);
     const cross = new THREE.Vector3().crossVectors(v1.sub(v0), v2.sub(v0));
     totalArea += cross.length() * 0.5;
   }
@@ -470,25 +479,26 @@ export function cubeUVProject(
     const absY = Math.abs(norm.y);
     const absZ = Math.abs(norm.z);
 
-    const uvs: [number, number][] = face.indices.map(vIdx => {
-      const [x, y, z] = vertices[vIdx];
-      let u = 0, v = 0;
+    const uvs: [number, number][] = (face.indices || []).map(vIdx => {
+      const v = vertices[vIdx] || [0, 0, 0];
+      const [x, y, z] = v;
+      let u = 0, uvY = 0;
 
       if (absY >= absX && absY >= absZ) {
         // Top / Bottom Face (XZ plane)
         u = ((x - min[0]) / maxSize) * scale;
-        v = ((z - min[2]) / maxSize) * scale;
+        uvY = ((z - min[2]) / maxSize) * scale;
       } else if (absX >= absY && absX >= absZ) {
         // Left / Right Face (ZY plane)
         u = ((z - min[2]) / maxSize) * scale;
-        v = ((y - min[1]) / maxSize) * scale;
+        uvY = ((y - min[1]) / maxSize) * scale;
       } else {
         // Front / Back Face (XY plane)
         u = ((x - min[0]) / maxSize) * scale;
-        v = ((y - min[1]) / maxSize) * scale;
+        uvY = ((y - min[1]) / maxSize) * scale;
       }
 
-      return [u, v];
+      return [u, uvY];
     });
 
     return { ...face, uvs };
@@ -506,11 +516,12 @@ export function cylinderSphereUVProject(
   type: 'CYLINDRICAL' | 'SPHERICAL' = 'CYLINDRICAL'
 ): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = mesh.vertices;
-  if (!vertices.length) return mesh;
+  if (!vertices || !vertices.length || !mesh.faces) return mesh;
 
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   vertices.forEach(v => {
+    if (!v) return;
     for (let i = 0; i < 3; i++) {
       if (v[i] < min[i]) min[i] = v[i];
       if (v[i] > max[i]) max[i] = v[i];
@@ -525,23 +536,25 @@ export function cylinderSphereUVProject(
   ];
 
   const newFaces = mesh.faces.map(face => {
+    if (!face || !face.indices) return face;
     let uvs: [number, number][] = face.indices.map(vIdx => {
-      const [x, y, z] = vertices[vIdx];
+      const v = vertices[vIdx] || [0, 0, 0];
+      const [x, y, z] = v;
       const dx = x - center[0];
       const dz = z - center[2];
 
       let u = 0.5 + Math.atan2(dz, dx) / (2 * Math.PI);
-      let v = 0;
+      let uvY = 0;
 
       if (type === 'SPHERICAL') {
         const dy = y - center[1];
         const radius = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-        v = 0.5 - Math.asin(Math.max(-1, Math.min(1, dy / radius))) / Math.PI;
+        uvY = 0.5 - Math.asin(Math.max(-1, Math.min(1, dy / radius))) / Math.PI;
       } else {
-        v = (y - min[1]) / sizeY;
+        uvY = (y - min[1]) / sizeY;
       }
 
-      return [u, v];
+      return [u, uvY];
     });
 
     // Fix Seam Wrapping across the u=0 / u=1 boundary
@@ -574,7 +587,7 @@ export function projectFromViewUV(
   projectionMatrix: THREE.Matrix4
 ): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = mesh.vertices;
-  if (!vertices.length) return mesh;
+  if (!vertices || !vertices.length || !mesh.faces) return mesh;
 
   const viewProj = new THREE.Matrix4().multiplyMatrices(
     projectionMatrix,
@@ -582,13 +595,15 @@ export function projectFromViewUV(
   );
 
   const newFaces = mesh.faces.map(face => {
+    if (!face || !face.indices) return face;
     const uvs: [number, number][] = face.indices.map(vIdx => {
-      const p = new THREE.Vector3(...vertices[vIdx]);
+      const v = vertices[vIdx] || [0, 0, 0];
+      const p = new THREE.Vector3(...v);
       p.applyMatrix4(viewProj);
       // Normalized device coordinates (-1..1) to UV space (0..1)
       const u = p.x * 0.5 + 0.5;
-      const v = p.y * 0.5 + 0.5;
-      return [u, v];
+      const uvY = p.y * 0.5 + 0.5;
+      return [u, uvY];
     });
     return { ...face, uvs };
   });

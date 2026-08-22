@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
+import { SaveProjectModal, saveSceneToStorage, getSavedScenes } from './SaveProjectModal';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { OBJExporter } from 'three/examples/jsm/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
@@ -25,6 +26,7 @@ import * as THREE from 'three';
 import type { CSGObject, MeshFace, V3, ViewportLayoutPreset } from '../types';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
+import { extractPBRMaterialsFromObject3D } from '../utils/materialUtils';
 import {
   generatePolygon, generateArc,
   latheMesh, LATHE_PRESETS,
@@ -39,6 +41,7 @@ import {
 import { SiluetaTab } from './SiluetaTab';
 import { RenderModal } from './RenderModal';
 import { CodeExporterModal } from './CodeExporterModal';
+import { WireframeModal } from './WireframeModal';
 import { VOLUMETRIC_PRESETS } from '../utils/volumetricRaymarch';
 
 // ── Import helper: BufferGeometry → CSGObject ─────────────────────────────────
@@ -225,7 +228,7 @@ const MeshTab: React.FC<{
   selectedObject: CSGObject | null;
   onModify: (v: V3[], f: MeshFace[]) => void;
 }> = ({ selectedObject, onModify }) => {
-  const [optRatio, setOptRatio] = useState(0.5);
+  const [optRatio, setOptRatio] = useState(0.3);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [isSubdividing, setIsSubdividing] = useState(false);
   const [isSmoothing, setIsSmoothing] = useState(false);
@@ -240,35 +243,63 @@ const MeshTab: React.FC<{
     );
   }
 
+  const currentVerts = selectedObject.stats?.vertices ?? selectedObject.vertices?.length ?? 0;
+  const currentFaces = selectedObject.stats?.faces ?? selectedObject.faces?.length ?? 0;
+  const targetFacesEst = Math.max(4, Math.round(currentFaces * optRatio));
+  const reductionPercent = Math.round((1 - optRatio) * 100);
+
   return (
     <div className="space-y-4">
-      <PTitle icon="🕸️" title="Herramientas de Malla" desc="Optimiza, subdivide o suaviza la geometría del objeto." />
+      <PTitle icon="🕸️" title="Herramientas de Malla" desc="Optimiza, reduce polígonos, subdivide o suaviza la geometría." />
 
       {/* Optimizar */}
-      <div className="space-y-2 p-2 bg-zinc-800/30 rounded border border-zinc-800">
+      <div className="space-y-2 p-2.5 bg-zinc-800/40 rounded-lg border border-violet-500/30">
         <div className="flex items-center justify-between">
-          <span className="text-[10px] font-bold text-zinc-300 uppercase">Optimizar (Decimar)</span>
-          <span className="text-[9px] text-zinc-500">Reduce polígonos</span>
+          <span className="text-[10px] font-bold text-violet-300 uppercase flex items-center gap-1">
+            <Zap size={12} className="text-amber-400" /> Optimizar / Decimar
+          </span>
+          <span className="text-[9px] font-mono text-zinc-400">{currentFaces.toLocaleString()} caras</span>
         </div>
-        <CRow label="Fuerza">
-          <input type="range" min={0.01} max={0.99} step={0.01} value={optRatio} onChange={e => setOptRatio(+e.target.value)} className="flex-1 accent-violet-500 h-1.5" />
-          <CVal>{(optRatio * 100).toFixed(0)}%</CVal>
-        </CRow>
+
+        <div className="flex items-center justify-between text-[10px]">
+          <span className="text-zinc-300">Ratio Retenido</span>
+          <span className="font-mono text-violet-300 font-bold">{Math.round(optRatio * 100)}% (~{targetFacesEst.toLocaleString()} caras, -{reductionPercent}%)</span>
+        </div>
+
+        <input 
+          type="range" 
+          min={0.01} 
+          max={0.95} 
+          step={0.01} 
+          value={optRatio} 
+          onChange={e => setOptRatio(+e.target.value)} 
+          className="w-full accent-violet-500 h-1.5 bg-zinc-800 rounded cursor-pointer" 
+        />
+
+        {/* Presets */}
+        <div className="grid grid-cols-4 gap-1">
+          <button onClick={() => setOptRatio(0.05)} className={`py-0.5 text-[9px] font-bold rounded border cursor-pointer ${optRatio === 0.05 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>5% Ultra</button>
+          <button onClick={() => setOptRatio(0.15)} className={`py-0.5 text-[9px] font-bold rounded border cursor-pointer ${optRatio === 0.15 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>15%</button>
+          <button onClick={() => setOptRatio(0.30)} className={`py-0.5 text-[9px] font-bold rounded border cursor-pointer ${optRatio === 0.30 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>30%</button>
+          <button onClick={() => setOptRatio(0.50)} className={`py-0.5 text-[9px] font-bold rounded border cursor-pointer ${optRatio === 0.50 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400'}`}>50%</button>
+        </div>
+
         <button 
           disabled={isOptimizing}
           onClick={async () => {
             setIsOptimizing(true);
             try {
-              // Si la fuerza es 90%, queremos conservar el 10% (ratio = 0.1)
-              const targetRatio = 1.0 - optRatio;
-              await useStore.getState().optimizeObject(selectedObject.id, targetRatio);
+              await useStore.getState().optimizeObject(selectedObject.id, optRatio);
             } finally {
               setIsOptimizing(false);
             }
           }} 
-          className={`w-full py-1.5 rounded text-[10px] font-bold transition-colors ${isOptimizing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`}
+          className={`w-full py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+            isOptimizing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-violet-600 hover:bg-violet-500 text-white shadow-md'
+          }`}
         >
-          {isOptimizing ? '⌛ Optimizando...' : 'Ejecutar Optimización'}
+          <Zap size={12} />
+          {isOptimizing ? '⌛ Optimizando geometría...' : `Ejecutar Optimización (-${reductionPercent}%)`}
         </button>
       </div>
 
@@ -289,7 +320,7 @@ const MeshTab: React.FC<{
               setIsSubdividing(false);
             }
           }} 
-          className={`w-full py-1.5 rounded text-[10px] font-bold transition-colors ${isSubdividing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-violet-600 hover:bg-violet-500 text-white'}`}
+          className={`w-full py-1.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${isSubdividing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
         >
           {isSubdividing ? '⌛ Subdividiendo...' : 'Subdividir Malla (x4 caras)'}
         </button>
@@ -319,7 +350,7 @@ const MeshTab: React.FC<{
               setIsSmoothing(false);
             }
           }} 
-          className={`w-full py-1.5 rounded text-[10px] font-bold transition-colors ${isSmoothing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`}
+          className={`w-full py-1.5 rounded text-[10px] font-bold transition-colors cursor-pointer ${isSmoothing ? 'bg-zinc-800 text-zinc-500 cursor-wait' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`}
         >
           {isSmoothing ? '⌛ Suavizando...' : 'Suavizar Geometría'}
         </button>
@@ -448,12 +479,13 @@ export const Toolbar: React.FC = () => {
   const [showMesh,    setShowMesh]    = useState(false);
   const [showRender,  setShowRender]  = useState(false);
   const [showCodeExporter, setShowCodeExporter] = useState(false);
+  const [showWireframeModal, setShowWireframeModal] = useState(false);
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
     'primitivo'|'nurbs'|'volumetric'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
   >('primitivo');
-  const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'acciones'>('seleccion');
+  const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'malla'|'acciones'>('seleccion');
 
   // Polygon
   const [polySides,  setPolySides]  = useState(6);
@@ -558,11 +590,26 @@ export const Toolbar: React.FC = () => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA') return;
       if (e.ctrlKey||e.metaKey) {
-        if (e.key==='z'){e.preventDefault();undo();}
-        if (e.key==='y'){e.preventDefault();redo();}
-        if (e.key==='c'){e.preventDefault();copyObject();}
-        if (e.key==='v'){e.preventDefault();pasteObject();}
-        if (e.key==='d'){e.preventDefault();if(selectedObjectId)duplicateObject(selectedObjectId);}
+        const k = e.key.toLowerCase();
+        if (k==='z') {
+          e.preventDefault();
+          if (e.shiftKey) redo();
+          else undo();
+          return;
+        }
+        if (k==='y') { e.preventDefault(); redo(); return; }
+        if (k==='s') {
+          e.preventDefault();
+          if (e.shiftKey) {
+            handleSaveAs();
+          } else {
+            handleSave();
+          }
+          return;
+        }
+        if (k==='c') { e.preventDefault(); copyObject(); return; }
+        if (k==='v') { e.preventDefault(); pasteObject(); return; }
+        if (k==='d') { e.preventDefault(); if(selectedObjectId)duplicateObject(selectedObjectId); return; }
         return;
       }
       if (e.key === '?' || e.key === 'F1') {
@@ -585,28 +632,65 @@ export const Toolbar: React.FC = () => {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editMode, selectedObjectId]);
+  }, [editMode, selectedObjectId, project]);
 
   // ── File ops ──────────────────────────────────────────────────────────────
   const [isExporting, setIsExporting] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveModalMode, setSaveModalMode] = useState<'save' | 'save_as' | 'open'>('save');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [hasBeenExplicitlySaved, setHasBeenExplicitlySaved] = useState(false);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(curr => curr === msg ? null : curr);
+    }, 4000);
+  };
 
   const handleReset = () => {
     setShowResetModal(true);
   };
 
   const handleSave = () => {
-    const blob = new Blob([JSON.stringify(project,null,2)],{type:'application/json'});
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a'); a.href=url; a.download=project.name+'.json'; a.click();
-    URL.revokeObjectURL(url);
+    // If saving for the first time or still default name, prompt the user with default "Nuevo Proyecto"
+    if (!hasBeenExplicitlySaved && (project.name === 'Nuevo Proyecto' || !project.name)) {
+      setSaveModalMode('save');
+      setShowSaveModal(true);
+    } else {
+      // Overwrite existing scene directly
+      saveSceneToStorage(project);
+      setHasBeenExplicitlySaved(true);
+      showToast(`✓ Proyecto "${project.name}" sobreescrito y guardado correctamente.`);
+    }
   };
+
+  const handleSaveAs = () => {
+    setSaveModalMode('save_as');
+    setShowSaveModal(true);
+  };
+
+  const handleOpenSavedScenes = () => {
+    setSaveModalMode('open');
+    setShowSaveModal(true);
+  };
+
   const handleLoad = () => {
     const input = document.createElement('input'); input.type='file'; input.accept='.json';
     input.onchange=(e:any)=>{
       const reader = new FileReader();
-      reader.onload=(ev:any)=>{try{setProject(JSON.parse(ev.target.result));}catch{alert('Error al cargar');}};
+      reader.onload=(ev:any)=>{
+        try {
+          const parsed = JSON.parse(ev.target.result);
+          setProject(parsed);
+          setHasBeenExplicitlySaved(true);
+          showToast(`✓ Proyecto "${parsed.name || 'Cargado'}" importado.`);
+        } catch {
+          alert('Error al cargar archivo JSON.');
+        }
+      };
       reader.readAsText(e.target.files[0]);
     };
     input.click();
@@ -805,8 +889,9 @@ export const Toolbar: React.FC = () => {
           const object = await new Promise<THREE.Object3D>((resolve, reject) => new OBJLoader().load(blobUrl, resolve, undefined, reject));
           URL.revokeObjectURL(blobUrl);
           const stats = getStatsFromObject(object);
-          const extractedMaterials = extractMaterialsFromObject(object);
+          const extractedMaterials = extractPBRMaterialsFromObject3D(object, baseName);
           const autoTransform = computeAutoFitTransform(object);
+          const primaryMat = extractedMaterials[0];
           
           const csgObj: CSGObject = {
             id: Math.random().toString(36).substr(2, 9),
@@ -823,7 +908,8 @@ export const Toolbar: React.FC = () => {
             keyframes: [],
             meshData: { type: 'obj', data: dataURL },
             stats,
-            materialId: undefined
+            materialId: undefined,
+            material: undefined,
           };
           geos.push({ csgObj, materials: extractedMaterials });
         }
@@ -838,8 +924,9 @@ export const Toolbar: React.FC = () => {
               const animations = gltf.animations;
               const scene = gltf.scene;
               const stats = getStatsFromObject(scene);
-              const extractedMaterials = extractMaterialsFromObject(scene);
+              const extractedMaterials = extractPBRMaterialsFromObject3D(scene, baseName);
               const autoTransform = computeAutoFitTransform(scene);
+              const primaryMat = extractedMaterials[0];
               
               const maxDuration = Math.max(...animations.map(a => a.duration), 0);
               const fps = 24;
@@ -886,7 +973,8 @@ export const Toolbar: React.FC = () => {
                   meshes: meshesList
                 },
                 stats,
-                materialId: undefined
+                materialId: undefined,
+                material: undefined,
               };
 
               if (hasAnimations) {
@@ -938,9 +1026,9 @@ export const Toolbar: React.FC = () => {
         const newObjects = geos.map((g: any) => g.csgObj || bufferGeomToCSGObject(g.geo, g.name, g.mat));
         const newMaterials = [...cur.materials];
         geos.forEach((g: any) => {
-          if (g.materials) {
+          if (g.materials && g.materials.length > 0) {
             g.materials.forEach((m: any) => {
-              if (!newMaterials.find(existing => existing.name === m.name)) {
+              if (!newMaterials.find(existing => existing.id === m.id)) {
                 newMaterials.push(m);
               }
             });
@@ -949,6 +1037,15 @@ export const Toolbar: React.FC = () => {
 
         useStore.getState().setProject({...cur, objects:[...cur.objects, ...newObjects], materials: newMaterials});
         useStore.getState().saveHistory();
+
+        const firstNewObj = newObjects[0];
+        const firstMat = geos[0]?.materials?.[0];
+        if (firstNewObj) {
+          useStore.getState().selectObject(firstNewObj.id);
+          if (firstMat) {
+            useStore.getState().setMaterialStudioMaterialId(firstMat.id);
+          }
+        }
       }catch(err:any){alert('Error al importar: '+(err?.message??String(err)));}
     };
     input.click();
@@ -1016,17 +1113,29 @@ export const Toolbar: React.FC = () => {
           {!isFloating&&<><div className="flex items-center gap-2 flex-shrink-0"><div className="w-8 h-8 bg-indigo-600 rounded flex items-center justify-center text-white font-bold text-sm">R</div><span className="font-bold text-sm tracking-tight hidden lg:block">CSG Pro</span></div><Sep/></>}
 
           {/* ── Archivo ── */}
-          <Dropdown label="Archivo" icon={<FolderOpen size={14}/>} isOpen={showFile} setIsOpen={setShowFile} containerRef={fileRef} width={180}>
-            <button onClick={()=>{handleReset();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-rose-400 font-medium"><RotateCcw size={14}/> Reiniciar Proyecto</button>
+          <Dropdown label="Archivo" icon={<FolderOpen size={14}/>} isOpen={showFile} setIsOpen={setShowFile} containerRef={fileRef} width={205}>
+            <button onClick={()=>{handleSave();setShowFile(false);}} className="flex items-center justify-between w-full px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-white font-medium">
+              <span className="flex items-center gap-2"><Save size={14} className="text-indigo-400"/> Guardar</span>
+              <kbd className="text-[9px] text-zinc-500 font-mono">Ctrl+S</kbd>
+            </button>
+            <button onClick={()=>{handleSaveAs();setShowFile(false);}} className="flex items-center justify-between w-full px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-zinc-200">
+              <span className="flex items-center gap-2"><Save size={14} className="text-zinc-400"/> Guardar como...</span>
+              <kbd className="text-[9px] text-zinc-500 font-mono">Ctrl+Shift+S</kbd>
+            </button>
+            <button onClick={()=>{handleOpenSavedScenes();setShowFile(false);}} className="flex items-center justify-between w-full px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-indigo-300 font-medium">
+              <span className="flex items-center gap-2"><FolderOpen size={14} className="text-indigo-400"/> Mis Escenas Guardadas</span>
+            </button>
             <div className="h-px bg-zinc-800 my-1"/>
-            <button onClick={()=>{handleLoad();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><FolderOpen size={14}/> Abrir</button>
-            <button onClick={()=>{handleImport();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Upload size={14}/> Importar</button>
-            <button onClick={()=>{handleSave();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Save size={14}/> Guardar</button>
+            <button onClick={()=>{handleLoad();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><FolderOpen size={14}/> Abrir archivo .json</button>
+            <button onClick={()=>{handleImport();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Upload size={14}/> Importar 3D (STL/OBJ/GLTF)</button>
+            <div className="h-px bg-zinc-800 my-1"/>
+            <button onClick={()=>{handleReset();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-rose-400 font-medium"><RotateCcw size={14}/> Reiniciar Proyecto</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{handleExportSTL();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar STL</button>
             <button onClick={()=>{handleExportOBJ();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar OBJ</button>
             <button onClick={()=>{handleExportGLTF(false);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLTF</button>
             <button onClick={()=>{handleExportGLTF(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLB</button>
+            <button onClick={()=>{setShowWireframeModal(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-emerald-300 font-semibold bg-emerald-950/40 border border-emerald-800/30"><Grid size={14} className="text-emerald-400"/> Exportar Estructura Alámbrica 3D...</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setShowCodeExporter(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-indigo-300 font-semibold bg-indigo-950/40"><Code size={14} className="text-indigo-400"/> Exportar Código Three.js</button>
             <button onClick={()=>{handleCopyJSON();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Code size={14} className="text-zinc-500"/> Copiar JSON (Proyecto)</button>
@@ -1087,14 +1196,14 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   {/* Tab strip */}
-                  <div className="grid grid-cols-5 border-b border-zinc-800">
+                  <div className="grid grid-cols-6 border-b border-zinc-800">
                     {([
-                      {id:'primitivo', label:'Figuras',  icon:'⬛'},
-                      {id:'nurbs',     label:'NURBS',    icon:'〰️'},
-                      {id:'volumetric',label:'Nubes 3D', icon:'☁️'},
-                      {id:'dibujar',   label:'Dibujar',  icon:'✏️'},
-                      {id:'geometria', label:'Geometría',icon:'⬡'},
-                      {id:'generar',   label:'Generar',  icon:'🌀'},
+                      {id:'primitivo', label:'Figuras',      icon:'⬛'},
+                      {id:'nurbs',     label:'NURBS',        icon:'〰️'},
+                      {id:'volumetric',label:'Volúmenes 3D', icon:'🔥'},
+                      {id:'dibujar',   label:'Dibujar',      icon:'✏️'},
+                      {id:'geometria', label:'Geometría',    icon:'⬡'},
+                      {id:'generar',   label:'Generar',      icon:'🌀'},
                     ] as const).map(tab=>(
                       <button key={tab.id} onClick={()=>setCreateTab(tab.id)}
                         className={`flex flex-col items-center gap-0.5 py-1.5 text-[9px] font-bold transition-colors border-b-2 ${
@@ -1135,41 +1244,34 @@ export const Toolbar: React.FC = () => {
                       </>
                     )}
 
-                    {/* ════ NUBES 3D (RAYMARCHING) ════ */}
+                    {/* ════ MEDIOS VOLUMÉTRICOS 3D (RAYMARCHING) ════ */}
                     {createTab==='volumetric'&&(
                       <>
-                        <PTitle icon="☁️" title="Nubes Volumétricas (Raymarching)" desc="Añade nubes y gases mediante shaders volumétricos avanzados."/>
+                        <PTitle icon="🔥" title="Medios Volumétricos 3D (Raymarching)" desc="Añade fuego, plasma, gases, humo y niebla mediante shaders de raymarching en tiempo real."/>
                         <div className="grid grid-cols-2 gap-2">
-                          {[
-                            { label: 'Nube Cúmulo', icon: <Cloud size={24} />, desc: 'Algodonosa Blanca', preset: VOLUMETRIC_PRESETS[0].config, color: '#0284c7' },
-                            { label: 'Tormenta 3D', icon: <Zap size={24} />, desc: 'Densa y Oscura', preset: VOLUMETRIC_PRESETS[1].config, color: '#334155' },
-                            { label: 'Humo Denso', icon: <Wind size={24} />, desc: 'Humo Industrial', preset: VOLUMETRIC_PRESETS[2].config, color: '#475569' },
-                            { label: 'Nebulosa 3D', icon: <Sparkles size={24} />, desc: 'Gas Cósmico', preset: VOLUMETRIC_PRESETS[3].config, color: '#7c3aed' },
-                            { label: 'Gas Ígneo', icon: <Flame size={24} />, desc: 'Fuego Volumétrico', preset: VOLUMETRIC_PRESETS[4].config, color: '#ea580c' },
-                            { label: 'Aurora 3D', icon: <Waves size={24} />, desc: 'Velo Esmeralda', preset: VOLUMETRIC_PRESETS[5].config, color: '#059669' },
-                          ].map((p, i) => (
+                          {VOLUMETRIC_PRESETS.map((p, i) => (
                             <button key={i} onClick={() => {
                               addObject('VOLUME_CLOUD');
                               setTimeout(() => {
                                 const selId = useStore.getState().selectedObjectId;
                                 if (selId) {
                                   useStore.getState().updateObject(selId, {
-                                    name: `${p.label} ${useStore.getState().project.objects.length}`,
+                                    name: `${p.name} ${useStore.getState().project.objects.length}`,
                                     isVolumetric: true,
-                                    volumetric: p.preset,
-                                    color: p.preset.color || p.color,
-                                    parameters: { isVolumetric: true, volumetric: p.preset }
+                                    volumetric: p.config,
+                                    color: p.config.color || p.color,
+                                    parameters: { isVolumetric: true, volumetric: p.config }
                                   });
                                   useStore.getState().saveHistory();
                                 }
                               }, 20);
                               setShowMainCreate(false);
                             }}
-                              className="flex items-center gap-3 p-3 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-zinc-500 transition-all group cursor-pointer text-left">
-                              <div className="text-white drop-shadow-md" style={{ color: p.color }}>{p.icon}</div>
-                              <div>
-                                <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-white leading-tight">{p.label}</span>
-                                <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300">{p.desc}</span>
+                              className="flex items-center gap-3 p-3 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-amber-500/50 transition-all group cursor-pointer text-left">
+                              <div className="text-2xl drop-shadow-md flex-shrink-0">{p.icon}</div>
+                              <div className="min-w-0">
+                                <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-white leading-tight truncate">{p.name}</span>
+                                <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300 line-clamp-1">{p.desc}</span>
                               </div>
                             </button>
                           ))}
@@ -1431,11 +1533,12 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   {/* Tab strip */}
-                  <div className="grid grid-cols-4 border-b border-zinc-800">
+                  <div className="grid grid-cols-5 border-b border-zinc-800">
                     {([
                       {id:'seleccion', label:'Selección', icon:'🖱️'},
                       {id:'transformar',label:'Transformar',icon:'📐'},
                       {id:'modificar',  label:'Modificar', icon:'🔨'},
+                      {id:'malla',      label:'Malla/Opt',  icon:'🕸️'},
                       {id:'acciones',   label:'Acciones',  icon:'⚡'},
                     ] as const).map(tab=>(
                       <button key={tab.id} onClick={()=>setEditTab(tab.id)}
@@ -1691,6 +1794,16 @@ export const Toolbar: React.FC = () => {
                           )}
                         </div>
                       </>
+                    )}
+
+                    {/* ════ MALLA / OPTIMIZACIÓN ════ */}
+                    {editTab==='malla'&&(
+                      <MeshTab
+                        selectedObject={selectedObject}
+                        onModify={(v, f) => {
+                          if (selectedObjectId) useStore.getState().updateObject(selectedObjectId, { vertices: v, faces: f });
+                        }}
+                      />
                     )}
 
                     {/* ════ ACCIONES ════ */}
@@ -2047,6 +2160,19 @@ export const Toolbar: React.FC = () => {
                     {moveReferenceMode ? 'Moviendo...' : 'Mover'}
                   </button>
                 </div>
+
+                {/* Botón directo a Tallado Volumétrico desde 3 Bocetos */}
+                <button
+                  onClick={() => {
+                    setShowRef(false);
+                    useStore.getState().openBlueprintModal();
+                  }}
+                  className="w-full py-1.5 px-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow cursor-pointer"
+                  title="Tallado automático 3D combinando 3 vistas (Frontal, Superior, Lateral)"
+                >
+                  <Sparkles size={11} className="text-amber-300"/>
+                  <span>Modelar 3D desde 3 Vistas</span>
+                </button>
                 {(['top','bottom','front','back','left','right'] as const).map(view=>{
                   const ref=project.references?.[view];
                   const label={top:'Superior',bottom:'Inferior',front:'Frontal',back:'Trasera',left:'Izquierda',right:'Derecha'}[view];
@@ -2132,12 +2258,13 @@ export const Toolbar: React.FC = () => {
         {/* ── Derecha ── */}
         <div className={`flex items-center gap-1.5 flex-shrink-0 ml-2 ${isFloating?'flex-wrap justify-center':'flex-nowrap'}`}>
           {/* ── Vista ── */}
-          <Dropdown label="Vista" icon={<Layers3 size={14}/>} isOpen={showView} setIsOpen={setShowView} containerRef={viewRef} width={160}>
+          <Dropdown label="Vista" icon={<Layers3 size={14}/>} isOpen={showView} setIsOpen={setShowView} containerRef={viewRef} width={175}>
             <button onClick={()=>{setMaximizedViewport(maximizedViewport === null ? 'TOP' : null);setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Layers3 size={14}/> {maximizedViewport === null ? '1 Vista' : '4 Vistas'}</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setViewMode('SOLID');setGlobalOpacity(1);setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='SOLID'&&globalOpacity===1?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Box size={14}/> Sólido</button>
             <button onClick={()=>{setViewMode('TEXTURED');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='TEXTURED'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><ImageIcon size={14}/> Texturas</button>
             <button onClick={()=>{setViewMode('WIREFRAME');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='WIREFRAME'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Grid size={14}/> Malla</button>
+            <button onClick={()=>{setViewMode('FACES_VERTICES');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='FACES_VERTICES'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-cyan-400"/> Caras + Vértices</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setShowOpacity(true);setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Layers size={14}/> Transparencia</button>
             <button onClick={()=>{handleFullscreen();setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Maximize2 size={14}/> Pantalla Completa</button>
@@ -2203,7 +2330,14 @@ export const Toolbar: React.FC = () => {
         {/* Render Modal */}
       {showRender && <RenderModal onClose={() => setShowRender(false)} />}
       {showCodeExporter && <CodeExporterModal isOpen={showCodeExporter} onClose={() => setShowCodeExporter(false)} />}
+      <WireframeModal isOpen={showWireframeModal} onClose={() => setShowWireframeModal(false)} />
       <KeyboardShortcutsModal isOpen={showShortcutsModal} onClose={() => setShowShortcutsModal(false)} />
+      <SaveProjectModal
+        isOpen={showSaveModal}
+        mode={saveModalMode}
+        onClose={() => setShowSaveModal(false)}
+        onSuccessNotification={(msg) => showToast(msg)}
+      />
       <ConfirmModal
         isOpen={showResetModal}
         onClose={() => setShowResetModal(false)}
@@ -2214,6 +2348,21 @@ export const Toolbar: React.FC = () => {
         cancelLabel="Cancelar"
         isDanger={true}
       />
+
+      {/* Floating Save/Action Toast */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -15, scale: 0.95 }}
+            className="fixed top-14 left-1/2 -translate-x-1/2 z-[999999] bg-zinc-900/95 border border-indigo-500/50 shadow-2xl backdrop-blur-md px-4 py-2.5 rounded-xl text-white text-xs font-semibold flex items-center gap-2.5 text-center pointer-events-none"
+          >
+            <div className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            <span>{toastMessage}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Tooltip */}
         {tooltip&&(

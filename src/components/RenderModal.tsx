@@ -22,6 +22,8 @@ import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUti
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { createPBRMaterial, injectSeamlessDisplacement } from '../utils/materialUtils';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
+import { createParallaxMaterial } from '../utils/ParallaxMaterial';
+import { createRaymarchedCloudMaterial } from '../utils/volumetricRaymarch';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 
 interface RenderModalProps { onClose: () => void; }
@@ -136,7 +138,7 @@ const blendShader = {
   `,
 };
 
-// Shader para aplicar Tone Mapping y Gamma/sRGB al mostrar el buffer acumulado en pantalla
+// Shader para aplicar Tone Mapping al mostrar el buffer acumulado en pantalla
 const displayShader = {
   uniforms: {
     tTexture: { value: null as THREE.Texture | null },
@@ -164,27 +166,16 @@ const displayShader = {
       return clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0.0, 1.0);
     }
 
-    vec3 linearToSRGB(vec3 color) {
-      vec3 sRGBLo = color * 12.92;
-      vec3 sRGBHi = 1.055 * pow(max(color, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
-      vec3 isLo = step(color, vec3(0.0031308));
-      return mix(sRGBHi, sRGBLo, isLo);
-    }
-
     void main() {
       vec4 texColor = texture2D(tTexture, vUv);
       vec3 mapped = ACESFilmicToneMapping(texColor.rgb);
-      mapped = linearToSRGB(mapped);
       gl_FragColor = vec4(mapped, texColor.a);
     }
   `,
 };
 
-/** Sincroniza e inyecta la iluminación exacta del visor interactivo en la escena de renderizado */
+/** Sincroniza e inyecta la iluminación exacta del visor interactivo o rig de estudio en la escena */
 function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
-  // Nota de diseño: En el "Estudio de Renderizado Profesional" se desactivan las luces por defecto de edición.
-  // El renderizador final usa únicamente las luces reales (focos, paneles, HDRI) colocadas a mano por el usuario.
-
   const visibleLights = projectLights ? projectLights.filter((l: any) => l.visible) : [];
 
   if (visibleLights.length > 0) {
@@ -246,7 +237,8 @@ function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
       light.castShadow = lData.castShadow ?? true;
       const l = light as any;
       if (l.shadow) {
-        l.shadow.bias = -0.0005;
+        l.shadow.bias = -0.0001;
+        l.shadow.normalBias = 0.05;
         l.shadow.mapSize.set(2048, 2048);
         if (light instanceof THREE.DirectionalLight) {
           l.shadow.camera.left = -20;
@@ -263,6 +255,30 @@ function setupProjectLightsInScene(scene: THREE.Scene, projectLights: any[]) {
 
       scene.add(light);
     });
+  } else {
+    // Si el usuario no ha añadido luces manuales, inyectar Rig de Estudio PBR de 3 Puntos
+    // idéntico al Editor de Materiales para conseguir reflejos, brillos y volumen fotorealista
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
+    ambientLight.name = 'editorAmbientLight';
+    scene.add(ambientLight);
+
+    const keyLight = new THREE.DirectionalLight(0xfffaf0, 2.2);
+    keyLight.name = 'editorDirectionalLight';
+    keyLight.position.set(4, 5, 4);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.set(2048, 2048);
+    keyLight.shadow.bias = -0.0001;
+    keyLight.shadow.normalBias = 0.05;
+    keyLight.shadow.radius = 2.5;
+    scene.add(keyLight);
+
+    const fillLight = new THREE.DirectionalLight(0xd8e4fc, 0.85);
+    fillLight.position.set(-4, 2, -2);
+    scene.add(fillLight);
+
+    const rimLight = new THREE.DirectionalLight(0xffffff, 1.3);
+    rimLight.position.set(0, 4, -4);
+    scene.add(rimLight);
   }
 }
 
@@ -506,7 +522,31 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         };
       }
 
-      // Crear el material PBR unificado con las mismas reglas que el Viewport
+      // 1. Detectar si el objeto o su material es Volumétrico 3D (Nube, Fuego, Humo, Plasma)
+      const isVolumetricObj = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || obj.parameters?.isVolumetric || finalMData.isVolumetric || finalMData.volumetric?.enabled;
+      if (isVolumetricObj) {
+        const volCfg = {
+          ...(obj.parameters?.volumetric || {}),
+          ...(obj.volumetric || {}),
+          ...(finalMData.volumetric || {}),
+          color: finalMData.color || obj.color || '#ffffff',
+        };
+        const volMat = createRaymarchedCloudMaterial(volCfg);
+        volMat.transparent = true;
+        volMat.depthWrite = false;
+        volMat.side = THREE.DoubleSide;
+        return volMat;
+      }
+
+      // 2. Comprobar si tiene mapeado de relieve Parallax activo
+      if (finalMData.useParallax) {
+        const parallaxMat = createParallaxMaterial(finalMData);
+        await waitForMaterialTextures(parallaxMat);
+        parallaxMat.needsUpdate = true;
+        return parallaxMat;
+      }
+
+      // 3. Crear el material PBR unificado con las mismas reglas del Editor
       const mat = createPBRMaterial(finalMData);
 
       // Aplicar mapeado Triplanar solo si la proyección es explícitamente TRIPLANAR o tiene mezcla triplanar
@@ -582,11 +622,17 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          const geo = createBaseGeometry(obj, mData);
+          let geo: THREE.BufferGeometry;
+          const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || mData.isVolumetric || mData.volumetric?.enabled;
+          if (isVol) {
+            geo = new THREE.BoxGeometry(1, 1, 1);
+          } else {
+            geo = createBaseGeometry(obj, mData);
+          }
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
-          m.castShadow = true;
-          m.receiveShadow = true;
+          m.castShadow = !isVol;
+          m.receiveShadow = !isVol;
           mesh = m;
         } catch (e) {
           console.error(`[Render] Error al crear geometría sincronizada para ${obj.name}:`, e);
@@ -610,12 +656,12 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     // Desactivar Tone Mapping en el renderer para no aplicar doble o triple mapeo en los shaders
     renderer.toneMapping = THREE.NoToneMapping;
 
-    // ── Pipeline de Acumulación Temporal (Super-Sampling & Soft Shadows) ───
+    // ── Pipeline de Acumulación Temporal (Super-Sampling & Soft Shadows en HDR) ───
     const renderTargetParams: THREE.RenderTargetOptions = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
+      type: THREE.HalfFloatType,
     };
 
     let rtCurrent = new THREE.WebGLRenderTarget(w, h, renderTargetParams);
@@ -667,6 +713,34 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const jitterX = (halton(currentSample, 2) - 0.5) / w;
       const jitterY = (halton(currentSample, 3) - 0.5) / h;
       camera.setViewOffset(w, h, jitterX * w, jitterY * h, w, h);
+
+      // Actualizar uniforms de volumétricos y shaders en la escena antes del render
+      const nowSec = performance.now() * 0.001;
+      const mainLight = (scene.getObjectByName('editorDirectionalLight') as THREE.DirectionalLight) || (scene.children.find((c: any) => c.isDirectionalLight) as THREE.DirectionalLight);
+      const lightPos = mainLight ? mainLight.position : new THREE.Vector3(4, 5, 4);
+
+      scene.traverse((child: any) => {
+        if (child.isMesh && child.material) {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((mat: any) => {
+            if (mat && mat.uniforms) {
+              if (mat.uniforms.uCameraPos) {
+                mat.uniforms.uCameraPos.value.copy(camera.position);
+              }
+              if (mat.uniforms.uTime) {
+                mat.uniforms.uTime.value = currentTime || nowSec;
+              }
+              if (mat.uniforms.uLightPosition) {
+                mat.uniforms.uLightPosition.value.copy(lightPos);
+              }
+              if (mat.uniforms.uModelInverse) {
+                child.updateMatrixWorld(true);
+                mat.uniforms.uModelInverse.value.copy(child.matrixWorld).invert();
+              }
+            }
+          });
+        }
+      });
 
       // Renderizar la vista jittered a rtCurrent
       renderer.setRenderTarget(rtCurrent);
@@ -817,7 +891,31 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         };
       }
 
-      // Crear el material PBR unificado con las mismas reglas que el Viewport
+      // 1. Detectar si el objeto o su material es Volumétrico 3D (Nube, Fuego, Humo, Plasma)
+      const isVolumetricObj = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || obj.parameters?.isVolumetric || finalMData.isVolumetric || finalMData.volumetric?.enabled;
+      if (isVolumetricObj) {
+        const volCfg = {
+          ...(obj.parameters?.volumetric || {}),
+          ...(obj.volumetric || {}),
+          ...(finalMData.volumetric || {}),
+          color: finalMData.color || obj.color || '#ffffff',
+        };
+        const volMat = createRaymarchedCloudMaterial(volCfg);
+        volMat.transparent = true;
+        volMat.depthWrite = false;
+        volMat.side = THREE.DoubleSide;
+        return volMat;
+      }
+
+      // 2. Comprobar si tiene mapeado de relieve Parallax activo
+      if (finalMData.useParallax) {
+        const parallaxMat = createParallaxMaterial(finalMData);
+        await waitForMaterialTextures(parallaxMat);
+        parallaxMat.needsUpdate = true;
+        return parallaxMat;
+      }
+
+      // 3. Crear el material PBR unificado con las mismas reglas que el Viewport
       const mat = createPBRMaterial(finalMData);
 
       // Aplicar mapeado Triplanar si corresponde
@@ -904,11 +1002,17 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
           const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
 
-          const geo = createBaseGeometry(obj, mData);
+          let geo: THREE.BufferGeometry;
+          const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || mData.isVolumetric || mData.volumetric?.enabled;
+          if (isVol) {
+            geo = new THREE.BoxGeometry(1, 1, 1);
+          } else {
+            geo = createBaseGeometry(obj, mData);
+          }
           const mat = await loadMaterial(obj);
           const m = new THREE.Mesh(geo, mat);
-          m.castShadow = true;
-          m.receiveShadow = true;
+          m.castShadow = !isVol;
+          m.receiveShadow = !isVol;
           mesh = m;
         } catch (e) {
           console.error(`[Render Video] Error al crear geometría sincronizada para ${obj.name}:`, e);
@@ -986,6 +1090,33 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         camera.fov = evalCam.fov;
         camera.updateProjectionMatrix();
       }
+
+      // Actualizar uniforms de volumétricos y shaders en la escena cuadro a cuadro
+      const mainLight = (scene.getObjectByName('editorDirectionalLight') as THREE.DirectionalLight) || (scene.children.find((c: any) => c.isDirectionalLight) as THREE.DirectionalLight);
+      const lightPos = mainLight ? mainLight.position : new THREE.Vector3(4, 5, 4);
+
+      scene.traverse((child: any) => {
+        if (child.isMesh && child.material) {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach((mat: any) => {
+            if (mat && mat.uniforms) {
+              if (mat.uniforms.uCameraPos) {
+                mat.uniforms.uCameraPos.value.copy(camera.position);
+              }
+              if (mat.uniforms.uTime) {
+                mat.uniforms.uTime.value = frameTime;
+              }
+              if (mat.uniforms.uLightPosition) {
+                mat.uniforms.uLightPosition.value.copy(lightPos);
+              }
+              if (mat.uniforms.uModelInverse) {
+                child.updateMatrixWorld(true);
+                mat.uniforms.uModelInverse.value.copy(child.matrixWorld).invert();
+              }
+            }
+          });
+        }
+      });
 
       scene.updateMatrixWorld(true);
 

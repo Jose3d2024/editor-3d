@@ -195,23 +195,47 @@ export const ShapesPanel: React.FC = () => {
                 color="#0284c7" 
                 desc="Algodonosa Blanca"
                 icon={<Cloud size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[0].config}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'cumulus')?.config || VOLUMETRIC_PRESETS[0].config}
               />
               <ShapeItem 
                 type="VOLUME_CLOUD" 
                 label="Tormenta 3D" 
-                color="#334155" 
-                desc="Densa y Oscura"
+                color="#475569" 
+                desc="Distintos Grises"
                 icon={<Zap size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[1].config}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'storm')?.config}
               />
               <ShapeItem 
                 type="VOLUME_CLOUD" 
-                label="Humo Denso" 
-                color="#475569" 
-                desc="Humo Industrial"
+                label="Humo Definido" 
+                color="#64748b" 
+                desc="Pluma Remolino"
                 icon={<Wind size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[2].config}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'smoke_dense')?.config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Explosión Fuego" 
+                color="#ef4444" 
+                desc="Detonación 3D"
+                icon={<Flame size={22} className="text-orange-500" />}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'explosion_fire')?.config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Fuego Llama" 
+                color="#ea580c" 
+                desc="Fuego Volumétrico"
+                icon={<Flame size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'fire_volumetric')?.config}
+              />
+              <ShapeItem 
+                type="VOLUME_CLOUD" 
+                label="Hielo Cristal" 
+                color="#0284c7" 
+                desc="Núcleo Escarcha"
+                icon={<Sparkles size={22} />}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'ice_crystal')?.config}
               />
               <ShapeItem 
                 type="VOLUME_CLOUD" 
@@ -219,15 +243,7 @@ export const ShapesPanel: React.FC = () => {
                 color="#7c3aed" 
                 desc="Gas Cósmico"
                 icon={<Sparkles size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[3].config}
-              />
-              <ShapeItem 
-                type="VOLUME_CLOUD" 
-                label="Gas Ígneo" 
-                color="#ea580c" 
-                desc="Fuego Volumétrico"
-                icon={<Flame size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[4].config}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'nebula_cosmic')?.config}
               />
               <ShapeItem 
                 type="VOLUME_CLOUD" 
@@ -235,7 +251,7 @@ export const ShapesPanel: React.FC = () => {
                 color="#059669" 
                 desc="Velo Esmeralda"
                 icon={<Waves size={22} />}
-                customVolumetric={VOLUMETRIC_PRESETS[5].config}
+                customVolumetric={VOLUMETRIC_PRESETS.find(p => p.id === 'aurora_borealis')?.config}
               />
             </div>
           </div>

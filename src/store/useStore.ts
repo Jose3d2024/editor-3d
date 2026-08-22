@@ -5,10 +5,13 @@ import { AppState, Project, CSGObject, CSGOperation, PrimitiveType, ViewportType
 import { generatePrimitive } from '../utils/geometry';
 import { createBaseGeometry } from '../utils/csg';
 import { applyBooleanOperation, smoothMesh, roundAnglesMesh, subdivideMesh, optimizeMesh, repairMesh, fillHoles, capSelectedFaces } from '../utils/modifiers';
+import { bevelMeshAdvanced } from '../utils/bevel';
 import { simplifyMesh, convertImportedToCSG } from '../utils/modifiers_advanced';
+import { applyNoiseToMesh, type NoiseDeformConfig } from '../utils/meshNoise';
 import { executeUnifiedBoolean, BooleanExecuteOptions, BooleanResult, UnifiedBooleanOp } from '../utils/booleanOperations';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
 import { DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
+import { convertToWireframeModel, createWireframeTubesGeometry, extractUniqueEdges, type WireframeOptions } from '../utils/wireframeMesh';
 import {
   createDefaultNurbsCurve,
   createDefaultNurbsCircle,
@@ -312,12 +315,21 @@ interface Store extends AppState {
   booleanModalToolId: string | null;
   openBooleanModal: (targetId?: string | null, toolId?: string | null) => void;
   closeBooleanModal: () => void;
+
+  isBlueprintModalOpen: boolean;
+  openBlueprintModal: () => void;
+  closeBlueprintModal: () => void;
   executeExplicitBoolean: (options: BooleanExecuteOptions) => Promise<BooleanResult>;
   applyBoolean: (op?: CSGOperation) => Promise<void>;
   smoothObject: (id: string, factor: number, iterations?: number) => Promise<void>;
   roundAnglesObject: (id: string, radius?: number, segments?: number, angleThresholdDeg?: number) => Promise<void>;
   subdivideObject: (id: string) => Promise<void>;
+  applyNoiseObject: (id: string, config: NoiseDeformConfig) => Promise<void>;
   optimizeObject: (id: string, ratio: number, selectedMeshes?: string[]) => Promise<void>;
+  regularizeObject: (id: string, strength?: number, iterations?: number, featureAngleDeg?: number) => Promise<void>;
+  isotropicRemeshObject: (id: string, targetEdgeLength?: number, iterations?: number) => Promise<void>;
+  dissolveCoplanarObject: (id: string, angleToleranceDeg?: number) => Promise<void>;
+  cleanIslandsObject: (id: string, minRatio?: number) => Promise<void>;
   offsetObject: (id: string, distance: number) => Promise<void>;
   repairObject: (id: string, tolerance?: number) => Promise<void>;
   weldObject: (id: string, tolerance?: number) => Promise<void>;
@@ -347,6 +359,42 @@ interface Store extends AppState {
   setNurbsDegree: (id: string, degreeU: number, degreeV?: number) => void;
   setNurbsResolution: (id: string, resU: number, resV?: number) => void;
   setNurbsControlPointWeight: (id: string, uIndex: number, vIndex: number | undefined, weight: number) => void;
+
+  // Vertex & Shape Tools
+  weldShapeVertices: (id: string, vertexIndices?: number[], tolerance?: number) => { success: boolean; message: string };
+  weldSelectedVertices: (id: string, vertexIndices?: number[], tolerance?: number) => Promise<{ success: boolean; message: string }>;
+  subdivideShapeSegment: (id: string, vertexIndex1?: number, vertexIndex2?: number) => { success: boolean; message: string };
+  insertShapeVertexAtPoint: (id: string, point: V3, segmentIndex?: number) => { success: boolean; message: string };
+  connectVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
+  createFaceFromVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
+  extrudeSelectedVertices: (id: string, vertexIndices?: number[], offset?: V3) => { success: boolean; message: string };
+  deleteSelectedVertices: (id: string, vertexIndices?: number[]) => { success: boolean; message: string };
+  symmetrizeVertices: (
+    id: string,
+    vertexIndices?: number[],
+    options?: {
+      axis?: 'x' | 'y' | 'z';
+      direction?: '+to-' | '-to+' | 'selected_to_opposite' | 'both';
+      centerSnap?: boolean;
+      snapThreshold?: number;
+      searchThreshold?: number;
+    }
+  ) => { success: boolean; message: string; modifiedCount?: number };
+  toggleShapeClosed: (id: string) => void;
+  reverseShapeDirection: (id: string) => void;
+
+  // Face & Edge Tools
+  deleteSelectedFaces: (id: string, faceIndices?: number[]) => { success: boolean; message: string };
+  removeAllFaces: (id: string) => { success: boolean; message: string };
+  convertToWireframe: (id: string, options?: WireframeOptions) => { success: boolean; message: string; newObjectId?: string };
+  insetFaces: (id: string, faceIndices?: number[], amount?: number) => { success: boolean; message: string };
+  flipSelectedFaceNormals: (id: string, faceIndices?: number[]) => { success: boolean; message: string };
+  deleteSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
+  dissolveSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
+  subdivideSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
+  insertVertexOnEdge: (id: string, edgeIndices?: number[], point?: V3) => { success: boolean; message: string };
+  bridgeSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
+  bevelSelectedEdges: (id: string, edgeIndices?: number[], width?: number, segments?: number) => { success: boolean; message: string };
 }
 
 function solidExtrudeMesh(
@@ -437,8 +485,14 @@ export const useStore = create<Store>()((set, get) => ({
   transformMode: 'universal',
   transformSpace: 'world',
   drawMode: null,
-  moveReferenceMode: false,
   drawColor: '#ffffff',
+  orthoDrawMode: false,
+  setOrthoDrawMode: (enabled) => set({ orthoDrawMode: enabled }),
+  drawLockAxis: 'FREE',
+  setDrawLockAxis: (axis) => set({ drawLockAxis: axis }),
+  insertVertexMode: false,
+  setInsertVertexMode: (enabled) => set({ insertVertexMode: enabled }),
+  moveReferenceMode: false,
   history: [DEFAULT_PROJECT],
   historyIndex: 0,
   activeViewport: 'PERSPECTIVE',
@@ -499,6 +553,10 @@ export const useStore = create<Store>()((set, get) => ({
   booleanModalToolId: null,
   openBooleanModal: (targetId, toolId) => set({ isBooleanModalOpen: true, booleanModalTargetId: targetId || null, booleanModalToolId: toolId || null }),
   closeBooleanModal: () => set({ isBooleanModalOpen: false, booleanModalTargetId: null, booleanModalToolId: null }),
+
+  isBlueprintModalOpen: false,
+  openBlueprintModal: () => set({ isBlueprintModalOpen: true }),
+  closeBlueprintModal: () => set({ isBlueprintModalOpen: false }),
 
   resetProject: () => {
     const freshProject: Project = JSON.parse(JSON.stringify(DEFAULT_PROJECT));
@@ -886,14 +944,44 @@ export const useStore = create<Store>()((set, get) => ({
   setLastCameraState: (cameraState) => set({ lastCameraState: cameraState }),
 
   undo: () => {
-    const { historyIndex, history } = get();
-    if (historyIndex > 0)
-      set({ historyIndex: historyIndex - 1, project: JSON.parse(JSON.stringify(history[historyIndex - 1])) });
+    const { historyIndex, history, selectedObjectId } = get();
+    if (historyIndex > 0) {
+      const prevProject = JSON.parse(JSON.stringify(history[historyIndex - 1]));
+      const selObj = selectedObjectId ? prevProject.objects.find((o: any) => o.id === selectedObjectId) : null;
+      const vCount = selObj?.vertices?.length ?? 0;
+      const fCount = selObj?.faces?.length ?? 0;
+      const curVerts = get().selectedVertexIndices;
+      const curFaces = get().selectedFaceIndices;
+      const curEdges = get().selectedEdgeIndices;
+
+      set({
+        historyIndex: historyIndex - 1,
+        project: prevProject,
+        selectedVertexIndices: curVerts.filter(i => i < 10000 ? i < vCount : true),
+        selectedFaceIndices: curFaces.filter(i => i < fCount),
+        selectedEdgeIndices: curEdges.filter(i => i < vCount)
+      });
+    }
   },
   redo: () => {
-    const { historyIndex, history } = get();
-    if (historyIndex < history.length - 1)
-      set({ historyIndex: historyIndex + 1, project: JSON.parse(JSON.stringify(history[historyIndex + 1])) });
+    const { historyIndex, history, selectedObjectId } = get();
+    if (historyIndex < history.length - 1) {
+      const nextProject = JSON.parse(JSON.stringify(history[historyIndex + 1]));
+      const selObj = selectedObjectId ? nextProject.objects.find((o: any) => o.id === selectedObjectId) : null;
+      const vCount = selObj?.vertices?.length ?? 0;
+      const fCount = selObj?.faces?.length ?? 0;
+      const curVerts = get().selectedVertexIndices;
+      const curFaces = get().selectedFaceIndices;
+      const curEdges = get().selectedEdgeIndices;
+
+      set({
+        historyIndex: historyIndex + 1,
+        project: nextProject,
+        selectedVertexIndices: curVerts.filter(i => i < 10000 ? i < vCount : true),
+        selectedFaceIndices: curFaces.filter(i => i < fCount),
+        selectedEdgeIndices: curEdges.filter(i => i < vCount)
+      });
+    }
   },
 
   // ── Add object ────────────────────────────────────────────────────────────
@@ -1449,7 +1537,7 @@ export const useStore = create<Store>()((set, get) => ({
       });
 
       const isBezier = obj.parameters.shapeType === 'bezier' && !!obj.bezierHandles?.length;
-      const isClosed = obj.parameters.closed ?? false;
+      let isClosed = obj.parameters.closed ?? false;
       const segs = Math.max(4, obj.parameters.segments ?? 20);
 
       let profile: V3[];
@@ -1460,13 +1548,16 @@ export const useStore = create<Store>()((set, get) => ({
         profile = [...rawVerts];
       }
 
-      // Remove coincident first/last
-      if (profile.length > 1) {
+      // Check if start and end are coincident or nearly coincident
+      if (profile.length > 2) {
         const first = profile[0], last = profile[profile.length - 1];
         const d = Math.sqrt(
           (first[0] - last[0]) ** 2 + (first[1] - last[1]) ** 2 + (first[2] - last[2]) ** 2,
         );
-        if (d < 0.0001) profile.pop();
+        if (d < 0.25) {
+          isClosed = true;
+          if (d < 0.0001) profile.pop();
+        }
       }
 
       const n = profile.length;
@@ -1484,22 +1575,49 @@ export const useStore = create<Store>()((set, get) => ({
       faces = [];
       const isNegative = depth < 0;
 
-      for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        if (isNegative) {
-          faces.push({ indices: [i, i + n, j + n, j] });
-        } else {
-          faces.push({ indices: [i, j, j + n, i + n] });
+      if (isClosed && n >= 3) {
+        // Closed solid volume with side quads + triangulated end caps
+        for (let i = 0; i < n; i++) {
+          const j = (i + 1) % n;
+          if (isNegative) {
+            faces.push({ indices: [i, i + n, j + n, j] });
+          } else {
+            faces.push({ indices: [i, j, j + n, i + n] });
+          }
         }
-      }
 
-      if (n >= 3) {
-        if (isNegative) {
-          faces.push({ indices: Array.from({ length: n }, (_, k) => k) });
-          faces.push({ indices: Array.from({ length: n }, (_, k) => 2 * n - 1 - k) });
+        // Create clean N-gon planar end caps without diagonal internal wireframe lines
+        const uIdx = axis === 'x' ? 1 : 0;
+        const vIdx = axis === 'x' ? 2 : (axis === 'y' ? 2 : 1);
+        const pts2D = profile.map(p => new THREE.Vector2(p[uIdx], p[vIdx]));
+        const isCCW = !THREE.ShapeUtils.isClockWise(pts2D);
+
+        const cap1Indices: number[] = [];
+        const cap2Indices: number[] = [];
+
+        if ((!isCCW && !isNegative) || (isCCW && isNegative)) {
+          for (let k = 0; k < n; k++) {
+            cap1Indices.push(n - 1 - k);
+            cap2Indices.push(k + n);
+          }
         } else {
-          faces.push({ indices: Array.from({ length: n }, (_, k) => n - 1 - k) });
-          faces.push({ indices: Array.from({ length: n }, (_, k) => k + n) });
+          for (let k = 0; k < n; k++) {
+            cap1Indices.push(k);
+            cap2Indices.push(2 * n - 1 - k);
+          }
+        }
+
+        faces.push({ indices: cap1Indices });
+        faces.push({ indices: cap2Indices });
+      } else {
+        // Open line / polyline: extrude as a 3D curved surface / strip
+        for (let i = 0; i < n - 1; i++) {
+          const j = i + 1;
+          if (isNegative) {
+            faces.push({ indices: [i, i + n, j + n, j] });
+          } else {
+            faces.push({ indices: [i, j, j + n, i + n] });
+          }
         }
       }
 
@@ -1549,6 +1667,8 @@ export const useStore = create<Store>()((set, get) => ({
       bezierHandles: undefined,
       parameters: {
         ...obj.parameters,
+        shapeType: undefined,
+        isCameraPath: false,
         extrusionDepth:         depth,
         extrusionAxis:          axis,
         profileVertices:        profilePoints,
@@ -2005,6 +2125,91 @@ export const useStore = create<Store>()((set, get) => ({
     get().saveHistory();
   },
 
+  applyNoiseObject: async (id, config) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Deformador de Malla por Ruido',
+        subtitle: `Aplicando ruido 3D ${config.noiseType}...`,
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 30));
+
+    try {
+      if (obj.meshData) {
+        obj = await convertImportedToCSG(obj);
+      }
+
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+
+      const result = applyNoiseToMesh(
+        { vertices: obj.vertices!, faces: obj.faces || [] },
+        config
+      );
+
+      const finalVerts = result.vertices.length;
+      const finalFaces = result.faces.length;
+
+      set({
+        project: {
+          ...get().project,
+          objects: get().project.objects.map(o =>
+            o.id === id
+              ? {
+                  ...o,
+                  type: 'MESH',
+                  parameters: {},
+                  meshData: undefined,
+                  vertices: result.vertices,
+                  faces: result.faces,
+                  vertexOffsets: {},
+                  smoothShading: true,
+                  stats: { vertices: finalVerts, faces: finalFaces },
+                }
+              : o
+          ),
+        },
+      });
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing
+          ? {
+              ...s.meshProcessing,
+              progress: 100,
+              subtitle: '¡Geometría deformada y roto el aspecto sintético!',
+              completed: true,
+              finalVertCount: finalVerts,
+              finalFaceCount: finalFaces,
+            }
+          : null,
+      }));
+    } catch (e) {
+      console.error('Error aplicando deformación por ruido a la malla:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
   optimizeObject: async (id, ratio, selectedMeshes) => {
     const { project } = get();
     let obj = project.objects.find(o => o.id === id);
@@ -2065,6 +2270,274 @@ export const useStore = create<Store>()((set, get) => ({
       }));
     } catch (error) {
       console.error('Error optimizando objeto:', error);
+      set({ meshProcessing: null });
+    }
+  },
+
+  regularizeObject: async (id, strength = 0.65, iterations = 3, featureAngleDeg = 40) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Regularización y Relajación Tangencial',
+        subtitle: 'Equilibrando aristas y ángulos de triángulos...',
+        progress: 25,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+      const { regularizeMeshTopology } = await import('../utils/meshUtils');
+      const result = regularizeMeshTopology(obj, { strength, iterations, featureAngleDeg });
+      
+      const updatedObj: CSGObject = {
+        ...obj,
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
+        vertices: result.vertices,
+        faces: result.faces,
+        vertexOffsets: {},
+        smoothShading: true,
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Topología regularizada! (${result.report.join(', ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error regularizando malla:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  isotropicRemeshObject: async (id, targetEdgeLength, iterations = 3) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Remallado Isótropo Uniforme',
+        subtitle: 'Re-muestreando superficie en red poligonal regular...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+      const { isotropicRemesh } = await import('../utils/meshUtils');
+      const result = isotropicRemesh(obj, targetEdgeLength, iterations);
+
+      const updatedObj: CSGObject = {
+        ...obj,
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
+        vertices: result.vertices,
+        faces: result.faces,
+        vertexOffsets: {},
+        smoothShading: true,
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Remallado regular completado! (${result.report.join(', ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error en remallado isótropo:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  dissolveCoplanarObject: async (id, angleToleranceDeg = 4.0) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Disolución de Caras Coplanares',
+        subtitle: 'Fusionando triángulos y simplificando superficies planas...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+      const { dissolveCoplanarFaces } = await import('../utils/meshUtils');
+      const result = dissolveCoplanarFaces(obj, angleToleranceDeg);
+
+      const updatedObj: CSGObject = {
+        ...obj,
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
+        vertices: result.vertices,
+        faces: result.faces,
+        vertexOffsets: {},
+        smoothShading: true,
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Fusión coplanar completada! (${result.report.join(' · ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error disolviendo caras coplanares:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  cleanIslandsObject: async (id, minRatio = 0.05) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Limpieza de Ruido e Islas 3D',
+        subtitle: 'Identificando conchas flotantes desconectadas...',
+        progress: 30,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+      const { removeDisconnectedIslands } = await import('../utils/meshUtils');
+      const result = removeDisconnectedIslands(obj, minRatio);
+
+      const updatedObj: CSGObject = {
+        ...obj,
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
+        vertices: result.vertices,
+        faces: result.faces,
+        vertexOffsets: {},
+        smoothShading: true,
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Limpieza de islas 3D finalizada! (${result.report.join(', ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error limpiando islas 3D:', e);
       set({ meshProcessing: null });
     }
   },
@@ -2135,6 +2608,1268 @@ export const useStore = create<Store>()((set, get) => ({
 
   weldObject: async (id, tolerance = 0.001) => {
     return get().repairObject(id, tolerance);
+  },
+
+  weldShapeVertices: (id: string, vertexIndices?: number[], tolerance: number = 0.15) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices || obj.vertices.length < 2) {
+      return { success: false, message: 'La forma no tiene suficientes vértices.' };
+    }
+
+    const rawVerts: V3[] = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+
+    const isBezier = obj.parameters.shapeType === 'bezier';
+    let oldHandles = obj.bezierHandles ? [...obj.bezierHandles] : [];
+    let isClosed = !!obj.parameters.closed;
+
+    let newVerts: V3[] = [];
+    let newHandles: BezierHandle[] = [];
+
+    if (vertexIndices && vertexIndices.length >= 2) {
+      const selSet = new Set(vertexIndices);
+      const selVerts = vertexIndices.map(idx => rawVerts[idx]).filter(Boolean);
+      const centroid: V3 = [
+        selVerts.reduce((sum, v) => sum + v[0], 0) / selVerts.length,
+        selVerts.reduce((sum, v) => sum + v[1], 0) / selVerts.length,
+        selVerts.reduce((sum, v) => sum + v[2], 0) / selVerts.length,
+      ];
+
+      const includesStart = selSet.has(0);
+      const includesEnd = selSet.has(rawVerts.length - 1);
+      if (includesStart && includesEnd && !isClosed) {
+        isClosed = true;
+      }
+
+      let mergedPlaced = false;
+      let targetNewIdx = 0;
+      for (let i = 0; i < rawVerts.length; i++) {
+        if (selSet.has(i)) {
+          if (!mergedPlaced) {
+            targetNewIdx = newVerts.length;
+            newVerts.push(centroid);
+            newHandles.push(oldHandles[i] || { out: [0,0,0], in: [0,0,0], broken: false });
+            mergedPlaced = true;
+          }
+        } else {
+          newVerts.push(rawVerts[i]);
+          newHandles.push(oldHandles[i] || { out: [0,0,0], in: [0,0,0], broken: false });
+        }
+      }
+
+      if (isBezier) {
+        newHandles = autoSmoothBezierHandles(newVerts, newHandles, isClosed);
+      }
+
+      get().updateObject(id, {
+        vertices: newVerts,
+        bezierHandles: isBezier && newHandles.length > 0 ? newHandles : undefined,
+        vertexOffsets: {},
+        parameters: { ...obj.parameters, closed: isClosed },
+      });
+      set({ selectedVertexIndices: [targetNewIdx] });
+      get().saveHistory();
+      return { success: true, message: `Se soldaron ${vertexIndices.length} vértices en uno solo.` };
+    } else {
+      let mergedCount = 0;
+      const n = rawVerts.length;
+      const dStartEnd = Math.hypot(
+        rawVerts[0][0] - rawVerts[n - 1][0],
+        rawVerts[0][1] - rawVerts[n - 1][1],
+        rawVerts[0][2] - rawVerts[n - 1][2]
+      );
+      if (!isClosed && dStartEnd <= tolerance) {
+        isClosed = true;
+        const avgEnd: V3 = [
+          (rawVerts[0][0] + rawVerts[n - 1][0]) / 2,
+          (rawVerts[0][1] + rawVerts[n - 1][1]) / 2,
+          (rawVerts[0][2] + rawVerts[n - 1][2]) / 2,
+        ];
+        rawVerts[0] = avgEnd;
+        rawVerts.pop();
+        if (oldHandles.length > 0) oldHandles.pop();
+        mergedCount++;
+      }
+
+      const visited = new Set<number>();
+      for (let i = 0; i < rawVerts.length; i++) {
+        if (visited.has(i)) continue;
+        const cluster = [i];
+        for (let j = i + 1; j < rawVerts.length; j++) {
+          if (visited.has(j)) continue;
+          const d = Math.hypot(
+            rawVerts[i][0] - rawVerts[j][0],
+            rawVerts[i][1] - rawVerts[j][1],
+            rawVerts[i][2] - rawVerts[j][2]
+          );
+          if (d <= tolerance) {
+            cluster.push(j);
+            visited.add(j);
+          }
+        }
+        if (cluster.length > 1) {
+          const cVerts = cluster.map(ci => rawVerts[ci]);
+          const avg: V3 = [
+            cVerts.reduce((sum, v) => sum + v[0], 0) / cVerts.length,
+            cVerts.reduce((sum, v) => sum + v[1], 0) / cVerts.length,
+            cVerts.reduce((sum, v) => sum + v[2], 0) / cVerts.length,
+          ];
+          newVerts.push(avg);
+          newHandles.push(oldHandles[i] || { out: [0,0,0], in: [0,0,0], broken: false });
+          mergedCount += cluster.length - 1;
+        } else {
+          newVerts.push(rawVerts[i]);
+          newHandles.push(oldHandles[i] || { out: [0,0,0], in: [0,0,0], broken: false });
+        }
+      }
+
+      if (isBezier) {
+        newHandles = autoSmoothBezierHandles(newVerts, newHandles, isClosed);
+      }
+
+      get().updateObject(id, {
+        vertices: newVerts,
+        bezierHandles: isBezier && newHandles.length > 0 ? newHandles : undefined,
+        vertexOffsets: {},
+        parameters: { ...obj.parameters, closed: isClosed },
+      });
+      set({ selectedVertexIndices: [] });
+      get().saveHistory();
+      return { success: true, message: `Se soldaron ${mergedCount} vértices cercanos (tolerancia: ${tolerance.toFixed(2)}m). Forma ${isClosed ? 'cerrada' : 'abierta'}.` };
+    }
+  },
+
+  weldSelectedVertices: async (id: string, vertexIndices?: number[], tolerance: number = 0.05) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    if (obj.type === 'SHAPE') {
+      return get().weldShapeVertices(id, vertexIndices, tolerance);
+    }
+
+    if (!vertexIndices || vertexIndices.length < 2) {
+      await get().weldObject(id, tolerance);
+      return { success: true, message: `Vértices cercanos soldados con tolerancia ${tolerance.toFixed(3)}m.` };
+    }
+
+    const rawVerts: V3[] = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+
+    const targetIdx = vertexIndices[0];
+    const selVerts = vertexIndices.map(vi => rawVerts[vi]).filter(Boolean);
+    const centroid: V3 = [
+      selVerts.reduce((sum, v) => sum + v[0], 0) / selVerts.length,
+      selVerts.reduce((sum, v) => sum + v[1], 0) / selVerts.length,
+      selVerts.reduce((sum, v) => sum + v[2], 0) / selVerts.length,
+    ];
+
+    const remap = new Map<number, number>();
+    vertexIndices.forEach(vi => remap.set(vi, targetIdx));
+
+    rawVerts[targetIdx] = centroid;
+
+    const newFaces: MeshFace[] = [];
+    for (const f of obj.faces) {
+      const remapped = f.indices.map(idx => remap.get(idx) ?? idx);
+      const dedup: number[] = [];
+      for (let i = 0; i < remapped.length; i++) {
+        if (remapped[i] !== remapped[(i + 1) % remapped.length]) {
+          dedup.push(remapped[i]);
+        }
+      }
+      if (dedup.length >= 3) {
+        newFaces.push({ ...f, indices: dedup });
+      }
+    }
+
+    get().updateObject(id, {
+      vertices: rawVerts,
+      faces: newFaces,
+      vertexOffsets: {},
+    });
+    set({ selectedVertexIndices: [targetIdx] });
+    get().saveHistory();
+    return { success: true, message: `Se soldaron ${vertexIndices.length} vértices en la malla.` };
+  },
+
+  subdivideShapeSegment: (id: string, vertexIndex1?: number, vertexIndex2?: number) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices || obj.vertices.length < 2) {
+      return { success: false, message: 'La forma no tiene suficientes vértices.' };
+    }
+
+    const rawVerts: V3[] = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+
+    const isBezier = obj.parameters.shapeType === 'bezier';
+    const oldHandles = obj.bezierHandles ? [...obj.bezierHandles] : [];
+    const isClosed = !!obj.parameters.closed;
+    const n = rawVerts.length;
+
+    let splitAfter = 0;
+    const sel = (vertexIndex1 !== undefined ? [vertexIndex1, ...(vertexIndex2 !== undefined ? [vertexIndex2] : [])] : selectedVertexIndices);
+
+    if (sel.length >= 2) {
+      const minI = Math.min(sel[0], sel[1]);
+      const maxI = Math.max(sel[0], sel[1]);
+      if (maxI === minI + 1) {
+        splitAfter = minI;
+      } else if (isClosed && minI === 0 && maxI === n - 1) {
+        splitAfter = n - 1;
+      } else {
+        splitAfter = minI;
+      }
+    } else if (sel.length === 1) {
+      splitAfter = sel[0];
+    } else {
+      splitAfter = 0;
+    }
+
+    const nextIdx = (splitAfter + 1) % n;
+    const v1 = rawVerts[splitAfter];
+    const v2 = rawVerts[nextIdx];
+    const midPoint: V3 = [
+      (v1[0] + v2[0]) / 2,
+      (v1[1] + v2[1]) / 2,
+      (v1[2] + v2[2]) / 2,
+    ];
+
+    const newVerts = [...rawVerts];
+    const newHandles = [...oldHandles];
+
+    const insertIdx = splitAfter + 1;
+    newVerts.splice(insertIdx, 0, midPoint);
+    newHandles.splice(insertIdx, 0, { out: [0,0,0], in: [0,0,0], broken: false });
+
+    let smoothedHandles = newHandles;
+    if (isBezier) {
+      smoothedHandles = autoSmoothBezierHandles(newVerts, newHandles, isClosed);
+    }
+
+    get().updateObject(id, {
+      vertices: newVerts,
+      bezierHandles: isBezier ? smoothedHandles : undefined,
+      vertexOffsets: {},
+    });
+    set({ selectedVertexIndices: [insertIdx] });
+    get().saveHistory();
+    return { success: true, message: `Línea dividida en 2. Nuevo vértice en el centro (índice ${insertIdx}).` };
+  },
+
+  insertShapeVertexAtPoint: (id: string, point: V3, segmentIndex?: number) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) {
+      return { success: false, message: 'Objeto no encontrado.' };
+    }
+
+    const rawVerts: V3[] = obj.vertices.map((v, i) => {
+      const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+
+    const isBezier = obj.parameters.shapeType === 'bezier';
+    const oldHandles = obj.bezierHandles ? [...obj.bezierHandles] : [];
+    const isClosed = !!obj.parameters.closed;
+    const n = rawVerts.length;
+
+    let targetInsertIdx = n;
+    if (segmentIndex !== undefined && segmentIndex >= 0 && segmentIndex < n) {
+      targetInsertIdx = segmentIndex + 1;
+    } else if (n >= 2) {
+      let bestDist = Infinity;
+      let bestSeg = 0;
+      const segCount = isClosed ? n : n - 1;
+      for (let i = 0; i < segCount; i++) {
+        const p1 = rawVerts[i];
+        const p2 = rawVerts[(i + 1) % n];
+        const dx = p2[0] - p1[0];
+        const dy = p2[1] - p1[1];
+        const dz = p2[2] - p1[2];
+        const lenSq = dx*dx + dy*dy + dz*dz;
+        let t = 0.5;
+        if (lenSq > 0.0001) {
+          t = ((point[0] - p1[0])*dx + (point[1] - p1[1])*dy + (point[2] - p1[2])*dz) / lenSq;
+          t = Math.max(0, Math.min(1, t));
+        }
+        const projX = p1[0] + t*dx;
+        const projY = p1[1] + t*dy;
+        const projZ = p1[2] + t*dz;
+        const dist = Math.hypot(point[0] - projX, point[1] - projY, point[2] - projZ);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestSeg = i;
+        }
+      }
+      targetInsertIdx = bestSeg + 1;
+    }
+
+    const newVerts = [...rawVerts];
+    const newHandles = [...oldHandles];
+    newVerts.splice(targetInsertIdx, 0, point);
+    newHandles.splice(targetInsertIdx, 0, { out: [0,0,0], in: [0,0,0], broken: false });
+
+    let smoothedHandles = newHandles;
+    if (isBezier) {
+      smoothedHandles = autoSmoothBezierHandles(newVerts, newHandles, isClosed);
+    }
+
+    get().updateObject(id, {
+      vertices: newVerts,
+      bezierHandles: isBezier ? smoothedHandles : undefined,
+      vertexOffsets: {},
+    });
+    set({ selectedVertexIndices: [targetInsertIdx] });
+    get().saveHistory();
+    return { success: true, message: `Vértice creado en la posición indicada (índice ${targetInsertIdx}).` };
+  },
+
+  connectVertices: (id: string, vertexIndices?: number[]) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
+
+    const sel = vertexIndices && vertexIndices.length >= 2 ? vertexIndices : selectedVertexIndices;
+    if (sel.length < 2) return { success: false, message: 'Selecciona al menos 2 vértices para conectar.' };
+
+    const v1 = sel[0];
+    const v2 = sel[1];
+    if (v1 === v2) return { success: false, message: 'Selecciona dos vértices distintos.' };
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+
+    // 1. Check if any existing face contains both v1 and v2
+    let splitFaceCount = 0;
+    const newFaces: MeshFace[] = [];
+
+    newObj.faces.forEach((face) => {
+      const idx1 = face.indices.indexOf(v1);
+      const idx2 = face.indices.indexOf(v2);
+
+      if (idx1 !== -1 && idx2 !== -1) {
+        const len = face.indices.length;
+        // Check if already an adjacent edge
+        const isAdjacent = Math.abs(idx1 - idx2) === 1 || Math.abs(idx1 - idx2) === len - 1;
+        if (isAdjacent) {
+          newFaces.push(face);
+          return;
+        }
+
+        // Split polygon into two sub-faces along chord v1-v2
+        const first = Math.min(idx1, idx2);
+        const second = Math.max(idx1, idx2);
+
+        // Face A: from first to second
+        const fA: number[] = [];
+        for (let i = first; i <= second; i++) {
+          fA.push(face.indices[i]);
+        }
+
+        // Face B: from second to end, then 0 to first
+        const fB: number[] = [];
+        for (let i = second; i < len; i++) {
+          fB.push(face.indices[i]);
+        }
+        for (let i = 0; i <= first; i++) {
+          fB.push(face.indices[i]);
+        }
+
+        if (fA.length >= 3) newFaces.push({ ...face, indices: fA });
+        if (fB.length >= 3) newFaces.push({ ...face, indices: fB });
+        splitFaceCount++;
+      } else {
+        newFaces.push(face);
+      }
+    });
+
+    if (splitFaceCount > 0) {
+      newObj.faces = newFaces;
+      get().updateObject(id, newObj);
+      get().saveHistory();
+      return { success: true, message: `Línea añadida conectando vértices y dividiendo ${splitFaceCount} cara(s).` };
+    }
+
+    // If they don't share a face, connect as a new polygon/face or edge
+    if (sel.length >= 3) {
+      newFaces.push({ indices: [...sel] });
+      newObj.faces = newFaces;
+      get().updateObject(id, newObj);
+      get().saveHistory();
+      return { success: true, message: `Nueva cara poligonal creada uniendo los ${sel.length} vértices seleccionados.` };
+    } else {
+      // 2 vertices: create segment / line
+      newFaces.push({ indices: [v1, v2] });
+      newObj.faces = newFaces;
+      get().updateObject(id, newObj);
+      get().saveHistory();
+      return { success: true, message: `Nueva línea/segmento añadido conectando los 2 vértices.` };
+    }
+  },
+
+  createFaceFromVertices: (id: string, vertexIndices?: number[]) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
+
+    const sel = vertexIndices && vertexIndices.length >= 2 ? vertexIndices : selectedVertexIndices;
+    if (sel.length < 2) return { success: false, message: 'Selecciona al menos 2 vértices.' };
+
+    if (sel.length === 2) {
+      return get().connectVertices(id, sel);
+    }
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+    newObj.faces.push({ indices: [...sel] });
+    get().updateObject(id, newObj);
+    get().saveHistory();
+    return { success: true, message: `Cara creada con ${sel.length} vértices.` };
+  },
+
+  extrudeSelectedVertices: (id: string, vertexIndices?: number[], offset?: V3) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
+
+    const sel = vertexIndices && vertexIndices.length > 0 ? vertexIndices : selectedVertexIndices;
+    if (sel.length === 0) return { success: false, message: 'Selecciona al menos un vértice para extruir.' };
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+    const off: V3 = offset || [0, 0.4, 0];
+
+    const newCreatedIndices: number[] = [];
+    sel.forEach((vi) => {
+      const v = newObj.vertices[vi];
+      const vo = newObj.vertexOffsets?.[vi] || [0, 0, 0];
+      const newV: V3 = [v[0] + vo[0] + off[0], v[1] + vo[1] + off[1], v[2] + vo[2] + off[2]];
+      const newIdx = newObj.vertices.length;
+      newObj.vertices.push(newV);
+      newCreatedIndices.push(newIdx);
+
+      // Connect with new segment
+      newObj.faces.push({ indices: [vi, newIdx] });
+    });
+
+    if (sel.length >= 2) {
+      for (let k = 0; k < sel.length - 1; k++) {
+        newObj.faces.push({ indices: [sel[k], sel[k + 1], newCreatedIndices[k + 1], newCreatedIndices[k]] });
+      }
+    }
+
+    newObj.vertexOffsets = {};
+    get().updateObject(id, newObj);
+    set({ selectedVertexIndices: newCreatedIndices });
+    get().saveHistory();
+    return { success: true, message: `${sel.length} vértice(s) extruido(s) con nuevos segmentos.` };
+  },
+
+  insertVertexOnEdge: (id: string, edgeIndices?: number[], point?: V3) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
+
+    if (obj.type === 'SHAPE') {
+      if (point) return get().insertShapeVertexAtPoint(id, point);
+      return get().subdivideShapeSegment(id);
+    }
+
+    return get().subdivideSelectedEdges(id, edgeIndices);
+  },
+
+  deleteSelectedVertices: (id: string, vertexIndices?: number[]) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) {
+      return { success: false, message: 'Objeto no encontrado.' };
+    }
+
+    const indicesToDelete = vertexIndices && vertexIndices.length > 0 ? vertexIndices : selectedVertexIndices;
+    if (!indicesToDelete || indicesToDelete.length === 0) {
+      return { success: false, message: 'No hay vértices seleccionados para eliminar.' };
+    }
+
+    const toRemove = new Set(indicesToDelete.filter(i => i < 10000));
+    if (toRemove.size === 0) {
+      return { success: false, message: 'Selecciona al menos un punto de control / vértice.' };
+    }
+
+    if (obj.type === 'SHAPE') {
+      if (obj.vertices.length - toRemove.size < 2) {
+        return { success: false, message: 'Una línea o curva necesita al menos 2 vértices.' };
+      }
+
+      const newVertices = obj.vertices.filter((_, i) => !toRemove.has(i));
+      const newHandles = obj.bezierHandles ? obj.bezierHandles.filter((_, i) => !toRemove.has(i)) : undefined;
+
+      const remapIdx: Record<number, number> = {};
+      let ni = 0;
+      obj.vertices.forEach((_, oi) => {
+        if (!toRemove.has(oi)) remapIdx[oi] = ni++;
+      });
+      const newOffsets: Record<number, [number, number, number]> = {};
+      Object.entries(obj.vertexOffsets ?? {}).forEach(([k, v]) => {
+        const mapped = remapIdx[parseInt(k)];
+        if (mapped !== undefined) newOffsets[mapped] = v as [number, number, number];
+      });
+
+      get().updateObject(id, {
+        vertices: newVertices,
+        vertexOffsets: newOffsets,
+        bezierHandles: newHandles,
+      });
+      set({ selectedVertexIndices: [] });
+      get().saveHistory();
+      return { success: true, message: `${toRemove.size} vértice(s) eliminado(s).` };
+    } else {
+      // Mesh vertex deletion
+      const oldVerts = obj.vertices;
+      const remap = new Map<number, number>();
+      const newVerts: V3[] = [];
+      for (let i = 0; i < oldVerts.length; i++) {
+        if (!toRemove.has(i)) {
+          remap.set(i, newVerts.length);
+          const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+          newVerts.push([oldVerts[i][0] + off[0], oldVerts[i][1] + off[1], oldVerts[i][2] + off[2]]);
+        }
+      }
+
+      const newFaces: MeshFace[] = [];
+      for (const f of obj.faces) {
+        if (!f || !f.indices) continue;
+        const hasDeleted = f.indices.some(idx => toRemove.has(idx));
+        if (!hasDeleted) {
+          const remapped = f.indices
+            .map(idx => remap.get(idx))
+            .filter((idx): idx is number => idx !== undefined && idx >= 0 && idx < newVerts.length);
+          if (remapped.length >= 3) {
+            newFaces.push({ ...f, indices: remapped });
+          }
+        }
+      }
+
+      get().updateObject(id, {
+        vertices: newVerts,
+        faces: newFaces,
+        vertexOffsets: {},
+      });
+      set({ selectedVertexIndices: [] });
+      get().saveHistory();
+      return { success: true, message: `${toRemove.size} vértice(s) eliminado(s).` };
+    }
+  },
+
+  symmetrizeVertices: (
+    id: string,
+    vertexIndices?: number[],
+    options?: {
+      axis?: 'x' | 'y' | 'z';
+      direction?: '+to-' | '-to+' | 'selected_to_opposite' | 'both';
+      centerSnap?: boolean;
+      snapThreshold?: number;
+      searchThreshold?: number;
+    }
+  ) => {
+    const { project, selectedVertexIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices || obj.vertices.length === 0) {
+      return { success: false, message: 'Objeto sin vértices válidos para simetría.' };
+    }
+
+    const axis = options?.axis || 'x';
+    const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+    const direction = options?.direction || 'selected_to_opposite';
+    const centerSnap = options?.centerSnap !== false;
+    const snapThreshold = options?.snapThreshold ?? 0.05;
+    const searchThreshold = options?.searchThreshold ?? 3.5;
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    if (newObj.type !== 'SHAPE') {
+      newObj.type = 'MESH';
+      newObj.parameters = {};
+    }
+
+    const verts = newObj.vertices;
+    const n = verts.length;
+    const currentOffsets = { ...(newObj.vertexOffsets || {}) };
+
+    // Coordinates with current offsets applied
+    const currentPositions: V3[] = verts.map((v, i) => {
+      const off = currentOffsets[i] || [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
+    });
+
+    const activeSelection = (vertexIndices && vertexIndices.length > 0)
+      ? vertexIndices.filter(i => i < n)
+      : selectedVertexIndices.filter(i => i < n);
+
+    let sourceIndices: number[] = [];
+
+    if (activeSelection.length > 0) {
+      if (direction === '+to-') {
+        sourceIndices = activeSelection.filter(i => currentPositions[i][axisIdx] >= -snapThreshold);
+      } else if (direction === '-to+') {
+        sourceIndices = activeSelection.filter(i => currentPositions[i][axisIdx] <= snapThreshold);
+      } else {
+        sourceIndices = [...activeSelection];
+      }
+    } else {
+      if (direction === '-to+') {
+        sourceIndices = Array.from({ length: n }, (_, i) => i).filter(i => currentPositions[i][axisIdx] <= 0);
+      } else {
+        sourceIndices = Array.from({ length: n }, (_, i) => i).filter(i => currentPositions[i][axisIdx] >= 0);
+      }
+    }
+
+    if (sourceIndices.length === 0) {
+      return { success: false, message: 'Selecciona vértices en el lado de origen para reflejar al lado opuesto.' };
+    }
+
+    const newOffsets = { ...currentOffsets };
+    let modifiedCount = 0;
+    const matchedCounterparts = new Set<number>();
+
+    sourceIndices.forEach(srcIdx => {
+      const srcPos = currentPositions[srcIdx];
+
+      // 1. Snap vertices near the symmetry plane to 0
+      if (centerSnap && Math.abs(srcPos[axisIdx]) <= snapThreshold) {
+        const snappedPos: V3 = [...srcPos];
+        snappedPos[axisIdx] = 0;
+        newOffsets[srcIdx] = [
+          snappedPos[0] - verts[srcIdx][0],
+          snappedPos[1] - verts[srcIdx][1],
+          snappedPos[2] - verts[srcIdx][2]
+        ];
+        currentPositions[srcIdx] = snappedPos;
+        modifiedCount++;
+        return;
+      }
+
+      // 2. Mirrored target coordinate
+      const mirroredPos: V3 = [...srcPos];
+      mirroredPos[axisIdx] = -srcPos[axisIdx];
+
+      // 3. Find closest opposite vertex counterpart
+      let bestMatchIdx = -1;
+      let minDistance = Infinity;
+
+      for (let j = 0; j < n; j++) {
+        if (j === srcIdx) continue;
+        if (matchedCounterparts.has(j)) continue;
+
+        const posJ = currentPositions[j];
+        const dist = Math.hypot(
+          posJ[0] - mirroredPos[0],
+          posJ[1] - mirroredPos[1],
+          posJ[2] - mirroredPos[2]
+        );
+
+        // Topology rest position hint
+        const baseMirrored: V3 = [...verts[srcIdx]];
+        baseMirrored[axisIdx] = -verts[srcIdx][axisIdx];
+        const baseDist = Math.hypot(
+          verts[j][0] - baseMirrored[0],
+          verts[j][1] - baseMirrored[1],
+          verts[j][2] - baseMirrored[2]
+        );
+
+        const score = dist * 0.7 + baseDist * 0.3;
+
+        if (score < minDistance && dist <= searchThreshold) {
+          minDistance = score;
+          bestMatchIdx = j;
+        }
+      }
+
+      if (bestMatchIdx !== -1) {
+        matchedCounterparts.add(bestMatchIdx);
+        newOffsets[bestMatchIdx] = [
+          mirroredPos[0] - verts[bestMatchIdx][0],
+          mirroredPos[1] - verts[bestMatchIdx][1],
+          mirroredPos[2] - verts[bestMatchIdx][2]
+        ];
+        currentPositions[bestMatchIdx] = mirroredPos;
+
+        if (newObj.type === 'SHAPE' && newObj.bezierHandles) {
+          const srcH = newObj.bezierHandles[srcIdx];
+          if (srcH && newObj.bezierHandles[bestMatchIdx]) {
+            const mirrorV3 = (v: V3): V3 => {
+              const res: V3 = [...v];
+              res[axisIdx] = -v[axisIdx];
+              return res;
+            };
+            newObj.bezierHandles[bestMatchIdx] = {
+              out: mirrorV3(srcH.in || [0, 0, 0]),
+              in: mirrorV3(srcH.out || [0, 0, 0]),
+              broken: srcH.broken || false
+            };
+          }
+        }
+
+        modifiedCount++;
+      }
+    });
+
+    if (modifiedCount === 0) {
+      return { success: false, message: 'No se encontraron vértices contraparte en el lado opuesto del eje dentro del rango.' };
+    }
+
+    newObj.vertexOffsets = newOffsets;
+    get().updateObject(id, newObj);
+    get().saveHistory();
+
+    return {
+      success: true,
+      message: `Simetría aplicada (Eje ${axis.toUpperCase()}): ${modifiedCount} vértice(s) emparejados simétricamente.`,
+      modifiedCount
+    };
+  },
+
+  toggleShapeClosed: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return;
+    const isClosed = !obj.parameters.closed;
+    let verts = [...obj.vertices];
+    let handles = obj.bezierHandles ? [...obj.bezierHandles] : undefined;
+
+    if (isClosed && verts.length >= 3) {
+      const d = Math.hypot(
+        verts[0][0] - verts[verts.length - 1][0],
+        verts[0][1] - verts[verts.length - 1][1],
+        verts[0][2] - verts[verts.length - 1][2]
+      );
+      if (d < 0.25) {
+        verts.pop();
+        if (handles) handles.pop();
+      }
+    }
+    if (obj.parameters.shapeType === 'bezier' && handles) {
+      handles = autoSmoothBezierHandles(verts, handles, isClosed);
+    }
+    get().updateObject(id, {
+      vertices: verts,
+      bezierHandles: handles,
+      parameters: { ...obj.parameters, closed: isClosed },
+    });
+    get().saveHistory();
+  },
+
+  reverseShapeDirection: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.vertices) return;
+    const revVerts = [...obj.vertices].reverse();
+    const revHandles = obj.bezierHandles
+      ? [...obj.bezierHandles].reverse().map(h => ({
+          out: [...h.in] as V3,
+          in: [...h.out] as V3,
+          broken: h.broken,
+        }))
+      : undefined;
+    get().updateObject(id, {
+      vertices: revVerts,
+      bezierHandles: revHandles,
+      vertexOffsets: {},
+    });
+    get().saveHistory();
+  },
+
+  // ── Face & Edge Tools ──────────────────────────────────────────────────────
+  deleteSelectedFaces: (id: string, faceIndices?: number[]) => {
+    const { project, selectedFaceIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.faces) return { success: false, message: 'Objeto sin caras.' };
+
+    const toDelete = faceIndices && faceIndices.length > 0 ? faceIndices : selectedFaceIndices;
+    if (!toDelete || toDelete.length === 0) return { success: false, message: 'No hay caras seleccionadas.' };
+
+    const toRemove = new Set(toDelete);
+    const newFaces = obj.faces.filter((_, i) => !toRemove.has(i));
+
+    // Si se eliminan todas las caras, convertir limpiamente a modo alambre / wireframe
+    if (newFaces.length === 0) {
+      const edges = extractUniqueEdges({
+        vertices: obj.vertices,
+        faces: obj.faces,
+        wireframeEdges: obj.wireframeEdges,
+        parameters: obj.parameters,
+      });
+
+      const bakedVerts: V3[] = obj.vertices.map((v, i) => {
+        const off = obj.vertexOffsets?.[i] || [0,0,0];
+        return [v[0]+off[0], v[1]+off[1], v[2]+off[2]];
+      });
+
+      get().updateObject(id, {
+        vertices: bakedVerts,
+        faces: [],
+        wireframeEdges: edges,
+        isWireframeOnly: true,
+        vertexOffsets: {},
+      });
+      set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+      get().saveHistory();
+      return { success: true, message: `Todas las caras eliminadas. Objeto convertido a Estructura Alámbrica.` };
+    }
+
+    // Clean orphaned vertices
+    const usedVerts = new Set<number>();
+    newFaces.forEach(f => f.indices.forEach(v => usedVerts.add(v)));
+    const remap = new Map<number, number>();
+    const newVerts: V3[] = [];
+    obj.vertices.forEach((v, i) => {
+      if (usedVerts.has(i)) {
+        remap.set(i, newVerts.length);
+        const off = obj.vertexOffsets?.[i] || [0,0,0];
+        newVerts.push([v[0]+off[0], v[1]+off[1], v[2]+off[2]]);
+      }
+    });
+
+    const remappedFaces = newFaces.map(f => ({
+      ...f,
+      indices: f.indices.map(v => remap.get(v)!)
+    }));
+
+    get().updateObject(id, {
+      vertices: newVerts,
+      faces: remappedFaces,
+      vertexOffsets: {},
+    });
+    set({ selectedFaceIndices: [], selectedVertexIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `${toRemove.size} cara(s) eliminada(s).` };
+  },
+
+  removeAllFaces: (id: string) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const edges = extractUniqueEdges({
+      vertices: obj.vertices,
+      faces: obj.faces,
+      wireframeEdges: obj.wireframeEdges,
+      parameters: obj.parameters,
+    });
+
+    const bakedVerts: V3[] = (obj.vertices || []).map((v, i) => {
+      const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
+    });
+
+    get().updateObject(id, {
+      vertices: bakedVerts,
+      faces: [],
+      wireframeEdges: edges,
+      isWireframeOnly: true,
+      vertexOffsets: {},
+    });
+    set({ selectedFaceIndices: [], selectedVertexIndices: [], selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `Caras eliminadas: Objeto transformado en Estructura Alámbrica.` };
+  },
+
+  convertToWireframe: (id: string, options: WireframeOptions = {}) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const mode = options.mode || 'TUBES';
+
+    if (mode === 'REMOVE_FACES' || mode === 'LINES') {
+      return get().removeAllFaces(id);
+    }
+
+    try {
+      const wireframeData = convertToWireframeModel(obj, options);
+
+      if (options.asNewObject) {
+        const newObjId = `wireframe_${Date.now()}`;
+        const newObj: CSGObject = {
+          ...JSON.parse(JSON.stringify(obj)),
+          id: newObjId,
+          name: `${obj.name || 'Objeto'} (Celosía 3D)`,
+          type: 'MESH',
+          vertices: wireframeData.vertices,
+          faces: wireframeData.faces,
+          wireframeEdges: wireframeData.wireframeEdges,
+          isWireframeOnly: false,
+          vertexOffsets: {},
+          transform: {
+            ...obj.transform,
+            position: [obj.transform.position[0], obj.transform.position[1], obj.transform.position[2]],
+          },
+        };
+
+        const updatedObjects = [...project.objects, newObj];
+        set(state => ({
+          project: { ...state.project, objects: updatedObjects },
+          selectedObjectId: newObjId,
+          selectedObjectIds: [newObjId],
+        }));
+        get().saveHistory();
+        return {
+          success: true,
+          message: `Estructura alámbrica 3D creada como nuevo objeto "${newObj.name}".`,
+          newObjectId: newObjId,
+        };
+      } else {
+        // Reemplazar el objeto actual
+        get().updateObject(id, {
+          type: 'MESH',
+          vertices: wireframeData.vertices,
+          faces: wireframeData.faces,
+          wireframeEdges: wireframeData.wireframeEdges,
+          isWireframeOnly: false,
+          vertexOffsets: {},
+        });
+        get().saveHistory();
+        return {
+          success: true,
+          message: `Objeto convertido en Estructura Alámbrica 3D sólida (${wireframeData.faces.length} polígonos tubulares).`,
+        };
+      }
+    } catch (err: any) {
+      console.error('Error converting to wireframe:', err);
+      return { success: false, message: `Error al generar estructura alámbrica: ${err.message || 'Error desconocido'}` };
+    }
+  },
+
+  insetFaces: (id: string, faceIndices: number[], amount: number = 0.25) => {
+    const { project } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.faces || faceIndices.length === 0) return { success: false, message: 'Selecciona caras para hacer inset.' };
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+
+    const bakeVert = (i: number): V3 => {
+      const b = newObj.vertices[i];
+      const o = newObj.vertexOffsets?.[i] || [0,0,0];
+      return [b[0]+o[0], b[1]+o[1], b[2]+o[2]];
+    };
+
+    const newFaces: MeshFace[] = [];
+    const facesToRemove = new Set(faceIndices);
+
+    faceIndices.forEach(fIdx => {
+      const face = newObj.faces[fIdx];
+      if (!face || face.indices.length < 3) return;
+
+      const n = face.indices.length;
+      const pts = face.indices.map(bakeVert);
+      let cx = 0, cy = 0, cz = 0;
+      pts.forEach(p => { cx += p[0]; cy += p[1]; cz += p[2]; });
+      cx /= n; cy /= n; cz /= n;
+
+      const factor = Math.max(0.05, Math.min(0.95, amount));
+      const innerIndices: number[] = [];
+
+      for (let i = 0; i < n; i++) {
+        const p = pts[i];
+        const inX = p[0] + (cx - p[0]) * factor;
+        const inY = p[1] + (cy - p[1]) * factor;
+        const inZ = p[2] + (cz - p[2]) * factor;
+        const newIdx = newObj.vertices.length;
+        newObj.vertices.push([inX, inY, inZ]);
+        innerIndices.push(newIdx);
+      }
+
+      for (let i = 0; i < n; i++) {
+        const next = (i + 1) % n;
+        newFaces.push({
+          indices: [face.indices[i], face.indices[next], innerIndices[next], innerIndices[i]],
+          materialIndex: face.materialIndex
+        });
+      }
+
+      newFaces.push({
+        indices: innerIndices,
+        materialIndex: face.materialIndex
+      });
+    });
+
+    const finalFaces: MeshFace[] = [];
+    newObj.faces.forEach((f, idx) => {
+      if (!facesToRemove.has(idx)) {
+        finalFaces.push(f);
+      }
+    });
+    const startNewIdx = finalFaces.length;
+    finalFaces.push(...newFaces);
+
+    newObj.faces = finalFaces;
+    newObj.vertexOffsets = {};
+    newObj.parameters = {};
+
+    get().updateObject(id, newObj);
+    const innerFaceIndices: number[] = [];
+    let count = 0;
+    for (let fIdx = 0; fIdx < faceIndices.length; fIdx++) {
+      const origFace = obj.faces[faceIndices[fIdx]];
+      if (!origFace) continue;
+      const numQuads = origFace.indices.length;
+      count += numQuads;
+      innerFaceIndices.push(startNewIdx + count);
+      count += 1;
+    }
+    set({ selectedFaceIndices: innerFaceIndices });
+    get().saveHistory();
+    return { success: true, message: `Inset aplicado a ${faceIndices.length} cara(s).` };
+  },
+
+  flipSelectedFaceNormals: (id: string, faceIndices?: number[]) => {
+    const { project, selectedFaceIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.faces) return { success: false, message: 'Objeto sin caras.' };
+
+    const toFlip = faceIndices && faceIndices.length > 0 ? faceIndices : selectedFaceIndices;
+    if (!toFlip || toFlip.length === 0) return { success: false, message: 'Selecciona al menos una cara para invertir.' };
+
+    const newFaces = obj.faces.map((f, i) => {
+      if (toFlip.includes(i)) {
+        const rev = [...f.indices].reverse();
+        return { ...f, indices: rev, normal: f.normal ? [-f.normal[0], -f.normal[1], -f.normal[2]] as V3 : undefined };
+      }
+      return f;
+    });
+
+    get().updateObject(id, { faces: newFaces });
+    get().saveHistory();
+    return { success: true, message: `Normales invertidas en ${toFlip.length} cara(s).` };
+  },
+
+  dissolveSelectedEdges: (id: string, edgeIndices?: number[]) => {
+    const { project, selectedEdgeIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.faces) return { success: false, message: 'Objeto no encontrado.' };
+
+    const edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos un borde o arista.' };
+
+    let faces = [...obj.faces.map(f => ({ ...f, indices: [...f.indices] }))];
+    let dissolvedCount = 0;
+
+    for (let ei = 0; ei < edges.length; ei += 2) {
+      const eA = edges[ei], eB = edges[ei + 1];
+
+      const sharingFaces = faces.map((f, fi) => ({ f, fi })).filter(({ f }) => {
+        const len = f.indices.length;
+        for (let k = 0; k < len; k++) {
+          const a = f.indices[k], b = f.indices[(k + 1) % len];
+          if ((a === eA && b === eB) || (a === eB && b === eA)) return true;
+        }
+        return false;
+      });
+
+      if (sharingFaces.length !== 2) continue;
+
+      const [{ f: faceA, fi: fiA }, { f: faceB, fi: fiB }] = sharingFaces;
+
+      const mergedIndices: number[] = [];
+      const lenA = faceA.indices.length;
+      for (let k = 0; k < lenA; k++) {
+        const a = faceA.indices[k], b = faceA.indices[(k + 1) % lenA];
+        mergedIndices.push(a);
+        if ((a === eA && b === eB) || (a === eB && b === eA)) {
+          const lenB = faceB.indices.length;
+          const startB = faceB.indices.indexOf(b);
+          if (startB !== -1) {
+            for (let m = 1; m < lenB - 1; m++) {
+              const idx = faceB.indices[(startB + m) % lenB];
+              if (idx !== a && idx !== b) mergedIndices.push(idx);
+            }
+          }
+        }
+      }
+
+      const seen = new Set<number>();
+      const cleanMerged = mergedIndices.filter(v => { if (seen.has(v)) return false; seen.add(v); return true; });
+
+      if (cleanMerged.length >= 3) {
+        const mergedFace = { ...faceA, indices: cleanMerged };
+        faces = faces.filter((_, i) => i !== fiA && i !== fiB);
+        faces.push(mergedFace);
+        dissolvedCount++;
+      }
+    }
+
+    if (dissolvedCount === 0) return { success: false, message: 'Los bordes seleccionados son de frontera exterior o no se pudieron fusionar.' };
+
+    get().updateObject(id, { faces });
+    set({ selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `${dissolvedCount} arista(s) disuelta(s) fusionando caras adyacentes.` };
+  },
+
+  deleteSelectedEdges: (id: string, edgeIndices?: number[]) => {
+    const { project, selectedEdgeIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos un borde.' };
+
+    if (obj.type === 'SHAPE') {
+      return get().deleteSelectedVertices(id, [edges[0], edges[1]]);
+    }
+
+    if (!obj.faces) return { success: false, message: 'No hay caras asociadas.' };
+
+    const edgeSet = new Set<string>();
+    for (let i = 0; i < edges.length; i += 2) {
+      const a = edges[i], b = edges[i + 1];
+      edgeSet.add(`${Math.min(a, b)}-${Math.max(a, b)}`);
+    }
+
+    const remainingFaces = obj.faces.filter(f => {
+      const len = f.indices.length;
+      for (let i = 0; i < len; i++) {
+        const a = f.indices[i], b = f.indices[(i + 1) % len];
+        if (edgeSet.has(`${Math.min(a, b)}-${Math.max(a, b)}`)) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    if (remainingFaces.length === 0) return { success: false, message: 'No se pueden eliminar todas las caras del objeto.' };
+
+    get().updateObject(id, { faces: remainingFaces });
+    set({ selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `Bordes eliminados con sus caras adyacentes.` };
+  },
+
+  subdivideSelectedEdges: (id: string, edgeIndices?: number[]) => {
+    const { project, selectedEdgeIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    if (obj.type === 'SHAPE') {
+      return get().subdivideShapeSegment(id);
+    }
+
+    const edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos un borde.' };
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+
+    const bakeVert = (i: number): V3 => {
+      const b = newObj.vertices[i];
+      const o = newObj.vertexOffsets?.[i] || [0,0,0];
+      return [b[0]+o[0], b[1]+o[1], b[2]+o[2]];
+    };
+
+    let splitCount = 0;
+    for (let ei = 0; ei < edges.length; ei += 2) {
+      const eA = edges[ei], eB = edges[ei + 1];
+      const pA = bakeVert(eA), pB = bakeVert(eB);
+      const mid: V3 = [(pA[0]+pB[0])/2, (pA[1]+pB[1])/2, (pA[2]+pB[2])/2];
+      const midIdx = newObj.vertices.length;
+      newObj.vertices.push(mid);
+
+      const newFaces: MeshFace[] = [];
+      newObj.faces.forEach(face => {
+        const len = face.indices.length;
+        let edgePos = -1;
+        for (let i = 0; i < len; i++) {
+          const a = face.indices[i], b = face.indices[(i + 1) % len];
+          if ((a === eA && b === eB) || (a === eB && b === eA)) {
+            edgePos = i;
+            break;
+          }
+        }
+
+        if (edgePos === -1) {
+          newFaces.push(face);
+        } else {
+          const updatedIndices = [...face.indices];
+          updatedIndices.splice(edgePos + 1, 0, midIdx);
+          newFaces.push({ ...face, indices: updatedIndices });
+          splitCount++;
+        }
+      });
+      newObj.faces = newFaces;
+    }
+
+    newObj.vertexOffsets = {};
+    get().updateObject(id, newObj);
+    set({ selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `Borde(s) dividido(s) creando nuevo vértice.` };
+  },
+
+  bridgeSelectedEdges: (id: string, edgeIndices?: number[]) => {
+    const { project, selectedEdgeIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj || !obj.faces) return { success: false, message: 'Objeto no encontrado.' };
+
+    const edges = edgeIndices && edgeIndices.length >= 4 ? edgeIndices : selectedEdgeIndices;
+    if (!edges || edges.length < 4) return { success: false, message: 'Selecciona al menos 2 bordes para conectar con una cara.' };
+
+    const e1_a = edges[0], e1_b = edges[1];
+    const e2_a = edges[2], e2_b = edges[3];
+
+    const newFaces = [...obj.faces, { indices: [e1_a, e1_b, e2_b, e2_a] }];
+    get().updateObject(id, { faces: newFaces });
+    set({ selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `Cara generada entre los bordes seleccionados.` };
+  },
+
+  bevelSelectedEdges: (id: string, edgeIndices?: number[], width: number = 0.08, segments: number = 3) => {
+    const { project, selectedEdgeIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    const edgeKeys: string[] = [];
+    if (edges && edges.length >= 2) {
+      for (let i = 0; i < edges.length; i += 2) {
+        const a = edges[i], b = edges[i + 1];
+        edgeKeys.push(`${Math.min(a, b)}_${Math.max(a, b)}`);
+      }
+    }
+
+    try {
+      const res = bevelMeshAdvanced(obj, {
+        affect: 'EDGES',
+        width,
+        segments,
+        limitMethod: edgeKeys.length > 0 ? 'SELECTION' : 'ANGLE',
+        selectedEdgeKeys: edgeKeys.length > 0 ? edgeKeys : undefined,
+      });
+
+      if (res.vertices.length > 0 && res.faces.length > 0) {
+        get().updateObject(id, {
+          vertices: res.vertices,
+          faces: res.faces,
+          vertexOffsets: {},
+          parameters: {},
+        });
+        set({ selectedEdgeIndices: [] });
+        get().saveHistory();
+        return { success: true, message: `Biselado aplicado a los bordes.` };
+      }
+      return { success: false, message: 'No se pudo generar el biselado en esta geometría.' };
+    } catch (e) {
+      console.error(e);
+      return { success: false, message: 'Error al biselar bordes.' };
+    }
   },
 
   healObject: async (id) => {

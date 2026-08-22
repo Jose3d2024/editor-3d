@@ -26,7 +26,7 @@ import { createRaymarchedCloudMaterial } from '../utils/volumetricRaymarch';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
-import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye } from 'lucide-react';
+import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 
 interface ViewportProps {
@@ -94,12 +94,15 @@ const computeGizmoLayout = (
   customAxisLen?: number
 ) => {
   const projected = gizmoPos.clone().project(camera);
-  if (projected.z > 1 || projected.z < -1) return null;
+  if (projected.z > 2 || projected.z < -2) return null;
   const cx = (projected.x * 0.5 + 0.5) * w;
   const cy = (-projected.y * 0.5 + 0.5) * h;
   const AXIS_LEN = customAxisLen || Math.max(75, Math.min(Math.min(w, h) * 0.20, 120));
 
-  const eyeDir = camera.position.clone().sub(gizmoPos).normalize();
+  const isOrtho = (camera as any).isOrthographicCamera;
+  const camDir = new THREE.Vector3();
+  camera.getWorldDirection(camDir);
+  const eyeDir = isOrtho ? camDir.clone().negate() : camera.position.clone().sub(gizmoPos).normalize();
 
   let vX = new THREE.Vector3(1, 0, 0);
   let vY = new THREE.Vector3(0, 1, 0);
@@ -121,13 +124,16 @@ const computeGizmoLayout = (
 
   const dirs: Record<string, { nx: number; ny: number; color: string; sign: number; dot: number; worldDir: THREE.Vector3 }> = {};
 
+  const orthoCam = isOrtho ? (camera as THREE.OrthographicCamera) : null;
+  const worldPerPixel = orthoCam ? Math.abs(orthoCam.top - orthoCam.bottom) / ((orthoCam.zoom || 1) * Math.max(h, 1)) : 0.05;
+  const dist = camera.position.distanceTo(gizmoPos);
+  const worldScale = isOrtho ? worldPerPixel * AXIS_LEN : Math.max(0.1, dist * 0.12);
+
   for (const { axis, vec, color } of axes) {
     const dot = eyeDir.dot(vec);
-    const sign = dot < -0.05 ? -1 : 1;
+    const sign = (!isOrtho && dot < -0.05) ? -1 : 1;
     const visVec = vec.clone().multiplyScalar(sign);
 
-    const dist = camera.position.distanceTo(gizmoPos);
-    const worldScale = Math.max(0.1, dist * 0.12);
     const projEnd = gizmoPos.clone().addScaledVector(visVec, worldScale).project(camera);
     const ex = (projEnd.x * 0.5 + 0.5) * w;
     const ey = (-projEnd.y * 0.5 + 0.5) * h;
@@ -135,8 +141,8 @@ const computeGizmoLayout = (
     const sdy = ey - cy;
     const len = Math.sqrt(sdx * sdx + sdy * sdy);
 
-    const nx = len > 0 ? (sdx / len) * AXIS_LEN : 0;
-    const ny = len > 0 ? (sdy / len) * AXIS_LEN : 0;
+    const nx = len > 0.5 ? (sdx / len) * AXIS_LEN : 0;
+    const ny = len > 0.5 ? (sdy / len) * AXIS_LEN : 0;
 
     dirs[axis] = { nx, ny, color, sign, dot, worldDir: vec.clone() };
   }
@@ -149,8 +155,7 @@ const computeGizmoLayout = (
     { rotAxis: 'Y', norm: vY, color: '#22c55e', sphereColor: '#4ade80' }
   ];
 
-  const dist = camera.position.distanceTo(gizmoPos);
-  const radius3D = Math.max(0.15, dist * 0.12 * 1.15);
+  const radius3D = isOrtho ? worldPerPixel * (AXIS_LEN * 1.15) : Math.max(0.15, dist * 0.12 * 1.15);
 
   for (const { rotAxis, norm, color, sphereColor } of arcConfigs) {
     let projEye = eyeDir.clone().sub(norm.clone().multiplyScalar(eyeDir.dot(norm)));
@@ -189,6 +194,22 @@ const computeGizmoLayout = (
   return { cx, cy, AXIS_LEN, dirs, rotArcs };
 };
 
+// ── Shared Reusable Geometries and Materials (Ultra-low memory, zero per-frame allocation, compact micro-precision) ──
+const SHARED_VERTEX_GEO = new THREE.SphereGeometry(1, 6, 5);
+const SHARED_PICK_GEO = new THREE.SphereGeometry(1, 6, 4);
+const SHARED_SNAP_RING_GEO = new THREE.RingGeometry(0.02, 0.032, 16);
+
+const SHARED_WHITE_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+const SHARED_SELECTED_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
+const SHARED_START_MAT = new THREE.MeshBasicMaterial({ color: 0x10b981, depthTest: false });
+const SHARED_ACTIVE_MAT = new THREE.MeshBasicMaterial({ color: 0xef4444, depthTest: false });
+const SHARED_OUT_MAT = new THREE.MeshBasicMaterial({ color: 0x3b82f6, depthTest: false });
+const SHARED_IN_MAT = new THREE.MeshBasicMaterial({ color: 0x22c55e, depthTest: false });
+const SHARED_SNAP_MAT = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.9 });
+const SHARED_SNAP_DOT_MAT = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
+const SHARED_PICK_MAT = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+const SHARED_CYAN_MAT = new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false });
+
 export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: initialTitle }) => {
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
   const [title, setTitle] = React.useState(initialTitle);
@@ -216,7 +237,29 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const groupRef = useRef<THREE.Group>(new THREE.Group());
   const primitivesGroupRef = useRef<THREE.Group>(new THREE.Group());
   const siluetaGroupRef = useRef<THREE.Group>(new THREE.Group());
+  const hoverGroupRef = useRef<THREE.Group>(new THREE.Group());
+  const meshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const vertexPointsRef = useRef<THREE.Points | null>(null);
+
+  const getObjectMesh = (id: string | null | undefined): THREE.Mesh | undefined => {
+    if (!id) return undefined;
+    return (meshesRef.current.get(id) ||
+      groupRef.current?.children.find((c: any) => c.userData?.id === id) ||
+      primitivesGroupRef.current?.children.find((c: any) => c.userData?.id === id)) as THREE.Mesh | undefined;
+  };
+
+  const getCoincidentVertices = (geometry: THREE.BufferGeometry, index: number): number[] => {
+    const pos = geometry.getAttribute('position');
+    if (!pos || index >= pos.count) return [index];
+    const x = pos.getX(index), y = pos.getY(index), z = pos.getZ(index);
+    const out: number[] = [];
+    for (let i = 0; i < pos.count; i++) {
+      if (Math.abs(pos.getX(i) - x) < 0.0001 && Math.abs(pos.getY(i) - y) < 0.0001 && Math.abs(pos.getZ(i) - z) < 0.0001) {
+        out.push(i);
+      }
+    }
+    return out.length > 0 ? out : [index];
+  };
   
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
   const mouseRef = useRef<THREE.Vector2>(new THREE.Vector2());
@@ -230,6 +273,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const drawingMeshRef = useRef<THREE.Object3D | null>(null);
   const drawingPreviewPointRef = useRef<THREE.Vector3 | null>(null);
   const isDrawingHandleRef = useRef(false);
+  const finishStrokeRef = useRef<((snapResult: any) => void) | null>(null);
+  const updatePreviewRef = useRef<(() => void) | null>(null);
 
   const gizmoStateRef = useRef<{
     hoveredAxis: string | null;
@@ -278,7 +323,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     maximizedViewport, setMaximizedViewport, saveHistory,
     gridSnapEnabled, setGridSnapEnabled, isRecording,
     setSilueta, moveReferenceMode, setReference,
-    addMaterial, assignMaterialToObjects
+    addMaterial, assignMaterialToObjects,
+    insertVertexMode, setInsertVertexMode,
+    orthoDrawMode, setOrthoDrawMode,
+    drawLockAxis, setDrawLockAxis
   } = useStore();
   const { silueta } = project;
 
@@ -333,18 +381,75 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
     }
 
-    if (e.shiftKey && drawingPointsRef.current.length > 0) {
+    const { orthoDrawMode, drawLockAxis } = useStore.getState();
+    const isOrtho = !!(e.shiftKey || orthoDrawMode || drawLockAxis === 'ORTHO_90');
+
+    if (drawingPointsRef.current.length > 0) {
       const last = drawingPointsRef.current[drawingPointsRef.current.length - 1];
-      const dx = Math.abs(p.x - last.x);
-      const dy = Math.abs(p.y - last.y);
-      const dz = Math.abs(p.z - last.z);
-      if (type === 'FRONT' || type === 'BACK') {
-        if (dx > dy) p.y = last.y; else p.x = last.x;
-      } else if (type === 'LEFT' || type === 'RIGHT') {
-        if (dz > dy) p.y = last.y; else p.z = last.z;
+
+      if (drawLockAxis === 'X') {
+        if (type === 'FRONT' || type === 'BACK') {
+          p.y = last.y;
+        } else if (type === 'LEFT' || type === 'RIGHT') {
+          p.z = last.z;
+        } else {
+          p.z = last.z;
+        }
+        (drawingPreviewPointRef as any)._guideAxis = 'X';
+      } else if (drawLockAxis === 'Y') {
+        if (type === 'FRONT' || type === 'BACK') {
+          p.x = last.x;
+        } else if (type === 'LEFT' || type === 'RIGHT') {
+          p.z = last.z;
+        } else {
+          // In Top/Bottom Y is plane normal, lock to X
+          p.z = last.z;
+        }
+        (drawingPreviewPointRef as any)._guideAxis = 'Y';
+      } else if (drawLockAxis === 'Z') {
+        if (type === 'LEFT' || type === 'RIGHT') {
+          p.y = last.y;
+        } else {
+          p.x = last.x;
+        }
+        (drawingPreviewPointRef as any)._guideAxis = 'Z';
+      } else if (isOrtho) {
+        // Escuadra (90° Snap relativo al punto previo)
+        const dx = Math.abs(p.x - last.x);
+        const dy = Math.abs(p.y - last.y);
+        const dz = Math.abs(p.z - last.z);
+
+        if (type === 'FRONT' || type === 'BACK') {
+          if (dx > dy) {
+            p.y = last.y;
+            (drawingPreviewPointRef as any)._guideAxis = 'X';
+          } else {
+            p.x = last.x;
+            (drawingPreviewPointRef as any)._guideAxis = 'Y';
+          }
+        } else if (type === 'LEFT' || type === 'RIGHT') {
+          if (dz > dy) {
+            p.y = last.y;
+            (drawingPreviewPointRef as any)._guideAxis = 'Z';
+          } else {
+            p.z = last.z;
+            (drawingPreviewPointRef as any)._guideAxis = 'Y';
+          }
+        } else {
+          // TOP / BOTTOM / PERSPECTIVE
+          if (dx > dz) {
+            p.z = last.z;
+            (drawingPreviewPointRef as any)._guideAxis = 'X';
+          } else {
+            p.x = last.x;
+            (drawingPreviewPointRef as any)._guideAxis = 'Z';
+          }
+        }
       } else {
-        if (dx > dz) p.z = last.z; else p.x = last.x;
+        (drawingPreviewPointRef as any)._guideAxis = null;
       }
+    } else {
+      (drawingPreviewPointRef as any)._guideAxis = null;
     }
     return p;
   };
@@ -378,7 +483,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
   const scaleSelection = (factor: number) => {
     if (!selectedObjectId || selectedVertexIndices.length === 0) return;
-    const mesh = primitivesGroupRef.current.children.find(c => c.userData.id === selectedObjectId) as THREE.Mesh;
+    const mesh = getObjectMesh(selectedObjectId);
     const selectedObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
     if (!mesh || !selectedObj) return;
     const positions = mesh.geometry.getAttribute('position');
@@ -607,8 +712,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (!obj) return;
 
       let posOffset = 0;
-      // Attempt exact bounding box calculation from rendered mesh in primitivesGroupRef
-      const mesh = primitivesGroupRef.current?.children.find((ch: any) => ch.userData.id === id);
+      // Attempt exact bounding box calculation from rendered mesh
+      const mesh = getObjectMesh(id);
       if (mesh) {
         const box = new THREE.Box3().setFromObject(mesh);
         if (isFinite(box.min.y)) {
@@ -769,6 +874,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     scene.add(groupRef.current);
     scene.add(primitivesGroupRef.current);
     scene.add(siluetaGroupRef.current);
+    scene.add(hoverGroupRef.current);
 
     // Luz de Edición por Defecto (Visor en tiempo real):
     // Luz ambiental suave para trabajar en el visor
@@ -977,8 +1083,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       light.castShadow = !!lData.castShadow;
       const l = light as any;
       if (l.shadow) {
-        l.shadow.bias = -0.001;
-        l.shadow.mapSize.set(1024, 1024);
+        l.shadow.bias = -0.0001;
+        l.shadow.normalBias = 0.05;
+        l.shadow.mapSize.set(2048, 2048);
         if (l instanceof THREE.DirectionalLight) {
           l.shadow.camera.left = -20;
           l.shadow.camera.right = 20;
@@ -1387,6 +1494,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                   if (mat.uniforms.uLightPosition) {
                     mat.uniforms.uLightPosition.value.copy(lightPos);
                   }
+                  if (mat.uniforms.uModelInverse) {
+                    mat.uniforms.uModelInverse.value.copy(child.matrixWorld).invert();
+                  }
                 }
               });
             }
@@ -1596,7 +1706,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     });
   }, [silueta, type]);
 
-  const meshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const mixersRef = useRef<Map<string, THREE.AnimationMixer>>(new Map());
   const gltfCacheRef = useRef<Map<string, { scene: THREE.Object3D, animations: THREE.AnimationClip[] }>>(new Map());
 
@@ -1707,7 +1816,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     project.objects.forEach(obj => {
       if (!obj.visible) return;
       
-      const isCameraPath = obj.parameters?.isCameraPath || obj.id.startsWith('camera_path') || obj.name.includes('Ruta_Camara') || obj.parameters?.shapeType === 'line';
+      const isCameraPath = Boolean(obj.parameters?.isCameraPath || obj.id.startsWith('camera_path') || obj.name.includes('Ruta_Camara'));
       if (type === 'CAMERA' && isCameraPath) return;
 
       const _interpTransform = getInterpolatedTransform(obj, currentTime);
@@ -1727,14 +1836,21 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         // Resolve material: priority is inline material > materialId > default
         const projectMaterials = project.materials || [];
         const referencedMaterial = obj.materialId ? project.materials.find(m => m.id === obj.materialId) : null;
-        const mData = {
-          ...(referencedMaterial || {}),
-          ...(obj.material || {})
-        } as any;
         
+        // For imported 3D models (GLTF/OBJ), use custom replacement material only if explicitly customized by user:
+        const hasCustomOverride = Boolean(
+          obj.uvDebug ||
+          (referencedMaterial && referencedMaterial.category !== 'imported' && !referencedMaterial.id.startsWith('mat_imp_')) ||
+          (obj.material && (obj.material as any).userModified)
+        );
+
         let customMaterial: THREE.Material | null = null;
-        if (obj.uvDebug || obj.materialId || Object.keys(obj.material || {}).length > 0 || (obj.color && obj.color !== '#ffffff') || (obj.opacity !== undefined && obj.opacity !== 1)) {
-            customMaterial = getMaterialForObject(obj, mData);
+        if (hasCustomOverride) {
+          const mData = {
+            ...(referencedMaterial || {}),
+            ...(obj.material || {})
+          } as any;
+          customMaterial = getMaterialForObject(obj, mData);
         }
 
         const applyViewModeToImported = (object3D: THREE.Object3D) => {
@@ -1749,7 +1865,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               } else {
                 const mapMaterial = (origMat: THREE.Material) => {
                   const projMat = projectMaterials.find(m => m.id === origMat.userData.csgMaterialId);
-                  if (projMat) {
+                  if (projMat && (projMat as any).userModified) {
                     return getMaterialForObject(obj, projMat);
                   }
                   return origMat;
@@ -1775,24 +1891,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               if (mesh.material) {
                 if (Array.isArray(mesh.material)) {
                   mesh.material = mesh.material.map(m => {
-                    const cloned = isMeshSelected ? m.clone() : m;
-                    if (isMeshSelected && (cloned as any).color) {
-                      (cloned as any).color.setHex(0xffff00);
-                      if ((cloned as any).emissive) {
-                        (cloned as any).emissive.setHex(0x444400);
-                      }
-                    }
+                    const cloned = m;
                     (cloned as any).wireframe = viewMode === 'WIREFRAME';
                     return cloned;
                   });
                 } else {
-                  const cloned = isMeshSelected ? mesh.material.clone() : mesh.material;
-                  if (isMeshSelected && (cloned as any).color) {
-                    (cloned as any).color.setHex(0xffff00);
-                    if ((cloned as any).emissive) {
-                      (cloned as any).emissive.setHex(0x444400);
-                    }
-                  }
+                  const cloned = mesh.material;
                   (cloned as any).wireframe = viewMode === 'WIREFRAME';
                   mesh.material = cloned;
                 }
@@ -2055,11 +2159,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const anchorWorld = anchor.clone().applyMatrix4(mat4);
               const isAnchorSel = selectedSet.has(i);
 
-              // ── Anchor point ──
+              // ── Anchor point (Compact, lightweight micro-dot) ──
               const anchorMesh = new THREE.Mesh(
-                new THREE.SphereGeometry(0.05, 8, 8),
-                new THREE.MeshBasicMaterial({ color: isAnchorSel ? 0xff8800 : 0xffffff, depthTest: false })
+                SHARED_VERTEX_GEO,
+                isAnchorSel ? SHARED_SELECTED_MAT : SHARED_WHITE_MAT
               );
+              anchorMesh.scale.setScalar(isAnchorSel ? 0.020 : 0.014);
               anchorMesh.position.copy(anchorWorld);
               anchorMesh.renderOrder = 4;
               anchorMesh.userData.id = obj.id;
@@ -2071,7 +2176,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const showHandles = inEditMode && isBezier && h;
               if (showHandles) {
                 // ── OUT handle (blue) ──
-                // If handle is zero-length, show at a minimum visible offset so it can be grabbed
                 const MIN_H = 0.18;
                 const rawOut = new THREE.Vector3(...h.out);
                 const outPos = rawOut.length() > 0.001 ? rawOut : new THREE.Vector3(MIN_H, 0, 0);
@@ -2083,9 +2187,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 group.add(outLine);
                 // Handle dot
                 const outMesh = new THREE.Mesh(
-                  new THREE.SphereGeometry(0.04, 7, 7),
-                  new THREE.MeshBasicMaterial({ color: selectedSet.has(i + 10000) ? 0xff4400 : 0x4488ff, depthTest: false })
+                  SHARED_VERTEX_GEO,
+                  selectedSet.has(i + 10000) ? SHARED_SELECTED_MAT : SHARED_OUT_MAT
                 );
+                outMesh.scale.setScalar(0.011);
                 outMesh.position.copy(outWorld);
                 outMesh.renderOrder = 4;
                 outMesh.userData.id = obj.id;
@@ -2102,9 +2207,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 inLine.userData.id = obj.id;
                 group.add(inLine);
                 const inMesh = new THREE.Mesh(
-                  new THREE.SphereGeometry(0.04, 7, 7),
-                  new THREE.MeshBasicMaterial({ color: selectedSet.has(i + 20000) ? 0xff4400 : 0x44cc44, depthTest: false })
+                  SHARED_VERTEX_GEO,
+                  selectedSet.has(i + 20000) ? SHARED_SELECTED_MAT : SHARED_IN_MAT
                 );
+                inMesh.scale.setScalar(0.011);
                 inMesh.position.copy(inWorld);
                 inMesh.renderOrder = 4;
                 inMesh.userData.id = obj.id;
@@ -2115,9 +2221,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
               // Invisible pick sphere for anchor
               const pickSphere = new THREE.Mesh(
-                new THREE.SphereGeometry(0.09, 6, 6),
-                new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+                SHARED_PICK_GEO,
+                SHARED_PICK_MAT
               );
+              pickSphere.scale.setScalar(0.045);
               pickSphere.position.copy(anchorWorld);
               pickSphere.userData.id = obj.id;
               pickSphere.userData.handleType = 'anchor';
@@ -2127,7 +2234,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               // Invisible pick spheres for handles
               if (showHandles) {
                 const outPos2 = anchor.clone().add(new THREE.Vector3(...h.out)).applyMatrix4(mat4);
-                const outPick = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 6), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+                const outPick = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
+                outPick.scale.setScalar(0.035);
                 outPick.position.copy(outPos2);
                 outPick.userData.id = obj.id;
                 outPick.userData.handleType = 'bezierOut';
@@ -2135,7 +2243,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 primitivesGroup.add(outPick);
 
                 const inPos2 = anchor.clone().add(new THREE.Vector3(...h.in)).applyMatrix4(mat4);
-                const inPick = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 6), new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+                const inPick = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
+                inPick.scale.setScalar(0.035);
                 inPick.position.copy(inPos2);
                 inPick.userData.id = obj.id;
                 inPick.userData.handleType = 'bezierIn';
@@ -2226,10 +2335,47 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           }
         });
 
-        // Triangulate face (fan)
-        for (let i = 1; i < faceIndices.length - 1; i++) {
-          indices.push(faceIndices[0], faceIndices[i], faceIndices[i+1]);
+        // Triangulate face for WebGL buffer (keeps logical N-gon / Quad intact in CSGObject.faces)
+        if (faceIndices.length === 3) {
+          indices.push(faceIndices[0], faceIndices[1], faceIndices[2]);
           faceMap.push(fIdx);
+        } else if (faceIndices.length === 4) {
+          indices.push(faceIndices[0], faceIndices[1], faceIndices[2]);
+          indices.push(faceIndices[0], faceIndices[2], faceIndices[3]);
+          faceMap.push(fIdx, fIdx);
+        } else if (faceIndices.length > 4) {
+          // Triangulate N-gon using 2D projection
+          const p0 = new THREE.Vector3(finalPos[faceIndices[0]*3], finalPos[faceIndices[0]*3+1], finalPos[faceIndices[0]*3+2]);
+          const p1 = new THREE.Vector3(finalPos[faceIndices[1]*3], finalPos[faceIndices[1]*3+1], finalPos[faceIndices[1]*3+2]);
+          const p2 = new THREE.Vector3(finalPos[faceIndices[2]*3], finalPos[faceIndices[2]*3+1], finalPos[faceIndices[2]*3+2]);
+          const normal = new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(p1, p0), new THREE.Vector3().subVectors(p2, p0)).normalize();
+          
+          let uAxis = new THREE.Vector3();
+          if (Math.abs(normal.y) < 0.9) {
+            uAxis.crossVectors(normal, new THREE.Vector3(0, 1, 0)).normalize();
+          } else {
+            uAxis.crossVectors(normal, new THREE.Vector3(1, 0, 0)).normalize();
+          }
+          const vAxis = new THREE.Vector3().crossVectors(normal, uAxis).normalize();
+
+          const pts2D = faceIndices.map(idx => {
+            const pt = new THREE.Vector3(finalPos[idx*3], finalPos[idx*3+1], finalPos[idx*3+2]);
+            const d = new THREE.Vector3().subVectors(pt, p0);
+            return new THREE.Vector2(d.dot(uAxis), d.dot(vAxis));
+          });
+
+          const tris = THREE.ShapeUtils.triangulateShape(pts2D, []);
+          if (tris && tris.length > 0) {
+            tris.forEach(([a, b, c]) => {
+              indices.push(faceIndices[a], faceIndices[b], faceIndices[c]);
+              faceMap.push(fIdx);
+            });
+          } else {
+            for (let i = 1; i < faceIndices.length - 1; i++) {
+              indices.push(faceIndices[0], faceIndices[i], faceIndices[i+1]);
+              faceMap.push(fIdx);
+            }
+          }
         }
       });
 
@@ -2268,9 +2414,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
         const finalMaterial = getMaterialForObject(obj, m);
 
+        const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || obj.parameters?.isVolumetric || m.isVolumetric || m.volumetric?.enabled;
         const solidMesh = new THREE.Mesh(geometry, finalMaterial);
-        solidMesh.castShadow = true;
-        solidMesh.receiveShadow = true;
+        solidMesh.castShadow = !isVol;
+        solidMesh.receiveShadow = !isVol;
         solidMesh.position.copy(initialPos);
         solidMesh.rotation.copy(initialRot);
         solidMesh.scale.copy(initialScale);
@@ -2281,70 +2428,75 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
-      // We build edges from logical faces, suppressing internal diagonal triangulation
-      // edges on flat coplanar faces.
-      const faceNormals: THREE.Vector3[] = [];
+      // We build edges from logical faces or explicit wireframe edges
       const edgeToFaces = new Map<string, number[]>();
 
-      obj.faces.forEach((face, fIdx) => {
-        const len = face.indices.length;
-        if (len >= 3) {
-          const p0 = new THREE.Vector3(posArr[face.indices[0]*3], posArr[face.indices[0]*3+1], posArr[face.indices[0]*3+2]);
-          const p1 = new THREE.Vector3(posArr[face.indices[1]*3], posArr[face.indices[1]*3+1], posArr[face.indices[1]*3+2]);
-          const p2 = new THREE.Vector3(posArr[face.indices[2]*3], posArr[face.indices[2]*3+1], posArr[face.indices[2]*3+2]);
-          const vA = p1.sub(p0);
-          const vB = p2.sub(p0);
-          const norm = new THREE.Vector3().crossVectors(vA, vB).normalize();
-          faceNormals.push(norm);
-        } else {
-          faceNormals.push(new THREE.Vector3(0, 1, 0));
-        }
-
-        for (let i = 0; i < len; i++) {
-          const a = face.indices[i];
-          const b = face.indices[(i + 1) % len];
-          const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-          let fList = edgeToFaces.get(key);
-          if (!fList) {
-            fList = [];
-            edgeToFaces.set(key, fList);
+      if (obj.faces && obj.faces.length > 0) {
+        obj.faces.forEach((face, fIdx) => {
+          const len = face.indices.length;
+          for (let i = 0; i < len; i++) {
+            const a = face.indices[i];
+            const b = face.indices[(i + 1) % len];
+            const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+            let fList = edgeToFaces.get(key);
+            if (!fList) {
+              fList = [];
+              edgeToFaces.set(key, fList);
+            }
+            fList.push(fIdx);
           }
-          fList.push(fIdx);
-        }
-      });
+        });
+      }
 
       const edgePositions: number[] = [];
 
-      edgeToFaces.forEach((facesSharingEdge, key) => {
-        // If edge is shared by 2 faces that are coplanar (flat), omit internal diagonal edge
-        if (facesSharingEdge.length === 2) {
-          const n1 = faceNormals[facesSharingEdge[0]];
-          const n2 = faceNormals[facesSharingEdge[1]];
-          if (n1.dot(n2) > 0.9999) {
-            return;
+      if (edgeToFaces.size > 0) {
+        edgeToFaces.forEach((_facesSharingEdge, key) => {
+          const [aStr, bStr] = key.split(':');
+          const a = parseInt(aStr, 10);
+          const b = parseInt(bStr, 10);
+          if (posArr[a*3] !== undefined && posArr[b*3] !== undefined) {
+            edgePositions.push(
+              posArr[a*3], posArr[a*3+1], posArr[a*3+2],
+              posArr[b*3], posArr[b*3+1], posArr[b*3+2]
+            );
+          }
+        });
+      } else if (obj.wireframeEdges && obj.wireframeEdges.length > 0) {
+        for (const [a, b] of obj.wireframeEdges) {
+          if (posArr[a*3] !== undefined && posArr[b*3] !== undefined) {
+            edgePositions.push(
+              posArr[a*3], posArr[a*3+1], posArr[a*3+2],
+              posArr[b*3], posArr[b*3+1], posArr[b*3+2]
+            );
           }
         }
-
-        const [aStr, bStr] = key.split(':');
-        const a = parseInt(aStr, 10);
-        const b = parseInt(bStr, 10);
-        edgePositions.push(
-          posArr[a*3], posArr[a*3+1], posArr[a*3+2],
-          posArr[b*3], posArr[b*3+1], posArr[b*3+2]
-        );
-      });
+      } else if (posArr.length >= 6) {
+        // Fallback: connect vertices sequentially
+        for (let i = 0; i < (posArr.length / 3) - 1; i++) {
+          edgePositions.push(
+            posArr[i*3], posArr[i*3+1], posArr[i*3+2],
+            posArr[(i+1)*3], posArr[(i+1)*3+1], posArr[(i+1)*3+2]
+          );
+        }
+      }
 
       const edgeGeo = new THREE.BufferGeometry();
       edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
 
+      const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
+      const wireColor = isWireOnly
+        ? (isSelected ? 0x60a5fa : 0x4ade80) // Vibrant green or blue for wireframe objects
+        : (viewMode === 'WIREFRAME' ? (isSelected ? 0x4f8ef7 : 0x22dd44) : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444));
+
       const edgeLines = new THREE.LineSegments(
         edgeGeo,
         new THREE.LineBasicMaterial({
-          color: viewMode==='WIREFRAME' ? (isSelected?0x4f8ef7:0x22dd44) : 0x444444,
-          opacity: viewMode==='WIREFRAME' ? 1 : (editMode!=='OBJECT' ? (isSelected?0.5:0.05) : 0),
+          color: wireColor,
+          opacity: isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0))),
           transparent: true,
-          visible: viewMode==='WIREFRAME' || editMode!=='OBJECT',
-          depthTest: viewMode !== 'WIREFRAME', 
+          visible: isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'FACES_VERTICES' || editMode !== 'OBJECT',
+          depthTest: !isWireOnly && viewMode !== 'WIREFRAME', 
           depthWrite: false
         })
       );
@@ -2433,15 +2585,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             for (let v = 0; v < vCount; v++) {
               const cp = cps[u][v];
               const isSel = selSet.has(`${u},${v}`);
-              const radScale = cp.radius !== undefined ? Math.max(0.5, Math.min(2.5, cp.radius)) : 1.0;
-              const sphereRadius = (isSel ? 0.040 : 0.022) * Math.sqrt(radScale);
+              const sphereRadius = isSel ? 0.018 : 0.012;
               const dot = new THREE.Mesh(
-                new THREE.SphereGeometry(sphereRadius, 14, 14),
-                new THREE.MeshBasicMaterial({
-                  color: isSel ? 0xffb700 : 0x06b6d4,
-                  depthTest: false
-                })
+                SHARED_VERTEX_GEO,
+                isSel ? SHARED_SELECTED_MAT : SHARED_CYAN_MAT
               );
+              dot.scale.setScalar(sphereRadius);
               const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
                 .multiply(initialScale)
                 .applyEuler(initialRot)
@@ -2450,23 +2599,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               dot.renderOrder = isSel ? 25 : 10;
               dot.userData = { id: obj.id, isNurbsControlPoint: true, u, v };
               group.add(dot);
-
-              // Add a luminous outer halo ring to the selected sphere
-              if (isSel) {
-                const ringGeo = new THREE.RingGeometry(sphereRadius * 1.35, sphereRadius * 1.75, 24);
-                const ringMat = new THREE.MeshBasicMaterial({
-                  color: 0xffffff,
-                  side: THREE.DoubleSide,
-                  depthTest: false,
-                  transparent: true,
-                  opacity: 0.95
-                });
-                const ring = new THREE.Mesh(ringGeo, ringMat);
-                ring.position.copy(world);
-                if (cameraRef.current) ring.quaternion.copy(cameraRef.current.quaternion);
-                ring.renderOrder = 26;
-                group.add(ring);
-              }
             }
           }
         } else if (obj.nurbsCurve) {
@@ -2509,15 +2641,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           for (let i = 0; i < cps.length; i++) {
             const cp = cps[i];
             const isSel = selSet.has(i);
-            const radScale = cp.radius !== undefined ? Math.max(0.5, Math.min(2.5, cp.radius)) : 1.0;
-            const sphereRadius = (isSel ? 0.040 : 0.022) * Math.sqrt(radScale);
+            const sphereRadius = isSel ? 0.018 : 0.012;
             const dot = new THREE.Mesh(
-              new THREE.SphereGeometry(sphereRadius, 14, 14),
-              new THREE.MeshBasicMaterial({
-                color: isSel ? 0xffb700 : 0x06b6d4,
-                depthTest: false
-              })
+              SHARED_VERTEX_GEO,
+              isSel ? SHARED_SELECTED_MAT : SHARED_CYAN_MAT
             );
+            dot.scale.setScalar(sphereRadius);
             const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
               .multiply(initialScale)
               .applyEuler(initialRot)
@@ -2526,24 +2655,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             dot.renderOrder = isSel ? 25 : 10;
             dot.userData = { id: obj.id, isNurbsControlPoint: true, u: i, v: 0 };
             group.add(dot);
-
-            if (isSel) {
-              const ringGeo = new THREE.RingGeometry(sphereRadius * 1.35, sphereRadius * 1.75, 24);
-              const ringMat = new THREE.MeshBasicMaterial({
-                color: 0xffffff,
-                side: THREE.DoubleSide,
-                depthTest: false,
-                transparent: true,
-                opacity: 0.95
-              });
-              const ring = new THREE.Mesh(ringGeo, ringMat);
-              ring.position.copy(world);
-              if (cameraRef.current) ring.quaternion.copy(cameraRef.current.quaternion);
-              ring.renderOrder = 26;
-              group.add(ring);
-            }
           }
-        } else if (editMode === 'VERTEX') {
+        } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES') {
             const pointGeo = new THREE.BufferGeometry();
             const logicalVerts: number[] = [];
             if (obj.vertices) {
@@ -2554,28 +2667,58 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
             pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
             pointGeo.computeBoundingSphere();
-            const pts = new THREE.Points(pointGeo, new THREE.PointsMaterial({ visible:true, transparent:true, opacity:0, size:0.2 }));
+            const pts = new THREE.Points(pointGeo, new THREE.PointsMaterial({ visible:true, transparent:true, opacity:0, size:0.25 }));
             pts.position.copy(initialPos);
             pts.rotation.copy(initialRot);
             pts.scale.copy(initialScale);
             pts.updateMatrixWorld(true);
-            vertexPointsRef.current = pts;
+            if (isSelected || editMode === 'VERTEX') {
+              vertexPointsRef.current = pts;
+            }
 
             const selectedSet = new Set(selectedVertexIndices);
             const logicalPosAttr = pointGeo.getAttribute('position');
             for (let i = 0; i < logicalPosAttr.count; i++) {
+              const isSel = isSelected && selectedSet.has(i);
               const dot = new THREE.Mesh(
-                new THREE.SphereGeometry(0.012, 6, 6),
-                new THREE.MeshBasicMaterial({ color: selectedSet.has(i)?0xffaa00:0x888888, depthTest:false })
+                SHARED_VERTEX_GEO,
+                isSel ? SHARED_ACTIVE_MAT : (viewMode === 'FACES_VERTICES' && !isSelected ? SHARED_CYAN_MAT : SHARED_WHITE_MAT)
               );
+              dot.scale.setScalar(isSel ? 0.024 : (viewMode === 'FACES_VERTICES' && !isSelected ? 0.010 : 0.013));
               const world = new THREE.Vector3(logicalPosAttr.getX(i), logicalPosAttr.getY(i), logicalPosAttr.getZ(i))
                 .multiply(initialScale)
                 .applyEuler(initialRot)
                 .add(initialPos);
               dot.position.copy(world);
-              dot.renderOrder = 2;
-              dot.userData.id = obj.id;
+              dot.renderOrder = isSel ? 50 : 35;
+              dot.userData = {
+                id: obj.id,
+                isVertexHandle: true,
+                vertexIndex: i,
+                coincidentIndices: getCoincidentVertices(pointGeo, i)
+              };
               group.add(dot);
+            }
+          } else if (editMode === 'EDGE' || editMode === 'FACE') {
+            // Also render subtle landmark dots on vertices for clear topology guidance
+            if (obj.vertices && obj.vertices.length > 0) {
+              const logicalVerts: number[] = [];
+              obj.vertices.forEach((v, i) => {
+                const off = obj.vertexOffsets?.[i] || [0,0,0];
+                logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+              });
+              for (let i = 0; i < obj.vertices.length; i++) {
+                const dot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_CYAN_MAT);
+                dot.scale.setScalar(0.008);
+                const world = new THREE.Vector3(logicalVerts[i*3], logicalVerts[i*3+1], logicalVerts[i*3+2])
+                  .multiply(initialScale)
+                  .applyEuler(initialRot)
+                  .add(initialPos);
+                dot.position.copy(world);
+                dot.renderOrder = 30;
+                dot.userData.id = obj.id;
+                group.add(dot);
+              }
             }
           }
 
@@ -2584,55 +2727,92 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             const face = obj.faces[faceIdx];
             if (!face) return;
             const faceVerts: number[] = [];
-            for (let i = 1; i < face.indices.length-1; i++) {
-              [face.indices[0], face.indices[i], face.indices[i+1]].forEach(vi => {
-                const baseV = obj.vertices[vi];
-                const off = obj.vertexOffsets?.[vi] || [0,0,0];
-                faceVerts.push(baseV[0]+off[0], baseV[1]+off[1], baseV[2]+off[2]);
+            const perimeterVerts: THREE.Vector3[] = [];
+            face.indices.forEach(vi => {
+              const baseV = obj.vertices[vi];
+              const off = obj.vertexOffsets?.[vi] || [0, 0, 0];
+              perimeterVerts.push(new THREE.Vector3(baseV[0] + off[0], baseV[1] + off[1], baseV[2] + off[2]));
+            });
+            for (let i = 1; i < face.indices.length - 1; i++) {
+              [perimeterVerts[0], perimeterVerts[i], perimeterVerts[i + 1]].forEach(p => {
+                faceVerts.push(p.x, p.y, p.z);
               });
             }
             const fGeo = new THREE.BufferGeometry();
             fGeo.setAttribute('position', new THREE.Float32BufferAttribute(faceVerts, 3));
+            fGeo.computeVertexNormals();
             const fm = new THREE.Mesh(fGeo, new THREE.MeshBasicMaterial({
-              color:0xff6600, transparent:true, opacity:0.55, side:THREE.DoubleSide, 
-              depthTest:true,
+              color: 0xf97316, transparent: true, opacity: 0.58, side: THREE.DoubleSide, 
+              depthTest: true,
               polygonOffset: true,
-              polygonOffsetFactor: -1,
-              polygonOffsetUnits: -1
+              polygonOffsetFactor: -1.5,
+              polygonOffsetUnits: -1.5
             }));
             fm.position.copy(initialPos);
             fm.rotation.copy(initialRot);
             fm.scale.copy(initialScale);
             fm.updateMatrixWorld(true);
-            fm.renderOrder = 1;
+            fm.renderOrder = 20;
             fm.userData.id = obj.id;
             group.add(fm);
+
+            // Add perimeter boundary line for selected face
+            if (perimeterVerts.length >= 3) {
+              const loop = [...perimeterVerts, perimeterVerts[0]];
+              const loopPoints: number[] = [];
+              loop.forEach(p => loopPoints.push(p.x, p.y, p.z));
+              const pGeo = new THREE.BufferGeometry();
+              pGeo.setAttribute('position', new THREE.Float32BufferAttribute(loopPoints, 3));
+              const pLine = new THREE.Line(pGeo, new THREE.LineBasicMaterial({ color: 0xef4444, linewidth: 3, depthTest: false }));
+              pLine.position.copy(initialPos);
+              pLine.rotation.copy(initialRot);
+              pLine.scale.copy(initialScale);
+              pLine.updateMatrixWorld(true);
+              pLine.renderOrder = 25;
+              pLine.userData.id = obj.id;
+              group.add(pLine);
+            }
           });
         }
 
         if (editMode === 'EDGE' && selectedEdgeIndices.length > 0) {
           const edgePos: number[] = [];
-          for (let i = 0; i < selectedEdgeIndices.length; i+=2) {
-            const a = selectedEdgeIndices[i], b = selectedEdgeIndices[i+1];
+          const edgeVertDots: THREE.Vector3[] = [];
+          for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
+            const a = selectedEdgeIndices[i], b = selectedEdgeIndices[i + 1];
             if (obj.vertices && a < obj.vertices.length && b < obj.vertices.length) {
               const va = obj.vertices[a];
               const vb = obj.vertices[b];
-              const offA = obj.vertexOffsets?.[a] || [0,0,0];
-              const offB = obj.vertexOffsets?.[b] || [0,0,0];
-              edgePos.push(va[0]+offA[0], va[1]+offA[1], va[2]+offA[2], vb[0]+offB[0], vb[1]+offB[1], vb[2]+offB[2]);
+              const offA = obj.vertexOffsets?.[a] || [0, 0, 0];
+              const offB = obj.vertexOffsets?.[b] || [0, 0, 0];
+              const pA = new THREE.Vector3(va[0] + offA[0], va[1] + offA[1], va[2] + offA[2]);
+              const pB = new THREE.Vector3(vb[0] + offB[0], vb[1] + offB[1], vb[2] + offB[2]);
+              edgePos.push(pA.x, pA.y, pA.z, pB.x, pB.y, pB.z);
+              edgeVertDots.push(pA, pB);
             }
           }
           if (edgePos.length) {
             const eGeo = new THREE.BufferGeometry();
             eGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePos, 3));
-            const el = new THREE.LineSegments(eGeo, new THREE.LineBasicMaterial({ color:0x39ff14, linewidth:3, depthTest:false }));
+            const el = new THREE.LineSegments(eGeo, new THREE.LineBasicMaterial({ color: 0xef4444, linewidth: 4, depthTest: false }));
             el.position.copy(initialPos);
             el.rotation.copy(initialRot);
             el.scale.copy(initialScale);
             el.updateMatrixWorld(true);
-            el.renderOrder = 1;
+            el.renderOrder = 30;
             el.userData.id = obj.id;
             group.add(el);
+
+            // Selected edge vertices marked with active dots
+            edgeVertDots.forEach(p => {
+              const dot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_ACTIVE_MAT);
+              dot.scale.setScalar(0.016);
+              const world = p.clone().multiply(initialScale).applyEuler(initialRot).add(initialPos);
+              dot.position.copy(world);
+              dot.renderOrder = 35;
+              dot.userData.id = obj.id;
+              group.add(dot);
+            });
           }
         }
       }
@@ -2781,6 +2961,53 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (points.length > 0) {
         const group = new THREE.Group();
         
+        // ── Ortho / Axis Guide Lines ──
+        const guideAxis = (drawingPreviewPointRef as any)._guideAxis as string | null;
+        if (guideAxis && points.length >= 2) {
+          const prev = points[points.length - 2];
+          const curr = points[points.length - 1];
+          const dir = curr.clone().sub(prev);
+          const len = dir.length();
+          if (len > 0.001) {
+            dir.normalize();
+            const guideP1 = prev.clone().sub(dir.clone().multiplyScalar(5));
+            const guideP2 = curr.clone().add(dir.clone().multiplyScalar(5));
+            const guideGeo = new THREE.BufferGeometry().setFromPoints([guideP1, guideP2]);
+            const guideColor = guideAxis === 'X' ? 0xff4444 : guideAxis === 'Y' ? 0x44ff44 : guideAxis === 'Z' ? 0x4488ff : 0xffcc00;
+            const guideMat = new THREE.LineDashedMaterial({
+              color: guideColor,
+              dashSize: 0.15,
+              gapSize: 0.1,
+              depthTest: false,
+              transparent: true,
+              opacity: 0.85
+            });
+            const guideLine = new THREE.Line(guideGeo, guideMat);
+            guideLine.computeLineDistances();
+            guideLine.renderOrder = 5;
+            group.add(guideLine);
+
+            // Escuadra 90° symbol (corner mark) at prev point
+            if (points.length >= 3) {
+              const prevPrev = points[points.length - 3];
+              const seg1 = prev.clone().sub(prevPrev).normalize();
+              const seg2 = curr.clone().sub(prev).normalize();
+              const dot = Math.abs(seg1.dot(seg2));
+              if (dot < 0.15) {
+                // Perpendicular: Draw small 90° square at prev
+                const cornerSize = 0.15;
+                const c1 = prev.clone().add(seg1.clone().multiplyScalar(-cornerSize));
+                const c2 = prev.clone().add(seg1.clone().multiplyScalar(-cornerSize)).add(seg2.clone().multiplyScalar(cornerSize));
+                const c3 = prev.clone().add(seg2.clone().multiplyScalar(cornerSize));
+                const sqGeo = new THREE.BufferGeometry().setFromPoints([c1, c2, c3]);
+                const sqLine = new THREE.Line(sqGeo, new THREE.LineBasicMaterial({ color: 0x00ffcc, depthTest: false }));
+                sqLine.renderOrder = 6;
+                group.add(sqLine);
+              }
+            }
+          }
+        }
+
         let curveLine;
         if (handles.length > 0 && points.length > 1) {
             const allCurvePoints: THREE.Vector3[] = [];
@@ -2812,32 +3039,38 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
         group.add(curveLine);
 
-        // Draw handles and anchors for visual feedback
+        // Draw handles and anchors for visual feedback (Ultra-compact, crisp and lightweight)
         points.forEach((p, i) => {
-          // Scale handle dots by camera distance so they remain visible at any zoom
+          // Scale handle dots gently by camera distance so they remain micro-sharp and never oversized
           const camDist = cameraRef.current instanceof THREE.OrthographicCamera
             ? 1 / Math.max(0.01, (cameraRef.current as THREE.OrthographicCamera).zoom)
             : cameraRef.current?.position.distanceTo(p) ?? 5;
-          const anchorR = Math.max(0.04, camDist * 0.022);
-          const handleR = Math.max(0.03, camDist * 0.016);
+          const anchorR = Math.min(0.020, Math.max(0.007, camDist * 0.0016));
+          const handleR = Math.min(0.014, Math.max(0.005, camDist * 0.0011));
 
-          const anchor = new THREE.Mesh(
-            new THREE.SphereGeometry(anchorR, 8, 8),
-            new THREE.MeshBasicMaterial({ color: i === drawingPointsRef.current.length - 1 ? 0xffff00 : 0xffffff, depthTest: false })
-          );
+          const isFirst = i === 0;
+          const isLastCommitted = i === drawingPointsRef.current.length - 1;
+          const anchorMat = (isFirst && points.length > 1)
+            ? SHARED_START_MAT
+            : isLastCommitted
+            ? SHARED_ACTIVE_MAT
+            : SHARED_WHITE_MAT;
+
+          const anchor = new THREE.Mesh(SHARED_VERTEX_GEO, anchorMat);
+          anchor.scale.setScalar(anchorR);
           anchor.position.copy(p);
           group.add(anchor);
 
           if (drawMode === 'bezier' && handles[i]) {
             const h = handles[i];
-            // Show out handle (or a ghost if zero-length so user can see it exists)
             const outVec = new THREE.Vector3(...h.out);
             const hasOut = outVec.length() > 0.001;
             if (hasOut) {
               const outPos = p.clone().add(outVec);
               const lineGeo = new THREE.BufferGeometry().setFromPoints([p, outPos]);
               group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x4488ff, depthTest: false })));
-              const dot = new THREE.Mesh(new THREE.SphereGeometry(handleR, 8, 8), new THREE.MeshBasicMaterial({ color: 0x4488ff, depthTest: false }));
+              const dot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_OUT_MAT);
+              dot.scale.setScalar(handleR);
               dot.position.copy(outPos);
               group.add(dot);
             }
@@ -2847,22 +3080,26 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const inPos = p.clone().add(inVec);
               const lineGeo = new THREE.BufferGeometry().setFromPoints([p, inPos]);
               group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x44cc44, depthTest: false })));
-              const dot = new THREE.Mesh(new THREE.SphereGeometry(handleR, 8, 8), new THREE.MeshBasicMaterial({ color: 0x44cc44, depthTest: false }));
+              const dot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_IN_MAT);
+              dot.scale.setScalar(handleR);
               dot.position.copy(inPos);
               group.add(dot);
             }
           }
         });
 
-        // ── Snap indicator: green ring when about to snap to an endpoint ──
+        // ── Snap indicator: subtle green ring when snapping to start or endpoint ──
         if ((drawingPreviewPointRef as any)._snapping && drawingPreviewPointRef.current) {
-          const ring = new THREE.Mesh(
-            new THREE.RingGeometry(0.10, 0.14, 16),
-            new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, depthTest: false })
-          );
+          const ring = new THREE.Mesh(SHARED_SNAP_RING_GEO, SHARED_SNAP_MAT);
           ring.position.copy(drawingPreviewPointRef.current);
           ring.renderOrder = 10;
           group.add(ring);
+
+          const innerDot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_SNAP_DOT_MAT);
+          innerDot.scale.setScalar(0.012);
+          innerDot.position.copy(drawingPreviewPointRef.current);
+          innerDot.renderOrder = 11;
+          group.add(innerDot);
         }
 
         drawingMeshRef.current = group as any;
@@ -2872,14 +3109,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
     // ─────────────────────────────────────────────────────────────────────────
     // Screen-space endpoint snapping
-    // Works by projecting every open SHAPE's first/last vertex into screen pixels
-    // and returning the nearest one within a pixel threshold.
-    // This is INDEPENDENT of pick-spheres / raycasting, so it works even when
-    // the shape is not selected and has no invisible proxy meshes in the scene.
+    // Snaps to the start of the current stroke or to any open shape endpoint
     // ─────────────────────────────────────────────────────────────────────────
     type SnapResult = { objId: string; anchorIdx: number; worldPos: THREE.Vector3; isOwnStart: boolean };
 
-    const findSnapEndpoint = (clientX: number, clientY: number, pxThresh = 20): SnapResult | null => {
+    const findSnapEndpoint = (clientX: number, clientY: number, pxThresh = 24): SnapResult | null => {
       const cam = cameraRef.current;
       const rnd = rendererRef.current;
       if (!cam || !rnd) return null;
@@ -2893,6 +3127,22 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       let best: SnapResult | null = null;
       let bestDist = pxThresh;
 
+      // 1. Check in-progress stroke's first point (start point to close/weld)
+      if (drawingPointsRef.current.length >= 2) {
+        const firstPt = drawingPointsRef.current[0];
+        const ndc = firstPt.clone().project(cam);
+        if (ndc.z <= 1) {
+          const px = (ndc.x * 0.5 + 0.5) * w;
+          const py = (ndc.y * -0.5 + 0.5) * h;
+          const d = Math.sqrt((px - sx) ** 2 + (py - sy) ** 2);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { objId: drawingObjectIdRef.current || '__CURRENT__', anchorIdx: 0, worldPos: firstPt.clone(), isOwnStart: true };
+          }
+        }
+      }
+
+      // 2. Check all open SHAPE objects in project
       for (const obj of projectRef.current.objects) {
         if (obj.type !== 'SHAPE' || obj.parameters.closed || obj.vertices.length < 1) continue;
 
@@ -2908,14 +3158,13 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const off = obj.vertexOffsets?.[vi] ?? [0, 0, 0];
           const world = new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]).applyMatrix4(mat4);
           const ndc   = world.clone().project(cam);
-          if (ndc.z > 1) return;            // behind camera
+          if (ndc.z > 1) return; // behind camera
           const px = (ndc.x *  0.5 + 0.5) * w;
           const py = (ndc.y * -0.5 + 0.5) * h;
           const d  = Math.sqrt((px - sx) ** 2 + (py - sy) ** 2);
           if (d < bestDist) {
             bestDist = d;
-            // isOwnStart: this endpoint is the *first* vertex of the shape we're currently extending
-            const isOwnStart = obj.id === drawingObjectIdRef.current && vi === 0;
+            const isOwnStart = (obj.id === drawingObjectIdRef.current && vi === 0) || (drawingObjectIdRef.current === '__CURRENT__' && vi === 0);
             best = { objId: obj.id, anchorIdx: vi, worldPos: world, isOwnStart };
           }
         };
@@ -2929,28 +3178,47 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
     // Shared finish-stroke helper
     const finishStroke = (snapResult: SnapResult | null) => {
-      const pts  = [...drawingPointsRef.current];
-      const hnds = [...drawingHandlesRef.current];
+      let pts  = [...drawingPointsRef.current];
+      let hnds = [...drawingHandlesRef.current];
 
       let closeShape = false;
 
       if (snapResult) {
-        // Add the snapped world-point as the last vertex
-        pts.push(snapResult.worldPos.clone());
-        hnds.push({ out: [0,0,0], in: [0,0,0], broken: false });
-
-        // If snapping to the first vertex of the shape we're extending → close it
-        if (snapResult.isOwnStart) {
-          pts.pop();   // drop the duplicate
-          hnds.pop();
+        // If snapping to the start point of this stroke or shape -> close and weld
+        if (snapResult.isOwnStart || snapResult.objId === '__CURRENT__' || (pts.length > 0 && pts[0].distanceTo(snapResult.worldPos) < 0.35)) {
           closeShape = true;
+          // Drop trailing points if user clicked near start point
+          if (pts.length >= 2 && pts[pts.length - 1].distanceTo(pts[0]) < 0.25) {
+            pts.pop();
+            hnds.pop();
+          }
+        } else {
+          pts.push(snapResult.worldPos.clone());
+          hnds.push({ out: [0,0,0], in: [0,0,0], broken: false });
         }
+      }
+
+      // Auto-weld/close if last point is within 0.35 units of start point
+      if (!closeShape && pts.length >= 3 && pts[0].distanceTo(pts[pts.length - 1]) < 0.35) {
+        pts.pop();
+        hnds.pop();
+        closeShape = true;
+      }
+
+      if (pts.length < 2) {
+        drawingPointsRef.current       = [];
+        drawingHandlesRef.current      = [];
+        drawingObjectIdRef.current     = null;
+        drawingPreviewPointRef.current = null;
+        updatePreview();
+        useStore.getState().setDrawMode(null);
+        return;
       }
 
       const vertices = pts.map(p => toV3(p));
       const handles  = hnds;
 
-      if (drawingObjectIdRef.current) {
+      if (drawingObjectIdRef.current && drawingObjectIdRef.current !== '__CURRENT__') {
         const existObj = projectRef.current.objects.find(o => o.id === drawingObjectIdRef.current);
         useStore.getState().updateObject(drawingObjectIdRef.current, {
           vertices,
@@ -2969,6 +3237,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       useStore.getState().setDrawMode(null);
       useStore.getState().saveHistory();
     };
+
+    finishStrokeRef.current = finishStroke;
+    updatePreviewRef.current = updatePreview;
 
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
@@ -3291,6 +3562,25 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
     };
 
+    const handleCustomFinish = () => {
+      const pts = drawingPointsRef.current;
+      if (pts.length >= 2) {
+        const first = pts[0];
+        finishStroke({ objId: '__CURRENT__', anchorIdx: 0, worldPos: first, isOwnStart: true });
+      }
+    };
+
+    const handleCustomCancel = () => {
+      drawingPointsRef.current = [];
+      drawingHandlesRef.current = [];
+      drawingObjectIdRef.current = null;
+      drawingPreviewPointRef.current = null;
+      updatePreview();
+    };
+
+    window.addEventListener('csg-finish-drawing-stroke', handleCustomFinish);
+    window.addEventListener('csg-cancel-drawing-stroke', handleCustomCancel);
+
     // ── Register in CAPTURE phase ──────────────────────────────────────────
     // OrbitControls registers its listeners in bubble phase (default).
     // By using capture:true here our handlers run FIRST, and calling
@@ -3303,6 +3593,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     canvas.addEventListener('dblclick',    onDblClick,    CAPTURE);
 
     return () => {
+      window.removeEventListener('csg-finish-drawing-stroke', handleCustomFinish);
+      window.removeEventListener('csg-cancel-drawing-stroke', handleCustomCancel);
       canvas.removeEventListener('pointerdown', onPointerDown, CAPTURE);
       canvas.removeEventListener('pointermove', onPointerMove, CAPTURE);
       canvas.removeEventListener('pointerup',   onPointerUp,   CAPTURE);
@@ -3313,15 +3605,6 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   // ── 5. Interaction Handlers ──────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
-
-    const getCoincidentVertices = (geometry: THREE.BufferGeometry, index: number): number[] => {
-      const pos = geometry.getAttribute('position');
-      const x=pos.getX(index), y=pos.getY(index), z=pos.getZ(index);
-      const out: number[] = [];
-      for (let i=0; i<pos.count; i++)
-        if (Math.abs(pos.getX(i)-x)<0.0001 && Math.abs(pos.getY(i)-y)<0.0001 && Math.abs(pos.getZ(i)-z)<0.0001) out.push(i);
-      return out;
-    };
 
     const getAxisHit = (mx: number, my: number): string | null => {
       if (!selectedObjectId && !selectedLightId && !selectedCameraId) return null;
@@ -3366,7 +3649,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           });
           if (validCount > 0) centroidLocal.divideScalar(validCount);
 
-          const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+          const mesh = getObjectMesh(selectedObjectId);
           if (mesh && validCount > 0) {
             objPos = centroidLocal.applyMatrix4(mesh.matrixWorld);
           } else if (validCount > 0) {
@@ -3380,15 +3663,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             objPos.fromArray(_interp.position);
           }
         } else if (editMode==='OBJECT') {
-          const _interp = getInterpolatedTransform(selObj, currentTime);
-          objPos.fromArray(_interp.position);
+          const mesh = getObjectMesh(selectedObjectId);
+          if (mesh) {
+            mesh.getWorldPosition(objPos);
+          } else {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            objPos.fromArray(_interp.position);
+          }
         } else {
           if (!selectedVertexIndices.length) return null;
-          const mesh = primitivesGroupRef.current?.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
-          if (!mesh) return null;
+          const mesh = getObjectMesh(selectedObjectId);
 
           const isShape = selObj.type === 'SHAPE';
-          const isBezier = isShape && selObj.parameters.shapeType === 'bezier';
+          const isBezier = isShape && selObj.parameters?.shapeType === 'bezier';
 
           if (isBezier && selectedVertexIndices.some(idx => idx >= 10000)) {
             const idx = selectedVertexIndices[0];
@@ -3396,7 +3683,15 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             const side = idx >= 20000 ? 'in' : 'out';
             const anchor = new THREE.Vector3(...selObj.vertices[anchorIdx]);
             const handleRel = new THREE.Vector3(...(selObj.bezierHandles?.[anchorIdx]?.[side] ?? [0,0,0]));
-            objPos = anchor.add(handleRel).applyMatrix4(mesh.matrixWorld);
+            if (mesh) {
+              objPos = anchor.add(handleRel).applyMatrix4(mesh.matrixWorld);
+            } else {
+              const _interp = getInterpolatedTransform(selObj, currentTime);
+              objPos = anchor.add(handleRel)
+                .multiply(new THREE.Vector3(..._interp.scale))
+                .applyEuler(new THREE.Euler(..._interp.rotation))
+                .add(new THREE.Vector3(..._interp.position));
+            }
           } else {
             const centroid = new THREE.Vector3();
             let count = 0;
@@ -3409,8 +3704,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               }
             });
             if (count > 0) {
-              centroid.divideScalar(count).applyMatrix4(mesh.matrixWorld);
-              objPos = centroid;
+              centroid.divideScalar(count);
+              if (mesh) {
+                objPos = centroid.applyMatrix4(mesh.matrixWorld);
+              } else {
+                const _interp = getInterpolatedTransform(selObj, currentTime);
+                objPos = centroid
+                  .multiply(new THREE.Vector3(..._interp.scale))
+                  .applyEuler(new THREE.Euler(..._interp.rotation))
+                  .add(new THREE.Vector3(..._interp.position));
+              }
             } else {
               return null;
             }
@@ -3424,17 +3727,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const distCenter = Math.sqrt((mx - cx)**2 + (my - cy)**2);
 
       // 1. Center FREE handle (small clean dot)
-      if (distCenter < (isNurbsCpSelected ? 10 : 8)) return 'FREE';
+      if (distCenter < (isNurbsCpSelected ? 14 : 12)) return 'FREE';
 
       // 2. Check Scale Cubes (disabled when a NURBS control point is selected)
       if (!isNurbsCpSelected && (transformMode === 'scale' || transformMode === 'universal')) {
-        const scaleDistRatio = transformMode === 'universal' ? 1.05 : 0.9;
+        const scaleDistRatio = transformMode === 'universal' ? 0.72 : 1.0;
         for (const axis of ['X', 'Y', 'Z']) {
           const d = dirs[axis];
           if (!d) continue;
           const cubeX = cx + d.nx * scaleDistRatio;
           const cubeY = cy + d.ny * scaleDistRatio;
-          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 15) {
+          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 18) {
             return `SCALE_${axis}`;
           }
         }
@@ -3445,42 +3748,37 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         for (const rotAxis of ['Z', 'X', 'Y']) {
           const arc = rotArcs[rotAxis];
           if (!arc) continue;
-          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 15) {
+          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 18) {
             return `ROT_${rotAxis}`;
           }
           for (const p of arc.pts) {
-            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 11) {
+            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 14) {
               return `ROT_${rotAxis}`;
             }
           }
         }
       }
 
-      // 4. Check Axis Translation Arrows / Shafts
-      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
-        for (const axis of ['X', 'Y', 'Z']) {
-          const d = dirs[axis];
-          if (!d) continue;
-          const tipX = cx + d.nx, tipY = cy + d.ny;
-          const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
-          if (!bLen) continue;
-          const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
-          const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
-          if (dist < 12) return axis;
-        }
-      }
-
-      // 5. Check 2D Translation Planes
+      // 4. Check 2D Translation Planes first for easy corner grabbing
       if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
         const checkPlane = (a1: string, a2: string, planeName: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
           if (!d1 || !d2) return false;
+          const l1 = Math.sqrt(d1.nx*d1.nx + d1.ny*d1.ny);
+          const l2 = Math.sqrt(d2.nx*d2.nx + d2.ny*d2.ny);
+          if (l1 < 5 || l2 < 5) return false;
+
+          // Check coordinate in 2D basis
+          const u = ((mx - cx) * d1.nx + (my - cy) * d1.ny) / (l1 * l1);
+          const v = ((mx - cx) * d2.nx + (my - cy) * d2.ny) / (l2 * l2);
+          if (u >= 0.10 && u <= 0.50 && v >= 0.10 && v <= 0.50) return true;
+
           const poly = [
-            {x: cx + d1.nx*0.2, y: cy + d1.ny*0.2},
-            {x: cx + d1.nx*0.42, y: cy + d1.ny*0.42},
-            {x: cx + (d1.nx + d2.nx)*0.42, y: cy + (d1.ny + d2.ny)*0.42},
-            {x: cx + d2.nx*0.42, y: cy + d2.ny*0.42},
-            {x: cx + d2.nx*0.2, y: cy + d2.ny*0.2}
+            {x: cx + d1.nx*0.12, y: cy + d1.ny*0.12},
+            {x: cx + d1.nx*0.48, y: cy + d1.ny*0.48},
+            {x: cx + (d1.nx + d2.nx)*0.48, y: cy + (d1.ny + d2.ny)*0.48},
+            {x: cx + d2.nx*0.48, y: cy + d2.ny*0.48},
+            {x: cx + d2.nx*0.12, y: cy + d2.ny*0.12}
           ];
           let inside = false;
           for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -3496,10 +3794,24 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (checkPlane('X', 'Z', 'XZ')) return 'XZ';
       }
 
+      // 5. Check Axis Translation Arrows / Shafts
+      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const tipX = cx + d.nx, tipY = cy + d.ny;
+          const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
+          if (bLen < 5) continue;
+          const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
+          const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
+          if (dist < 16) return axis;
+        }
+      }
+
       // 6. Outer View Ring (disabled when a NURBS control point is selected)
       if (!isNurbsCpSelected) {
         const OUTER_R = AXIS_LEN * 1.15;
-        if (Math.abs(distCenter - OUTER_R) < 10) {
+        if (Math.abs(distCenter - OUTER_R) < 14) {
           return transformMode === 'scale' ? 'SCALE_UNIFORM' : 'ROT_VIEW';
         }
       }
@@ -3648,7 +3960,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const u = selObj.selectedNurbsControlPoint!.u;
                 cpLocal = selObj.nurbsCurve.controlPoints[u]?.point || null;
               }
-              const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+              const mesh = getObjectMesh(selectedObjectId);
               if (cpLocal && mesh) {
                 gizmoWorldPos = new THREE.Vector3(...cpLocal).applyMatrix4(mesh.matrixWorld);
               } else if (cpLocal) {
@@ -3662,27 +3974,35 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 gizmoWorldPos.fromArray(_interp.position);
               }
             } else if (editMode === 'OBJECT') {
-              const _interp = getInterpolatedTransform(selObj, currentTime);
-              gizmoWorldPos.fromArray(_interp.position);
-            } else {
-              const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+              const mesh = getObjectMesh(selectedObjectId);
               if (mesh) {
-                const centroid = new THREE.Vector3();
-                let count = 0;
-                selectedVertexIndices.forEach(idx => {
-                  if (selObj.vertices && idx < selObj.vertices.length) {
-                    const v = selObj.vertices[idx];
-                    const off = selObj.vertexOffsets?.[idx] ?? [0,0,0];
-                    centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
-                    count++;
-                  }
-                });
-                if (count > 0) {
-                  centroid.divideScalar(count).applyMatrix4(mesh.matrixWorld);
-                  gizmoWorldPos.copy(centroid);
+                mesh.getWorldPosition(gizmoWorldPos);
+              } else {
+                const _interp = getInterpolatedTransform(selObj, currentTime);
+                gizmoWorldPos.fromArray(_interp.position);
+              }
+            } else {
+              const mesh = getObjectMesh(selectedObjectId);
+              const centroid = new THREE.Vector3();
+              let count = 0;
+              selectedVertexIndices.forEach(idx => {
+                if (selObj.vertices && idx < selObj.vertices.length) {
+                  const v = selObj.vertices[idx];
+                  const off = selObj.vertexOffsets?.[idx] ?? [0,0,0];
+                  centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
+                  count++;
+                }
+              });
+              if (count > 0) {
+                centroid.divideScalar(count);
+                if (mesh) {
+                  gizmoWorldPos = centroid.applyMatrix4(mesh.matrixWorld);
                 } else {
                   const _interp = getInterpolatedTransform(selObj, currentTime);
-                  gizmoWorldPos.fromArray(_interp.position);
+                  gizmoWorldPos = centroid
+                    .multiply(new THREE.Vector3(..._interp.scale))
+                    .applyEuler(new THREE.Euler(..._interp.rotation))
+                    .add(new THREE.Vector3(..._interp.position));
                 }
               } else {
                 const _interp = getInterpolatedTransform(selObj, currentTime);
@@ -3742,16 +4062,23 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           }
 
           if (cam) {
-            const eyeDir = cam.position.clone().sub(gizmoWorldPos).normalize();
-            if (eyeDir.dot(visVecX) < -0.05) visVecX.negate();
-            if (eyeDir.dot(visVecY) < -0.05) visVecY.negate();
-            if (eyeDir.dot(visVecZ) < -0.05) visVecZ.negate();
+            const isOrtho = (cam as any).isOrthographicCamera;
+            const camDir = new THREE.Vector3();
+            cam.getWorldDirection(camDir);
+            const eyeDir = isOrtho ? camDir.negate() : cam.position.clone().sub(gizmoWorldPos).normalize();
+            if (!isOrtho && eyeDir.dot(visVecX) < -0.05) visVecX.negate();
+            if (!isOrtho && eyeDir.dot(visVecY) < -0.05) visVecY.negate();
+            if (!isOrtho && eyeDir.dot(visVecZ) < -0.05) visVecZ.negate();
           }
 
           const handleWorldDir = { X: visVecX, Y: visVecY, Z: visVecZ };
 
+          const activeObjectIds = (selectedObjectIds && selectedObjectIds.length > 0)
+            ? selectedObjectIds
+            : (selectedObjectId ? [selectedObjectId] : []);
+
           const startTransforms: Record<string, any> = {};
-          selectedObjectIds.forEach(id => {
+          activeObjectIds.forEach(id => {
             const o = projectRef.current.objects.find(obj => obj.id === id);
             if (o) {
               const interp = getInterpolatedTransform(o, currentTime);
@@ -3828,12 +4155,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 });
               }
             } else {
-              const mesh=primitivesGroupRef.current.children.find(ch=>ch.userData.id===selectedObjectId) as THREE.Mesh;
-              if (mesh) {
-                selectedVertexIndices.forEach(idx=>{ offsets[idx]=[...(selObj.vertexOffsets?.[idx]||[0,0,0])] as [number,number,number]; });
-              }
+              selectedVertexIndices.forEach(idx => {
+                offsets[idx] = [...(selObj.vertexOffsets?.[idx] || [0,0,0])] as [number,number,number];
+              });
             }
-            gizmoStateRef.current.startVertexOffsets=offsets;
+            gizmoStateRef.current.startVertexOffsets = offsets;
           }
           if (controlsRef.current) controlsRef.current.enabled=false;
           return;
@@ -4017,6 +4343,109 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               if (controlsRef.current) controlsRef.current.enabled = false;
             }
           }
+        } else if (selObj && (vertexPointsRef.current || groupRef.current)) {
+          // ── Direct Click & Drag for 3D Mesh Vertices ─────────────────────
+          let hitVtxIdx: number | null = null;
+          let coincidentIndices: number[] = [];
+          let hitWorldPos: THREE.Vector3 | null = null;
+
+          // 1. Raycast against Points geometry
+          if (vertexPointsRef.current) {
+            if (cameraRef.current instanceof THREE.PerspectiveCamera) {
+              const camDist = cameraRef.current.position.distanceTo(vertexPointsRef.current.position);
+              raycasterRef.current.params.Points.threshold = Math.max(0.18, camDist * 0.035);
+            } else {
+              raycasterRef.current.params.Points.threshold = 0.5;
+            }
+            const hits = raycasterRef.current.intersectObject(vertexPointsRef.current);
+            if (hits.length > 0 && hits[0].index !== undefined) {
+              hitVtxIdx = hits[0].index;
+              hitWorldPos = hits[0].point.clone();
+              coincidentIndices = getCoincidentVertices(vertexPointsRef.current.geometry, hitVtxIdx);
+            }
+          }
+
+          // 2. Raycast against visual vertex dot spheres
+          if (hitVtxIdx === null && groupRef.current) {
+            const sphereHits = raycasterRef.current.intersectObjects(groupRef.current.children, false);
+            const vh = sphereHits.find(h => h.object.userData?.isVertexHandle && h.object.userData?.id === selectedObjectId);
+            if (vh && vh.object.userData.vertexIndex !== undefined) {
+              hitVtxIdx = vh.object.userData.vertexIndex;
+              hitWorldPos = vh.point.clone();
+              coincidentIndices = vh.object.userData.coincidentIndices || [hitVtxIdx];
+            }
+          }
+
+          if (hitVtxIdx !== null && hitWorldPos) {
+            event.stopPropagation();
+            event.preventDefault();
+            hitSomething = true;
+
+            const isCtrl = event.ctrlKey || event.metaKey;
+            const isShift = event.shiftKey;
+            const curSet = new Set(selectedVertexIndices);
+            const isAlreadySelected = coincidentIndices.some(idx => curSet.has(idx));
+
+            let newIndices: number[] = [];
+
+            if (isCtrl || isShift) {
+              if (isAlreadySelected) {
+                newIndices = selectedVertexIndices.filter(i => !coincidentIndices.includes(i));
+              } else {
+                newIndices = Array.from(new Set([...selectedVertexIndices, ...coincidentIndices]));
+              }
+              setSelectedVertexIndices(newIndices);
+            } else if (!isAlreadySelected) {
+              // Clicked an unselected vertex -> select it
+              newIndices = [...coincidentIndices];
+              setSelectedVertexIndices(newIndices);
+            } else {
+              // Clicked an already-selected vertex -> retain active selection for group dragging
+              newIndices = [...selectedVertexIndices];
+            }
+
+            // Start FREE dragging on all active selected vertices immediately
+            if (newIndices.length > 0) {
+              gizmoStateRef.current.activeAxis = 'FREE';
+              gizmoStateRef.current.startScreenPos = { x: event.clientX, y: event.clientY };
+
+              const mesh = getObjectMesh(selectedObjectId);
+              const centroid = new THREE.Vector3();
+              let count = 0;
+              const offsets: Record<number, [number, number, number]> = {};
+              newIndices.forEach(idx => {
+                if (selObj.vertices && idx < selObj.vertices.length) {
+                  const v = selObj.vertices[idx];
+                  const off = selObj.vertexOffsets?.[idx] ?? [0, 0, 0];
+                  centroid.add(new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]));
+                  offsets[idx] = [...off] as [number, number, number];
+                  count++;
+                }
+              });
+
+              if (count > 0) {
+                centroid.divideScalar(count);
+                if (mesh) {
+                  gizmoStateRef.current.startWorldGizmoPos = centroid.applyMatrix4(mesh.matrixWorld);
+                } else {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  gizmoStateRef.current.startWorldGizmoPos = centroid
+                    .multiply(new THREE.Vector3(..._interp.scale))
+                    .applyEuler(new THREE.Euler(..._interp.rotation))
+                    .add(new THREE.Vector3(..._interp.position));
+                }
+              } else {
+                gizmoStateRef.current.startWorldGizmoPos = hitWorldPos;
+              }
+
+              gizmoStateRef.current.startVertexOffsets = offsets;
+              isDraggingRef.current = true;
+              if (rendererRef.current) rendererRef.current.domElement.style.cursor = 'grabbing';
+            }
+
+            if (controlsRef.current) controlsRef.current.enabled = false;
+            return;
+          }
         }
       }
 
@@ -4116,7 +4545,219 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (!gs.activeAxis && rendererRef.current) {
         const rect=rendererRef.current.domElement.getBoundingClientRect();
         gs.hoveredAxis=getAxisHit(event.clientX-rect.left, event.clientY-rect.top);
-        rendererRef.current.domElement.style.cursor=gs.hoveredAxis?'grab':'default';
+        if (gs.hoveredAxis) {
+          rendererRef.current.domElement.style.cursor = 'grab';
+          if (hoverGroupRef.current) hoverGroupRef.current.clear();
+        } else {
+          // Real-time hover detection and highlight for EDGE, FACE, and VERTEX edit modes
+          const hoverGroup = hoverGroupRef.current;
+          if (hoverGroup) hoverGroup.clear();
+
+          const mouseX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          const mouseY = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          raycasterRef.current.setFromCamera(new THREE.Vector2(mouseX, mouseY), camera);
+
+          if (editMode === 'EDGE') {
+            let hitEdge = false;
+            if (primitivesGroupRef.current && hoverGroup) {
+              const hits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, true);
+              if (hits.length && hits[0].face) {
+                const intersect = hits[0];
+                const mesh = intersect.object as THREE.Mesh;
+                const clickedId = mesh.userData.id;
+                const selObj = projectRef.current.objects.find(o => o.id === clickedId);
+                if (selObj && mesh.geometry) {
+                  const pos = mesh.geometry.getAttribute('position');
+                  const a = intersect.face.a, b = intersect.face.b, c = intersect.face.c;
+                  const pa = new THREE.Vector3(pos.getX(a), pos.getY(a), pos.getZ(a)).applyMatrix4(mesh.matrixWorld);
+                  const pb = new THREE.Vector3(pos.getX(b), pos.getY(b), pos.getZ(b)).applyMatrix4(mesh.matrixWorld);
+                  const pc = new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c)).applyMatrix4(mesh.matrixWorld);
+                  const pt = intersect.point;
+                  const dAB = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                  const dBC = new THREE.Line3(pb, pc).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                  const dCA = new THREE.Line3(pc, pa).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+
+                  let pStart: THREE.Vector3, pEnd: THREE.Vector3;
+                  let vA: number, vB: number;
+                  if (dAB <= dBC && dAB <= dCA) { pStart = pa; pEnd = pb; vA = a; vB = b; }
+                  else if (dBC <= dAB && dBC <= dCA) { pStart = pb; pEnd = pc; vA = b; vB = c; }
+                  else { pStart = pc; pEnd = pa; vA = c; vB = a; }
+
+                  const vertexMap = mesh.userData.vertexMap as number[] | undefined;
+                  let logVA = vA, logVB = vB;
+                  if (vertexMap) {
+                    logVA = vertexMap[vA];
+                    logVB = vertexMap[vB];
+                  }
+
+                  let isSel = false;
+                  for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
+                    const e1 = selectedEdgeIndices[i], e2 = selectedEdgeIndices[i + 1];
+                    if ((e1 === logVA && e2 === logVB) || (e1 === logVB && e2 === logVA)) {
+                      isSel = true;
+                      break;
+                    }
+                  }
+
+                  const eGeo = new THREE.BufferGeometry().setFromPoints([pStart, pEnd]);
+                  const hoverColor = isSel ? 0xef4444 : 0xfacc15;
+                  const edgeLine = new THREE.Line(
+                    eGeo,
+                    new THREE.LineBasicMaterial({
+                      color: hoverColor,
+                      linewidth: 5,
+                      depthTest: false,
+                      transparent: true,
+                      opacity: 0.95
+                    })
+                  );
+                  edgeLine.renderOrder = 60;
+                  hoverGroup.add(edgeLine);
+
+                  [pStart, pEnd].forEach(p => {
+                    const dot = new THREE.Mesh(
+                      SHARED_VERTEX_GEO,
+                      isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
+                    );
+                    dot.scale.setScalar(0.016);
+                    dot.position.copy(p);
+                    dot.renderOrder = 65;
+                    hoverGroup.add(dot);
+                  });
+
+                  rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
+                  hitEdge = true;
+                }
+              }
+            }
+            if (!hitEdge) {
+              rendererRef.current.domElement.style.cursor = 'default';
+            }
+          } else if (editMode === 'FACE') {
+            let hitFace = false;
+            if (primitivesGroupRef.current && hoverGroup) {
+              const hits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, true);
+              if (hits.length && hits[0].faceIndex !== undefined) {
+                const intersect = hits[0];
+                const mesh = intersect.object as THREE.Mesh;
+                const clickedId = mesh.userData.id;
+                const selObj = projectRef.current.objects.find(o => o.id === clickedId);
+                const faceMap = mesh.userData.faceMap as number[] | undefined;
+                if (selObj && selObj.faces && faceMap && intersect.faceIndex < faceMap.length) {
+                  const logicalFaceIdx = faceMap[intersect.faceIndex];
+                  const face = selObj.faces[logicalFaceIdx];
+                  if (face) {
+                    const isSel = selectedFaceIndices.includes(logicalFaceIdx);
+                    const faceWorldVerts: THREE.Vector3[] = [];
+                    const perimeterWorldVerts: THREE.Vector3[] = [];
+                    const mat4 = mesh.matrixWorld;
+
+                    face.indices.forEach(vi => {
+                      const baseV = selObj.vertices[vi];
+                      const off = selObj.vertexOffsets?.[vi] || [0, 0, 0];
+                      const wPos = new THREE.Vector3(baseV[0] + off[0], baseV[1] + off[1], baseV[2] + off[2]).applyMatrix4(mat4);
+                      perimeterWorldVerts.push(wPos);
+                    });
+
+                    for (let i = 1; i < face.indices.length - 1; i++) {
+                      [perimeterWorldVerts[0], perimeterWorldVerts[i], perimeterWorldVerts[i + 1]].forEach(p => {
+                        faceWorldVerts.push(p);
+                      });
+                    }
+
+                    if (faceWorldVerts.length > 0) {
+                      const fGeo = new THREE.BufferGeometry().setFromPoints(faceWorldVerts);
+                      fGeo.computeVertexNormals();
+                      const hoverFaceMesh = new THREE.Mesh(
+                        fGeo,
+                        new THREE.MeshBasicMaterial({
+                          color: isSel ? 0xf97316 : 0x38bdf8,
+                          transparent: true,
+                          opacity: isSel ? 0.6 : 0.45,
+                          side: THREE.DoubleSide,
+                          depthTest: false,
+                          polygonOffset: true,
+                          polygonOffsetFactor: -3,
+                          polygonOffsetUnits: -3
+                        })
+                      );
+                      hoverFaceMesh.renderOrder = 55;
+                      hoverGroup.add(hoverFaceMesh);
+
+                      const closedPerimeter = [...perimeterWorldVerts, perimeterWorldVerts[0]];
+                      const pGeo = new THREE.BufferGeometry().setFromPoints(closedPerimeter);
+                      const perimeterLine = new THREE.Line(
+                        pGeo,
+                        new THREE.LineBasicMaterial({
+                          color: isSel ? 0xef4444 : 0x0284c7,
+                          linewidth: 3,
+                          depthTest: false
+                        })
+                      );
+                      perimeterLine.renderOrder = 56;
+                      hoverGroup.add(perimeterLine);
+                    }
+
+                    rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
+                    hitFace = true;
+                  }
+                }
+              }
+            }
+            if (!hitFace) {
+              rendererRef.current.domElement.style.cursor = 'default';
+            }
+          } else if (editMode === 'VERTEX') {
+            let vtxHovered = false;
+            let isHoveredSelected = false;
+            let hitPos: THREE.Vector3 | null = null;
+
+            if (vertexPointsRef.current) {
+              if (camera instanceof THREE.PerspectiveCamera) {
+                const camDist = camera.position.distanceTo(vertexPointsRef.current.position);
+                raycasterRef.current.params.Points.threshold = Math.max(0.18, camDist * 0.035);
+              } else {
+                raycasterRef.current.params.Points.threshold = 0.5;
+              }
+              const hits = raycasterRef.current.intersectObject(vertexPointsRef.current);
+              if (hits.length > 0 && hits[0].index !== undefined) {
+                vtxHovered = true;
+                isHoveredSelected = selectedVertexIndices.includes(hits[0].index);
+                hitPos = hits[0].point.clone();
+              }
+            }
+
+            if (!vtxHovered && groupRef.current) {
+              const sphereHits = raycasterRef.current.intersectObjects(groupRef.current.children, false);
+              const vh = sphereHits.find(h => h.object.userData?.isVertexHandle && h.object.userData?.id === selectedObjectId);
+              if (vh && vh.object.userData.vertexIndex !== undefined) {
+                vtxHovered = true;
+                isHoveredSelected = selectedVertexIndices.includes(vh.object.userData.vertexIndex);
+                hitPos = vh.point.clone();
+              }
+            }
+
+            if (vtxHovered && hitPos && hoverGroup) {
+              const hoverDot = new THREE.Mesh(
+                SHARED_VERTEX_GEO,
+                new THREE.MeshBasicMaterial({ color: isHoveredSelected ? 0xef4444 : 0x38bdf8, depthTest: false })
+              );
+              hoverDot.scale.setScalar(isHoveredSelected ? 0.026 : 0.020);
+              hoverDot.position.copy(hitPos);
+              hoverDot.renderOrder = 65;
+              hoverGroup.add(hoverDot);
+
+              rendererRef.current.domElement.style.cursor = isHoveredSelected ? 'grab' : 'pointer';
+            } else {
+              rendererRef.current.domElement.style.cursor = 'default';
+            }
+          } else {
+            rendererRef.current.domElement.style.cursor = 'default';
+          }
+        }
+      } else if (gs.activeAxis && rendererRef.current) {
+        if (hoverGroupRef.current) hoverGroupRef.current.clear();
+        rendererRef.current.domElement.style.cursor = 'grabbing';
       }
       if (!gs.activeAxis||(!selectedObjectId && !selectedLightId && !selectedCameraId)) return;
       
@@ -4476,57 +5117,112 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           }
         } else {
           let move = new THREE.Vector3();
-          if (['XY', 'YZ', 'XZ'].includes(gs.activeAxis)) {
-            const ax = gs.activeAxis;
-            const normal = ax === 'XY' ? new THREE.Vector3(0,0,1) : ax === 'YZ' ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
-            const startWorldPt = gs.startWorldGizmoPos ? gs.startWorldGizmoPos.clone() : new THREE.Vector3(...gs.startPos);
-            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, startWorldPt);
-            const raycaster = new THREE.Raycaster();
-            const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
-            const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
-            raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
-            const startHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
-            const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-            raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
-            const curHit = raycaster.ray.intersectPlane(plane, new THREE.Vector3());
-            if (startHit && curHit) move = curHit.sub(startHit);
-          } else {
-            const axisVec = gs.activeAxis==='X' ? new THREE.Vector3(1,0,0) : gs.activeAxis==='Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
-            const startPos = gs.startWorldGizmoPos ? gs.startWorldGizmoPos.clone() : new THREE.Vector3(...gs.startPos);
-            
-            const camDir = new THREE.Vector3();
-            camera.getWorldDirection(camDir);
-            
-            let planeNormal = new THREE.Vector3().crossVectors(camDir, axisVec).cross(axisVec);
-            if (planeNormal.lengthSq() < 1e-5) {
-              planeNormal = new THREE.Vector3().crossVectors(camera.up, axisVec);
-              if (planeNormal.lengthSq() < 1e-5) {
-                planeNormal = new THREE.Vector3(1,0,0);
+          const isOrtho = (camera as any).isOrthographicCamera;
+          const sx0 = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
+          const sy0 = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
+          const sx1 = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          const sy1 = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+          const pt0 = new THREE.Vector3(sx0, sy0, 0).unproject(camera);
+          const pt1 = new THREE.Vector3(sx1, sy1, 0).unproject(camera);
+          const screenWorldDelta = pt1.clone().sub(pt0);
+
+          const camDir = new THREE.Vector3();
+          camera.getWorldDirection(camDir);
+          const startWorldPt = gs.startWorldGizmoPos ? gs.startWorldGizmoPos.clone() : new THREE.Vector3(...gs.startPos);
+          const curSelObjForTrans = projectRef.current.objects.find(o => o.id === selectedObjectId);
+
+          if (gs.activeAxis === 'FREE') {
+            if (isOrtho) {
+              move = screenWorldDelta.clone();
+            } else {
+              const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, startWorldPt);
+              const raycaster = new THREE.Raycaster();
+              raycaster.setFromCamera(new THREE.Vector2(sx0, sy0), camera);
+              const startHit = new THREE.Vector3();
+              const hasStart = raycaster.ray.intersectPlane(plane, startHit);
+              raycaster.setFromCamera(new THREE.Vector2(sx1, sy1), camera);
+              const curHit = new THREE.Vector3();
+              const hasCur = raycaster.ray.intersectPlane(plane, curHit);
+              if (hasStart && hasCur) {
+                move = curHit.sub(startHit);
+              } else {
+                move = screenWorldDelta.clone();
               }
             }
-            planeNormal.normalize();
-            
-            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, startPos);
-            const raycaster = new THREE.Raycaster();
-            
-            const sx = ((gs.startScreenPos.x - rect.left) / rect.width) * 2 - 1;
-            const sy = -((gs.startScreenPos.y - rect.top) / rect.height) * 2 + 1;
-            raycaster.setFromCamera(new THREE.Vector2(sx, sy), camera);
-            const startHit = new THREE.Vector3();
-            const hasStartHit = raycaster.ray.intersectPlane(plane, startHit);
-            
-            const cx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-            const cy = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-            raycaster.setFromCamera(new THREE.Vector2(cx, cy), camera);
-            const curHit = new THREE.Vector3();
-            const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
-            
-            if (hasStartHit && hasCurHit) {
-              const rawDelta = curHit.sub(startHit);
-              const distOnAxis = rawDelta.dot(axisVec);
-              move.copy(axisVec).multiplyScalar(distOnAxis);
+          } else if (['XY', 'YZ', 'XZ'].includes(gs.activeAxis)) {
+            const ax = gs.activeAxis;
+            const normal = ax === 'XY' ? new THREE.Vector3(0,0,1) : ax === 'YZ' ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
+            if (isOrtho) {
+              move = screenWorldDelta.clone();
+              if (ax === 'XY') move.z = 0;
+              if (ax === 'YZ') move.x = 0;
+              if (ax === 'XZ') move.y = 0;
+            } else {
+              const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, startWorldPt);
+              const raycaster = new THREE.Raycaster();
+              raycaster.setFromCamera(new THREE.Vector2(sx0, sy0), camera);
+              const startHit = new THREE.Vector3();
+              const hasStart = raycaster.ray.intersectPlane(plane, startHit);
+              raycaster.setFromCamera(new THREE.Vector2(sx1, sy1), camera);
+              const curHit = new THREE.Vector3();
+              const hasCur = raycaster.ray.intersectPlane(plane, curHit);
+              if (hasStart && hasCur) {
+                move = curHit.sub(startHit);
+              } else {
+                move = screenWorldDelta.clone();
+                if (ax === 'XY') move.z = 0;
+                if (ax === 'YZ') move.x = 0;
+                if (ax === 'XZ') move.y = 0;
+              }
             }
+          } else {
+            const ax = gs.activeAxis;
+            let axisVec = ax === 'X' ? new THREE.Vector3(1,0,0) : ax === 'Y' ? new THREE.Vector3(0,1,0) : new THREE.Vector3(0,0,1);
+            if (transformSpace === 'local' && curSelObjForTrans && curSelObjForTrans.transform) {
+              const euler = new THREE.Euler(curSelObjForTrans.transform.rotation[0], curSelObjForTrans.transform.rotation[1], curSelObjForTrans.transform.rotation[2], 'XYZ');
+              axisVec.applyEuler(euler).normalize();
+            }
+
+            if (isOrtho) {
+              const distOnAxis = screenWorldDelta.dot(axisVec);
+              move = axisVec.clone().multiplyScalar(distOnAxis);
+            } else {
+              let planeNormal = new THREE.Vector3().crossVectors(camDir, axisVec).cross(axisVec);
+              if (planeNormal.lengthSq() < 1e-5) {
+                planeNormal = new THREE.Vector3().crossVectors(camera.up, axisVec);
+                if (planeNormal.lengthSq() < 1e-5) {
+                  planeNormal = new THREE.Vector3(1,0,0);
+                }
+              }
+              planeNormal.normalize();
+              
+              const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal, startWorldPt);
+              const raycaster = new THREE.Raycaster();
+              raycaster.setFromCamera(new THREE.Vector2(sx0, sy0), camera);
+              const startHit = new THREE.Vector3();
+              const hasStartHit = raycaster.ray.intersectPlane(plane, startHit);
+              
+              raycaster.setFromCamera(new THREE.Vector2(sx1, sy1), camera);
+              const curHit = new THREE.Vector3();
+              const hasCurHit = raycaster.ray.intersectPlane(plane, curHit);
+              
+              if (hasStartHit && hasCurHit) {
+                const rawDelta = curHit.sub(startHit);
+                const distOnAxis = rawDelta.dot(axisVec);
+                move = axisVec.clone().multiplyScalar(distOnAxis);
+              } else {
+                const distOnAxis = screenWorldDelta.dot(axisVec);
+                move = axisVec.clone().multiplyScalar(distOnAxis);
+              }
+            }
+          }
+
+          if (event.shiftKey || gridSnapEnabled) {
+            const snapVal = (v: number) => Math.round(v * 2) / 2;
+            move.x = snapVal(move.x);
+            move.y = snapVal(move.y);
+            move.z = snapVal(move.z);
           }
 
           const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
@@ -4610,22 +5306,33 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 });
               }
             } else {
-              updateObjects(selectedObjectIds, (id) => {
+              const activeObjectIds = (selectedObjectIds && selectedObjectIds.length > 0)
+                ? selectedObjectIds
+                : (selectedObjectId ? [selectedObjectId] : []);
+              updateObjects(activeObjectIds, (id) => {
                 const start = gs.startTransforms[id];
-                if (!start) return {};
+                const o = projectRef.current.objects.find(obj => obj.id === id);
+                const pos = start ? start.position : (o ? getInterpolatedTransform(o, currentTime).position : [0,0,0]);
                 return {
                   transform: {
-                    ...start,
-                    position: [start.position[0] + move.x, start.position[1] + move.y, start.position[2] + move.z]
+                    ...(start || o?.transform || {}),
+                    position: [pos[0] + move.x, pos[1] + move.y, pos[2] + move.z]
                   }
                 };
               });
             }
           } else {
-            const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+            const mesh = getObjectMesh(selectedObjectId);
             let moveLocal = move.clone();
             if (mesh) {
               const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
+              moveLocal.applyMatrix4(invMat);
+            } else if (curSelObj) {
+              const _interp = getInterpolatedTransform(curSelObj, currentTime);
+              const invMat = new THREE.Matrix4()
+                .makeRotationFromEuler(new THREE.Euler(..._interp.rotation))
+                .scale(new THREE.Vector3(..._interp.scale))
+                .invert();
               moveLocal.applyMatrix4(invMat);
             }
             const cht = gs.dragHandleType;
@@ -5013,7 +5720,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               }
             }
           } else if (editMode === 'OBJECT') {
-            raycasterRef.current.params.Line.threshold = 0.1; // Make lines easier to click
+            // Adaptive line threshold based on viewport & zoom
+            if (cameraRef.current instanceof THREE.PerspectiveCamera) {
+              const camDist = cameraRef.current.position.length();
+              raycasterRef.current.params.Line.threshold = Math.max(0.2, (camDist * Math.tan((cameraRef.current.fov * Math.PI) / 360) / rect.height) * 20);
+            } else if (cameraRef.current instanceof THREE.OrthographicCamera) {
+              const cam = cameraRef.current;
+              const worldPerPixel = (cam.top - cam.bottom) / (cam.zoom * rect.height);
+              raycasterRef.current.params.Line.threshold = Math.max(0.25, worldPerPixel * 20);
+            } else {
+              raycasterRef.current.params.Line.threshold = 0.25;
+            }
+
             const targets = [
               ...groupRef.current.children,
               ...(Array.from(lightsRef.current.values()) as THREE.Object3D[]),
@@ -5059,7 +5777,89 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 }
               }
             } else {
-              if (event.button === 0) {
+              // Screen-space 2D fallback selection for lines / shapes
+              const clickScreenX = event.clientX - rect.left;
+              const clickScreenY = event.clientY - rect.top;
+              const cam = cameraRef.current;
+              let closestShapeId: string | null = null;
+              let minPixelDist = 22; // 22px generous hit target for lines
+
+              if (cam) {
+                projectRef.current.objects.forEach(o => {
+                  if (!o.visible) return;
+                  if (o.type === 'SHAPE' && o.vertices && o.vertices.length >= 2) {
+                    const _t = getInterpolatedTransform(o, currentTime);
+                    const pos = new THREE.Vector3(..._t.position);
+                    const rot = new THREE.Euler(..._t.rotation);
+                    const scl = new THREE.Vector3(..._t.scale);
+                    const objMat = new THREE.Matrix4().compose(pos, new THREE.Quaternion().setFromEuler(rot), scl);
+
+                    const rawVerts = o.vertices.map((v, i) => {
+                      const off = o.vertexOffsets?.[i] ?? [0,0,0];
+                      return new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2]).applyMatrix4(objMat);
+                    });
+
+                    const samplePts: THREE.Vector3[] = [];
+                    const isBez = o.parameters?.shapeType === 'bezier' && o.bezierHandles;
+                    if (isBez && rawVerts.length >= 2) {
+                      const loopCount = o.parameters?.closed ? rawVerts.length : rawVerts.length - 1;
+                      for (let i = 0; i < loopCount; i++) {
+                        const i1 = (i + 1) % rawVerts.length;
+                        const h = o.bezierHandles!;
+                        if (!h[i] || !h[i1]) continue;
+                        const p0 = rawVerts[i];
+                        const p1 = p0.clone().add(new THREE.Vector3(...h[i].out).applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(rot)).multiply(scl));
+                        const p3 = rawVerts[i1];
+                        const p2 = p3.clone().add(new THREE.Vector3(...h[i1].in).applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(rot)).multiply(scl));
+                        const seg = new THREE.CubicBezierCurve3(p0, p1, p2, p3);
+                        samplePts.push(...seg.getPoints(12));
+                      }
+                    } else {
+                      samplePts.push(...rawVerts);
+                      if (o.parameters?.closed && rawVerts.length > 2) {
+                        samplePts.push(rawVerts[0]);
+                      }
+                    }
+
+                    for (let i = 0; i < samplePts.length - 1; i++) {
+                      const pA = samplePts[i].clone().project(cam);
+                      const pB = samplePts[i+1].clone().project(cam);
+                      if (pA.z > 1 && pB.z > 1) continue;
+
+                      const sAx = ((pA.x + 1) / 2) * rect.width;
+                      const sAy = ((-pA.y + 1) / 2) * rect.height;
+                      const sBx = ((pB.x + 1) / 2) * rect.width;
+                      const sBy = ((-pB.y + 1) / 2) * rect.height;
+
+                      const ldx = sBx - sAx;
+                      const ldy = sBy - sAy;
+                      const lSq = ldx * ldx + ldy * ldy;
+                      let d = Infinity;
+                      if (lSq === 0) {
+                        d = Math.hypot(clickScreenX - sAx, clickScreenY - sAy);
+                      } else {
+                        let t = ((clickScreenX - sAx) * ldx + (clickScreenY - sAy) * ldy) / lSq;
+                        t = Math.max(0, Math.min(1, t));
+                        const projX = sAx + t * ldx;
+                        const projY = sAy + t * ldy;
+                        d = Math.hypot(clickScreenX - projX, clickScreenY - projY);
+                      }
+
+                      if (d < minPixelDist) {
+                        minPixelDist = d;
+                        closestShapeId = o.id;
+                      }
+                    }
+                  }
+                });
+              }
+
+              if (closestShapeId) {
+                hitSomething = true;
+                const isCtrl = event.shiftKey || event.ctrlKey || event.metaKey;
+                if (isCtrl && toggleObjectSelection) toggleObjectSelection(closestShapeId, true);
+                else selectObject(closestShapeId);
+              } else if (event.button === 0) {
                 selectObject(null);
                 selectLight(null);
                 selectCamera(null);
@@ -5067,6 +5867,74 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           }
           
+          if (editMode === 'VERTEX' && selectedObjectId && !hitSomething) {
+            const obj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+            if (obj && obj.type === 'SHAPE' && obj.vertices && obj.vertices.length >= 2) {
+              const _interp = getInterpolatedTransform(obj, currentTime);
+              const mat4 = new THREE.Matrix4().compose(
+                new THREE.Vector3().fromArray(_interp.position),
+                new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                new THREE.Vector3().fromArray(_interp.scale)
+              );
+              const invMat = mat4.clone().invert();
+
+              const width = rendererRef.current!.domElement.clientWidth;
+              const height = rendererRef.current!.domElement.clientHeight;
+              const rect = rendererRef.current!.domElement.getBoundingClientRect();
+              const sx = event.clientX - rect.left;
+              const sy = event.clientY - rect.top;
+
+              const rawVerts = obj.vertices.map((v, i) => {
+                const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+                return new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+              });
+
+              let minSegDist = 20; // 20px screen distance threshold
+              let bestSeg = -1;
+              let bestT = 0.5;
+              let bestWorldPt: THREE.Vector3 | null = null;
+
+              const isClosed = !!obj.parameters.closed;
+              const segCount = isClosed ? rawVerts.length : rawVerts.length - 1;
+
+              for (let i = 0; i < segCount; i++) {
+                const p1 = rawVerts[i];
+                const p2 = rawVerts[(i + 1) % rawVerts.length];
+                const ndc1 = p1.clone().project(cameraRef.current!);
+                const ndc2 = p2.clone().project(cameraRef.current!);
+                if (ndc1.z > 1 || ndc2.z > 1) continue;
+
+                const s1 = { x: (ndc1.x * 0.5 + 0.5) * width, y: (ndc1.y * -0.5 + 0.5) * height };
+                const s2 = { x: (ndc2.x * 0.5 + 0.5) * width, y: (ndc2.y * -0.5 + 0.5) * height };
+
+                const dx = s2.x - s1.x;
+                const dy = s2.y - s1.y;
+                const lenSq = dx * dx + dy * dy;
+                if (lenSq === 0) continue;
+
+                let t = ((sx - s1.x) * dx + (sy - s1.y) * dy) / lenSq;
+                t = Math.max(0, Math.min(1, t));
+
+                const projX = s1.x + t * dx;
+                const projY = s1.y + t * dy;
+                const dist = Math.hypot(sx - projX, sy - projY);
+
+                if (dist < minSegDist) {
+                  minSegDist = dist;
+                  bestSeg = i;
+                  bestT = t;
+                  bestWorldPt = p1.clone().lerp(p2, t);
+                }
+              }
+
+              if (bestSeg >= 0 && bestWorldPt && (insertVertexMode || event.altKey || minSegDist < 12)) {
+                const localPt = bestWorldPt.clone().applyMatrix4(invMat);
+                useStore.getState().insertShapeVertexAtPoint(selectedObjectId, [localPt.x, localPt.y, localPt.z], bestSeg);
+                hitSomething = true;
+              }
+            }
+          }
+
           if (!hitSomething && event.button === 0) {
             if (editMode === 'OBJECT') {
               selectObject(null);
@@ -5109,42 +5977,34 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const tag = (event.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
 
+      // ── Global Undo / Redo in Viewport ───────────────────────────────
+      if (event.ctrlKey || event.metaKey) {
+        const k = event.key.toLowerCase();
+        if (k === 'z') {
+          event.preventDefault();
+          if (event.shiftKey) useStore.getState().redo();
+          else useStore.getState().undo();
+          return;
+        }
+        if (k === 'y') {
+          event.preventDefault();
+          useStore.getState().redo();
+          return;
+        }
+      }
+
       // ── SHAPE / CURVE editing hotkeys ────────────────────────────────
       const shapeObj = selectedObjectId
         ? useStore.getState().project.objects.find(o => o.id === selectedObjectId)
         : null;
       const isShapeSelected = shapeObj?.type === 'SHAPE';
 
-      // Delete selected control point (VERTEX mode on a SHAPE)
-      if (isShapeSelected && editMode === 'VERTEX' &&
-          (event.key === 'Delete' || event.key === 'Backspace' || event.key === 'x') &&
+      // Delete selected control point / vertices (VERTEX mode on a SHAPE or MESH)
+      if (selectedObjectId && editMode === 'VERTEX' &&
+          (event.key === 'Delete' || event.key === 'Backspace' || event.key === 'x' || event.key === 'X') &&
           selectedVertexIndices.length > 0) {
         event.preventDefault();
-        const obj = shapeObj!;
-        const toRemove = new Set(selectedVertexIndices);
-        console.log("Deleting vertices:", Array.from(toRemove));
-        const newVertices = obj.vertices.filter((_, i) => !toRemove.has(i));
-        const newHandles = obj.bezierHandles ? obj.bezierHandles.filter((_, i) => !toRemove.has(i)) : undefined;
-        
-        // Remap vertexOffsets
-        const remapIdx: Record<number,number> = {};
-        let ni = 0;
-        obj.vertices.forEach((_, oi) => { if (!toRemove.has(oi)) remapIdx[oi] = ni++; });
-        const newOffsets: Record<number,[number,number,number]> = {};
-        Object.entries(obj.vertexOffsets ?? {}).forEach(([k,v]) => {
-          const mapped = remapIdx[parseInt(k)];
-          if (mapped !== undefined) newOffsets[mapped] = v as [number,number,number];
-        });
-        console.log("New vertices length:", newVertices.length);
-        if (newVertices.length >= 2) {
-          useStore.getState().updateObject(selectedObjectId!, { 
-            vertices: newVertices, 
-            vertexOffsets: newOffsets,
-            bezierHandles: newHandles
-          } as any);
-          setSelectedVertexIndices([]);
-          saveHistory();
-        }
+        useStore.getState().deleteSelectedVertices(selectedObjectId, selectedVertexIndices);
         return;
       }
 
@@ -5159,104 +6019,153 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         return;
       }
 
-
-      // ── Delete selected FACES (remove only faces, vertices stay intact) ───────
-      if (editMode === 'FACE' && (event.key === 'Delete' || event.key === 'Backspace' || event.key === 'x' || event.key === 'X')) {
-        if (!selectedObjectId || selectedFaceIndices.length === 0) return;
+      // Weld vertices (W key on SHAPE or MESH)
+      if ((event.key === 'w' || event.key === 'W') && !event.ctrlKey && selectedObjectId && (editMode === 'VERTEX' || isShapeSelected)) {
         event.preventDefault();
-        const objRefFace = useStore.getState().project.objects.find(o => o.id === selectedObjectId);
-        if (!objRefFace || !objRefFace.faces) return;
-
-        const toRemove = new Set(selectedFaceIndices);
-        const newFaces = objRefFace.faces.filter((_, fi) => !toRemove.has(fi));
-
-        // Safety: never delete all faces (would make object invisible permanently)
-        if (newFaces.length === 0) return;
-
-        useStore.getState().updateObject(selectedObjectId, { faces: newFaces } as any);
-        setSelectedFaceIndices([]);
-        setSelectedVertexIndices([]);
-        saveHistory();
+        useStore.getState().weldSelectedVertices(selectedObjectId, selectedVertexIndices);
         return;
       }
 
-      // Dissolve edge: Delete or X in EDGE mode
-      if (editMode === 'EDGE' && (event.key === 'Delete' || event.key === 'x' || event.key === 'X')) {
-        if (!selectedObjectId || selectedEdgeIndices.length < 2) return;
-        const objRef = useStore.getState().project.objects.find(o => o.id === selectedObjectId);
-        if (!objRef || !objRef.faces) return;
+      // Subdivide segment / line in 2 (D key on a SHAPE)
+      if (isShapeSelected && (event.key === 'd' || event.key === 'D') && !event.ctrlKey) {
+        event.preventDefault();
+        useStore.getState().subdivideShapeSegment(selectedObjectId!);
+        return;
+      }
 
-        // Process all selected edges
-        let faces = [...objRef.faces.map(f => ({ ...f, indices: [...f.indices] }))];
+      // Toggle insert vertex mode (I key)
+      if (isShapeSelected && (event.key === 'i' || event.key === 'I') && !event.ctrlKey) {
+        event.preventDefault();
+        useStore.getState().setInsertVertexMode(!insertVertexMode);
+        return;
+      }
 
-        for (let ei = 0; ei < selectedEdgeIndices.length; ei += 2) {
-          const eA = selectedEdgeIndices[ei], eB = selectedEdgeIndices[ei + 1];
+      // Toggle Escuadra 90° / Ortho drawing mode (Q key)
+      if (drawMode && (event.key === 'q' || event.key === 'Q') && !event.ctrlKey) {
+        event.preventDefault();
+        useStore.getState().setOrthoDrawMode(!useStore.getState().orthoDrawMode);
+        return;
+      }
 
-          // Find the two faces sharing this edge
-          const sharingFaces = faces.map((f, fi) => ({ f, fi })).filter(({ f }) => {
-            const len = f.indices.length;
-            for (let k = 0; k < len; k++) {
-              const a = f.indices[k], b = f.indices[(k + 1) % len];
-              if ((a === eA && b === eB) || (a === eB && b === eA)) return true;
-            }
-            return false;
-          });
 
-          if (sharingFaces.length !== 2) continue; // boundary edge, skip
+      // ── Sub-element Edit Mode Switchers (1 = Object, 2 = Face, 3 = Edge, 4 = Vertex) ──
+      if (event.key === '1') { event.preventDefault(); useStore.getState().setEditMode('OBJECT'); return; }
+      if (event.key === '2') { event.preventDefault(); useStore.getState().setEditMode('FACE'); return; }
+      if (event.key === '3') { event.preventDefault(); useStore.getState().setEditMode('EDGE'); return; }
+      if (event.key === '4') { event.preventDefault(); useStore.getState().setEditMode('VERTEX'); return; }
 
-          const [{ f: faceA, fi: fiA }, { f: faceB, fi: fiB }] = sharingFaces;
-
-          // Merge faceA and faceB by removing the shared edge
-          // Walk faceA: when we hit the shared edge, insert faceB's vertices instead
-          const mergedIndices: number[] = [];
-          const lenA = faceA.indices.length;
-          for (let k = 0; k < lenA; k++) {
-            const a = faceA.indices[k], b = faceA.indices[(k + 1) % lenA];
-            mergedIndices.push(a);
-            // If this is the shared edge, splice in faceB's vertices
-            if ((a === eA && b === eB) || (a === eB && b === eA)) {
-              // Find where b appears in faceB, then walk around faceB skipping a
-              const lenB = faceB.indices.length;
-              const startB = faceB.indices.indexOf(b);
-              if (startB !== -1) {
-                for (let m = 1; m < lenB - 1; m++) {
-                  const idx = faceB.indices[(startB + m) % lenB];
-                  if (idx !== a && idx !== b) mergedIndices.push(idx);
-                }
-              }
-            }
-          }
-
-          // Remove duplicates while preserving order
-          const seen = new Set<number>();
-          const cleanMerged = mergedIndices.filter(v => { if (seen.has(v)) return false; seen.add(v); return true; });
-
-          if (cleanMerged.length >= 3) {
-            const mergedFace = { ...faceA, indices: cleanMerged };
-            // Remove both faces and add merged
-            faces = faces.filter((_, i) => i !== fiA && i !== fiB);
-            faces.push(mergedFace);
+      // ── VERTEX MODE OPERATIONS ──
+      if (editMode === 'VERTEX' && selectedObjectId) {
+        // Delete Vertices (Delete / Backspace)
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          if (selectedVertexIndices.length > 0) {
+            event.preventDefault();
+            useStore.getState().deleteSelectedVertices(selectedObjectId, selectedVertexIndices);
+            return;
           }
         }
-
-        // Update object with new faces
-        useStore.getState().updateObject(selectedObjectId, { faces } as any);
-        setSelectedEdgeIndices([]);
-        setSelectedVertexIndices([]);
-        saveHistory();
-        return;
+        // Connect Vertices with Line / Split Face (J key)
+        if ((event.key === 'j' || event.key === 'J') && !event.ctrlKey) {
+          event.preventDefault();
+          useStore.getState().connectVertices(selectedObjectId, selectedVertexIndices);
+          return;
+        }
+        // Create Face / Fill Polygon from Vertices (F key)
+        if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
+          event.preventDefault();
+          useStore.getState().createFaceFromVertices(selectedObjectId, selectedVertexIndices);
+          return;
+        }
+        // Extrude Vertices into new Segments (E key)
+        if ((event.key === 'e' || event.key === 'E') && !event.ctrlKey && selectedVertexIndices.length > 0) {
+          event.preventDefault();
+          useStore.getState().extrudeSelectedVertices(selectedObjectId, selectedVertexIndices);
+          return;
+        }
+        // Weld Selected Vertices (W key without Ctrl)
+        if ((event.key === 'w' || event.key === 'W') && !event.ctrlKey && selectedVertexIndices.length >= 2) {
+          event.preventDefault();
+          useStore.getState().weldSelectedVertices(selectedObjectId, selectedVertexIndices, 0.05);
+          return;
+        }
       }
 
-      if (editMode !== 'OBJECT') {
-        if (event.key === '1') { useStore.getState().setEditMode('OBJECT'); return; }
-        if (event.key === '2') { useStore.getState().setEditMode('FACE'); return; }
-        if (event.key === '3') { useStore.getState().setEditMode('EDGE'); return; }
-        if (event.key === '4') { useStore.getState().setEditMode('VERTEX'); return; }
-      } else {
-        if (event.key === '1') { useStore.getState().setEditMode('OBJECT'); return; }
-        if (event.key === '2') { useStore.getState().setEditMode('FACE'); return; }
-        if (event.key === '3') { useStore.getState().setEditMode('EDGE'); return; }
-        if (event.key === '4') { useStore.getState().setEditMode('VERTEX'); return; }
+      // ── FACE MODE OPERATIONS ──
+      if (editMode === 'FACE' && selectedObjectId) {
+        // Delete Faces (Delete / Backspace)
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          if (selectedFaceIndices.length > 0) {
+            event.preventDefault();
+            useStore.getState().deleteSelectedFaces(selectedObjectId, selectedFaceIndices);
+            return;
+          }
+        }
+        // Extrude (E or Ctrl+E)
+        if ((event.key === 'e' || event.key === 'E') && selectedFaceIndices.length > 0) {
+          event.preventDefault();
+          useStore.getState().extrudeFaces(selectedObjectId, selectedFaceIndices, 0.35);
+          return;
+        }
+        // Inset (I)
+        if ((event.key === 'i' || event.key === 'I') && !event.ctrlKey && selectedFaceIndices.length > 0) {
+          event.preventDefault();
+          useStore.getState().insetFaces(selectedObjectId, selectedFaceIndices, 0.2);
+          return;
+        }
+        // Subdivide Faces (D without Ctrl)
+        if ((event.key === 'd' || event.key === 'D') && !event.ctrlKey && !event.metaKey && selectedFaceIndices.length > 0) {
+          event.preventDefault();
+          useStore.getState().subdivideFaces(selectedObjectId, selectedFaceIndices);
+          return;
+        }
+        // Merge / Dissolve Faces (M)
+        if ((event.key === 'm' || event.key === 'M') && !event.ctrlKey && selectedFaceIndices.length >= 2) {
+          event.preventDefault();
+          useStore.getState().mergeFaces(selectedObjectId, selectedFaceIndices);
+          return;
+        }
+        // Cap / Tapar Hueco (F)
+        if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey) {
+          event.preventDefault();
+          useStore.getState().capSelectedFacesObject(selectedObjectId);
+          return;
+        }
+      }
+
+      // ── EDGE MODE OPERATIONS ──
+      if (editMode === 'EDGE' && selectedObjectId) {
+        // Delete Edge (Delete / Backspace)
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          if (selectedEdgeIndices.length >= 2) {
+            event.preventDefault();
+            useStore.getState().deleteSelectedEdges(selectedObjectId, selectedEdgeIndices);
+            return;
+          }
+        }
+        // Dissolve Edge (X)
+        if ((event.key === 'x' || event.key === 'X') && !event.ctrlKey && selectedEdgeIndices.length >= 2) {
+          event.preventDefault();
+          useStore.getState().dissolveSelectedEdges(selectedObjectId, selectedEdgeIndices);
+          return;
+        }
+        // Bevel / Chaflán (B)
+        if ((event.key === 'b' || event.key === 'B') && !event.ctrlKey && selectedEdgeIndices.length >= 2) {
+          event.preventDefault();
+          useStore.getState().bevelSelectedEdges(selectedObjectId, selectedEdgeIndices, 0.1, 3);
+          return;
+        }
+        // Subdivide Edge at Midpoint (D without Ctrl)
+        if ((event.key === 'd' || event.key === 'D') && !event.ctrlKey && !event.metaKey && selectedEdgeIndices.length >= 2) {
+          event.preventDefault();
+          useStore.getState().subdivideSelectedEdges(selectedObjectId, selectedEdgeIndices);
+          return;
+        }
+        // Bridge / Crear Cara (F)
+        if ((event.key === 'f' || event.key === 'F') && !event.ctrlKey && selectedEdgeIndices.length >= 4) {
+          event.preventDefault();
+          useStore.getState().bridgeSelectedEdges(selectedObjectId, selectedEdgeIndices);
+          return;
+        }
       }
 
       switch(event.key.toLowerCase()) {
@@ -5282,10 +6191,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
     };
 
+    const handlePointerLeave = () => {
+      if (hoverGroupRef.current) hoverGroupRef.current.clear();
+      if (rendererRef.current) rendererRef.current.domElement.style.cursor = 'default';
+    };
+
     const canvas=rendererRef.current?.domElement;
     if (canvas) { 
       canvas.addEventListener('pointerdown',handleMouseDown, { capture: true }); 
       canvas.addEventListener('pointermove',handleMouseMove, { capture: true }); 
+      canvas.addEventListener('pointerleave',handlePointerLeave);
       canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     }
     window.addEventListener('pointerup',handleMouseUp, { capture: true });
@@ -5294,6 +6209,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (canvas) { 
         canvas.removeEventListener('pointerdown',handleMouseDown, { capture: true }); 
         canvas.removeEventListener('pointermove',handleMouseMove, { capture: true }); 
+        canvas.removeEventListener('pointerleave',handlePointerLeave);
       }
       window.removeEventListener('pointerup',handleMouseUp, { capture: true });
       window.removeEventListener('keydown',handleKeyDown);
@@ -5344,7 +6260,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       } else if (selectedObjectId) {
         if (!selObj||!cameraRef.current||!renderer) return;
 
-        const mesh = primitivesGroupRef.current.children.find((c:any)=>c.userData.id===selectedObjectId) as THREE.Mesh|undefined;
+        const mesh = getObjectMesh(selectedObjectId);
 
       if (selObj.nurbsSurface || selObj.nurbsCurve) {
         const isNurbsCp = !!(selObj.selectedNurbsControlPoint || selObj.selectedNurbsControlPoints?.length);
@@ -5389,10 +6305,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       } else if (['VERTEX','FACE','EDGE'].includes(editMode)) {
         if (!selectedVertexIndices.length) return;
-        if (!mesh) return;
 
         const isShape = selObj.type === 'SHAPE';
-        const isBezier = isShape && selObj.parameters.shapeType === 'bezier';
+        const isBezier = isShape && selObj.parameters?.shapeType === 'bezier';
 
         if (isBezier && selectedVertexIndices.some(idx => idx >= 10000)) {
           const idx = selectedVertexIndices[0];
@@ -5400,7 +6315,15 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const side = idx >= 20000 ? 'in' : 'out';
           const anchor = new THREE.Vector3(...selObj.vertices[anchorIdx]);
           const handleRel = new THREE.Vector3(...(selObj.bezierHandles?.[anchorIdx]?.[side] ?? [0,0,0]));
-          gizmoPos = anchor.add(handleRel).applyMatrix4(mesh.matrixWorld);
+          if (mesh) {
+            gizmoPos = anchor.add(handleRel).applyMatrix4(mesh.matrixWorld);
+          } else {
+            const _interp = getInterpolatedTransform(selObj, currentTime);
+            gizmoPos = anchor.add(handleRel)
+              .multiply(new THREE.Vector3(..._interp.scale))
+              .applyEuler(new THREE.Euler(..._interp.rotation))
+              .add(new THREE.Vector3(..._interp.position));
+          }
         } else {
           const centroid=new THREE.Vector3();
           let count = 0;
@@ -5413,8 +6336,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           });
           if (count > 0) {
-            centroid.divideScalar(count).applyMatrix4(mesh.matrixWorld);
-            gizmoPos=centroid;
+            centroid.divideScalar(count);
+            if (mesh) {
+              gizmoPos = centroid.applyMatrix4(mesh.matrixWorld);
+            } else {
+              const _interp = getInterpolatedTransform(selObj, currentTime);
+              gizmoPos = centroid
+                .multiply(new THREE.Vector3(..._interp.scale))
+                .applyEuler(new THREE.Euler(..._interp.rotation))
+                .add(new THREE.Vector3(..._interp.position));
+            }
+          } else {
+            return;
           }
         }
       } else {
@@ -5533,7 +6466,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           // Arrowheads for Translate / Universal
           if (showTranslate) {
             const angle = Math.atan2(d.ny, d.nx);
-            const al = 7;
+            const al = 7.5;
             ctx.beginPath();
             ctx.moveTo(tipX, tipY);
             ctx.lineTo(tipX - al * Math.cos(angle - 0.35), tipY - al * Math.sin(angle - 0.35));
@@ -5543,15 +6476,26 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             ctx.fill();
           }
 
-          // Clean labels
-          const len = Math.sqrt(d.nx * d.nx + d.ny * d.ny);
-          if (len > 0) {
-            const nxNorm = d.nx / len;
-            const nyNorm = d.ny / len;
-            ctx.font = 'bold 10px sans-serif';
-            ctx.fillStyle = isHov ? '#ffffff' : d.color;
-            ctx.fillText(axis, tipX + nxNorm * 8 - 3, tipY + nyNorm * 8 + 3);
-          }
+          // Clean, unblocked axis label badge positioned past all handles
+          const labelDistRatio = 1.22;
+          const labelX = cx + d.nx * labelDistRatio;
+          const labelY = cy + d.ny * labelDistRatio;
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(labelX, labelY, 7.5, 0, Math.PI * 2);
+          ctx.fillStyle = isHov ? d.color : 'rgba(20, 20, 24, 0.88)';
+          ctx.fill();
+          ctx.strokeStyle = isHov ? '#ffffff' : d.color;
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+
+          ctx.font = 'bold 9.5px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = isHov ? '#ffffff' : d.color;
+          ctx.fillText(axis, labelX, labelY + 0.5);
+          ctx.restore();
 
           ctx.restore();
         }
@@ -5564,10 +6508,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           if (!d) continue;
           const scaleName = `SCALE_${axis}`;
           const isHov = gs.hoveredAxis === scaleName || gs.activeAxis === scaleName || (transformMode === 'scale' && (gs.hoveredAxis === axis || gs.activeAxis === axis));
-          const scaleDistRatio = transformMode === 'universal' ? 1.05 : 0.9;
+          const scaleDistRatio = transformMode === 'universal' ? 0.72 : 1.0;
           const cubeX = cx + d.nx * scaleDistRatio;
           const cubeY = cy + d.ny * scaleDistRatio;
-          const sz = isHov ? 10 : 7.5;
+          const sz = isHov ? 9.5 : 7.0;
           ctx.save();
           ctx.fillStyle = d.color;
           ctx.fillRect(cubeX - sz/2, cubeY - sz/2, sz, sz);

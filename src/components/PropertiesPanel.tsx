@@ -7,6 +7,7 @@
 
 import { MaterialPanel } from './MaterialPanel';
 import { ConfigPanel } from './ConfigPanel';
+import { EditMeshPanel } from './EditMeshPanel';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
@@ -27,6 +28,7 @@ import type { CSGObject } from '../types';
 import { MapEditorModal } from './MapEditorModal';
 import { ProceduralMapModal, ProceduralConfig } from './ProceduralMapModal';
 import { createCameraPathObject } from '../utils/cameraPathHelper';
+import { MESH_NOISE_PRESETS, type NoiseDeformConfig, type MeshNoiseType, type MeshNoiseDirection } from '../utils/meshNoise';
 import {
   ChevronDown, ChevronUp, ChevronRight, RotateCw, Maximize, Maximize2,
   Move, Eye, EyeOff, Trash2, Copy, Save, Book,
@@ -45,6 +47,7 @@ import type { VolumetricConfig } from '../types';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
 import { hasChildrenOrSubObjects } from '../utils/ungroup';
+import { createNoiseTexture, createCheckerTexture, createWoodTexture, createOakPlanksTexture, createOakPlanksRoughnessMap, createOakPlanksAOMap, MATERIAL_LIBRARY, MATERIAL_CATEGORIES, generateMaterial } from '../utils/proceduralTextures';
 
 // ─── Tipos de label por categoría ────────────────────────────────────────────
 
@@ -111,7 +114,7 @@ const OPERATION_LABELS: Record<string, string> = {
 import { motion, AnimatePresence } from 'framer-motion';
 
 export const Section: React.FC<{ title: string; icon?: React.ReactNode; children: React.ReactNode; defaultOpen?: boolean; badge?: React.ReactNode }> = ({
-  title, icon, children, defaultOpen = true, badge
+  title, icon, children, defaultOpen = false, badge
 }) => {
   const [open, setOpen] = useState(defaultOpen);
   return (
@@ -320,7 +323,6 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     <Section
       title="Estructura NURBS (Blender)"
       icon={<Waves size={12} className="text-cyan-400" />}
-      defaultOpen
       badge={
         <span className="text-[8px] bg-cyan-950/80 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-800/60 font-bold uppercase tracking-wider">
           {isSurface ? 'Superficie' : 'Curva'}
@@ -804,6 +806,429 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   );
 };
 
+// ─── Sub-element editing section (Faces, Edges, Vertices) ─────────────────────
+
+const SubElementEditSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const {
+    editMode,
+    setEditMode,
+    selectedFaceIndices,
+    selectedEdgeIndices,
+    selectedVertexIndices,
+    extrudeFaces,
+    insetFaces,
+    subdivideFaces,
+    mergeFaces,
+    flipSelectedFaceNormals,
+    capSelectedFacesObject,
+    deleteSelectedFaces,
+    bevelSelectedEdges,
+    subdivideSelectedEdges,
+    bridgeSelectedEdges,
+    dissolveSelectedEdges,
+    deleteSelectedEdges,
+    weldSelectedVertices,
+    deleteSelectedVertices,
+    connectVertices,
+    createFaceFromVertices,
+    extrudeSelectedVertices,
+  } = useStore();
+
+  const [extrudeAmount, setExtrudeAmount] = useState(0.3);
+  const [insetAmount, setInsetAmount] = useState(0.2);
+  const [bevelRadius, setBevelRadius] = useState(0.08);
+  const [bevelSegs, setBevelSegs] = useState(3);
+
+  const numEdges = Math.floor(selectedEdgeIndices.length / 2);
+
+  return (
+    <Section
+      title={`Herramientas de Sub-elementos (${editMode === 'FACE' ? 'Caras' : editMode === 'EDGE' ? 'Bordes' : editMode === 'VERTEX' ? 'Vértices' : 'Objeto'})`}
+      icon={<Scissors size={12} />}
+    >
+      <div className="space-y-3">
+        {/* Selector de modo rápido */}
+        <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-900/90 rounded-lg border border-white/5 text-[10px]">
+          <button
+            type="button"
+            onClick={() => setEditMode('OBJECT')}
+            className={`py-1.5 rounded font-semibold text-center transition-all ${
+              editMode === 'OBJECT' ? 'bg-zinc-700 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+            title="Modo Objeto (1 o Esc)"
+          >
+            Objeto (1)
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditMode('FACE')}
+            className={`py-1.5 rounded font-semibold text-center transition-all ${
+              editMode === 'FACE' ? 'bg-amber-600 text-white shadow' : 'text-zinc-400 hover:text-amber-300'
+            }`}
+            title="Modo Caras (2)"
+          >
+            Caras (2)
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditMode('EDGE')}
+            className={`py-1.5 rounded font-semibold text-center transition-all ${
+              editMode === 'EDGE' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-indigo-300'
+            }`}
+            title="Modo Bordes (3)"
+          >
+            Bordes (3)
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditMode('VERTEX')}
+            className={`py-1.5 rounded font-semibold text-center transition-all ${
+              editMode === 'VERTEX' ? 'bg-violet-600 text-white shadow' : 'text-zinc-400 hover:text-violet-300'
+            }`}
+            title="Modo Vértices (4)"
+          >
+            Vértices (4)
+          </button>
+        </div>
+
+        {/* ── SECCIÓN MODO CARAS ── */}
+        {editMode === 'FACE' && (
+          <div className="space-y-2.5 p-2.5 bg-amber-950/20 border border-amber-500/20 rounded-xl">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                <Layers size={13} className="text-amber-400" />
+                <span>Caras Seleccionadas</span>
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-amber-900/40 text-amber-200 border border-amber-600/30">
+                {selectedFaceIndices.length} / {obj.faces?.length || 0}
+              </span>
+            </div>
+
+            {/* Extrusión */}
+            <div className="space-y-1.5 pt-1 border-t border-amber-500/10">
+              <NumRow
+                label="Distancia Extruir"
+                value={extrudeAmount}
+                onChange={v => setExtrudeAmount(v)}
+                min={-5}
+                max={10}
+                step={0.05}
+                slider
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length === 0) {
+                    alert('Selecciona una o más caras para extruir.');
+                    return;
+                  }
+                  extrudeFaces(obj.id, selectedFaceIndices, extrudeAmount);
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="w-full py-1.5 bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow cursor-pointer"
+              >
+                <span>🚀 Extruir Caras (E / Ctrl+E)</span>
+              </button>
+            </div>
+
+            {/* Inset */}
+            <div className="space-y-1.5 pt-1 border-t border-amber-500/10">
+              <NumRow
+                label="Factor Inset"
+                value={insetAmount}
+                onChange={v => setInsetAmount(v)}
+                min={0.01}
+                max={0.9}
+                step={0.02}
+                slider
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length === 0) {
+                    alert('Selecciona una o más caras para hacer Inset.');
+                    return;
+                  }
+                  const res = insetFaces(obj.id, selectedFaceIndices, insetAmount);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="w-full py-1.5 bg-zinc-800 hover:bg-amber-700 disabled:bg-zinc-800 disabled:text-zinc-600 text-amber-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all border border-amber-600/30 cursor-pointer"
+              >
+                <span>🔲 Inset / Contorno Interior (I)</span>
+              </button>
+            </div>
+
+            {/* Operaciones de Caras secundarias */}
+            <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-amber-500/10">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length === 0) {
+                    alert('Selecciona caras para subdividir.');
+                    return;
+                  }
+                  subdivideFaces(obj.id, selectedFaceIndices);
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Subdivide las caras en quads menores"
+              >
+                ✂️ Subdividir (D)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length < 2) {
+                    alert('Selecciona al menos 2 caras para fusionar.');
+                    return;
+                  }
+                  mergeFaces(obj.id, selectedFaceIndices);
+                }}
+                disabled={selectedFaceIndices.length < 2}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-indigo-600 disabled:opacity-50 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Fusiona caras contiguas coplanares"
+              >
+                🔗 Fusionar (M)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length === 0) {
+                    alert('Selecciona caras para invertir sus normales.');
+                    return;
+                  }
+                  const res = flipSelectedFaceNormals(obj.id, selectedFaceIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Invertir orientación y normales de la cara"
+              >
+                🔄 Invertir Normales
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await capSelectedFacesObject(obj.id);
+                }}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-emerald-700 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Tapar hueco en la selección"
+              >
+                🛡️ Tapar Hueco (F)
+              </button>
+            </div>
+
+            {/* Eliminar Caras */}
+            <button
+              type="button"
+              onClick={() => {
+                const res = deleteSelectedFaces(obj.id, selectedFaceIndices);
+                if (!res.success) alert(res.message);
+              }}
+              disabled={selectedFaceIndices.length === 0}
+              className="w-full py-1.5 bg-rose-950/80 hover:bg-rose-600 disabled:bg-zinc-800 disabled:text-zinc-600 text-rose-200 hover:text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 border border-rose-800/60 transition-all cursor-pointer"
+            >
+              <Trash2 size={12} />
+              <span>Eliminar Caras (Supr)</span>
+            </button>
+          </div>
+        )}
+
+        {/* ── SECCIÓN MODO BORDES ── */}
+        {editMode === 'EDGE' && (
+          <div className="space-y-2.5 p-2.5 bg-indigo-950/20 border border-indigo-500/20 rounded-xl">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                <span className="w-2 h-0.5 bg-indigo-400 rounded-full"></span>
+                <span>Bordes Seleccionados</span>
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-indigo-900/40 text-indigo-200 border border-indigo-600/30">
+                {numEdges} borde(s)
+              </span>
+            </div>
+
+            {/* Biselar / Bevel */}
+            <div className="space-y-1.5 pt-1 border-t border-indigo-500/10">
+              <NumRow
+                label="Radio Bisel"
+                value={bevelRadius}
+                onChange={v => setBevelRadius(v)}
+                min={0.01}
+                max={2}
+                step={0.02}
+                slider
+              />
+              <NumRow
+                label="Segmentos Bisel"
+                value={bevelSegs}
+                onChange={v => setBevelSegs(Math.max(1, Math.round(v)))}
+                min={1}
+                max={16}
+                step={1}
+                slider
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const res = bevelSelectedEdges(obj.id, selectedEdgeIndices, bevelRadius, bevelSegs);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedEdgeIndices.length < 2 && (!obj.edges || obj.edges.length === 0)}
+                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow cursor-pointer"
+              >
+                <Sparkles size={12} />
+                <span>Biselar / Redondear Bordes (B)</span>
+              </button>
+            </div>
+
+            {/* Operaciones de Bordes */}
+            <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-indigo-500/10">
+              <button
+                type="button"
+                onClick={() => {
+                  const res = subdivideSelectedEdges(obj.id, selectedEdgeIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedEdgeIndices.length < 2}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-200 rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Inserta un vértice en el centro de cada arista seleccionada"
+              >
+                ✂️ Dividir Arista (D)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = bridgeSelectedEdges(obj.id, selectedEdgeIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={numEdges < 2}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-emerald-700 disabled:opacity-50 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Crea una cara conectando 2 aristas seleccionadas"
+              >
+                🌉 Puente / Cara (F)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = dissolveSelectedEdges(obj.id, selectedEdgeIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedEdgeIndices.length < 2}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-violet-700 disabled:opacity-50 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Disuelve la arista fusionando las dos caras adyacentes"
+              >
+                ↩️ Disolver (X)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = deleteSelectedEdges(obj.id, selectedEdgeIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedEdgeIndices.length < 2}
+                className="py-1.5 px-2 bg-rose-950/70 hover:bg-rose-600 disabled:opacity-50 text-rose-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-rose-800/50 transition-all cursor-pointer"
+                title="Elimina las aristas seleccionadas y sus caras"
+              >
+                <Trash2 size={11} />
+                <span>Eliminar (Supr)</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── SECCIÓN MODO VÉRTICES ── */}
+        {editMode === 'VERTEX' && (
+          <div className="space-y-2.5 p-2.5 bg-violet-950/20 border border-violet-500/20 rounded-xl">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-bold text-violet-300 flex items-center gap-1.5">
+                <Box size={13} className="text-violet-400" />
+                <span>Vértices Seleccionados</span>
+              </span>
+              <span className="font-mono text-[10px] px-2 py-0.5 rounded-full bg-violet-900/40 text-violet-200 border border-violet-600/30">
+                {selectedVertexIndices.length} / {obj.vertices?.length || 0}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-violet-500/10">
+              <button
+                type="button"
+                onClick={() => {
+                  const res = connectVertices(obj.id, selectedVertexIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedVertexIndices.length < 2}
+                className="py-1.5 px-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer col-span-2"
+                title="Conecta 2 vértices seleccionados creando una línea o dividiendo la cara (J)"
+              >
+                ✂️ Conectar Línea (J)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = createFaceFromVertices(obj.id, selectedVertexIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedVertexIndices.length < 3}
+                className="py-1.5 px-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer"
+                title="Crear cara poligonal a partir de 3 o más vértices (F)"
+              >
+                🔲 Rellenar Cara (F)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = extrudeSelectedVertices(obj.id, selectedVertexIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedVertexIndices.length === 0}
+                className="py-1.5 px-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer"
+                title="Extruir vértice(s) creando nuevo segmento (E)"
+              >
+                🚀 Extruir (E)
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await weldSelectedVertices(obj.id, selectedVertexIndices);
+                  alert(res.message);
+                }}
+                className="py-1.5 px-2 bg-zinc-800 hover:bg-indigo-600 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-zinc-700 transition-all cursor-pointer"
+                title="Soldar / Unir vértices seleccionados o cercanos (W)"
+              >
+                🔗 Soldar (W)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                  if (!res.success) alert(res.message);
+                }}
+                disabled={selectedVertexIndices.length === 0}
+                className="py-1.5 px-2 bg-rose-950/70 hover:bg-rose-600 disabled:opacity-50 text-rose-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 border border-rose-800/50 transition-all cursor-pointer"
+                title="Eliminar vértices seleccionados (Supr)"
+              >
+                <Trash2 size={11} />
+                <span>Eliminar (Supr)</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+};
+
 // ─── Secciones específicas ───────────────────────────────────────────────────
 
 const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
@@ -818,21 +1243,21 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   switch (obj.type) {
     case 'PLANE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Subdivisión" value={p.segments ?? 1} onChange={v => up({ segments: Math.max(1, Math.round(v)) })}
             min={1} max={256} step={1} slider/>
         </Section>
       );
     case 'CIRCLE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Segmentos" value={p.segments ?? 16} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
             min={3} max={256} step={1} slider/>
         </Section>
       );
     case 'RING':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Radio Int." value={p.innerRadius ?? 0.25} onChange={v => up({ innerRadius: v })} min={0.01} step={0.05}/>
           <NumRow label="Radio Ext." value={p.outerRadius ?? 0.5} onChange={v => up({ outerRadius: v })} min={0.01} step={0.05}/>
           <NumRow label="Segmentos" value={p.thetaSegments ?? 16} onChange={v => up({ thetaSegments: Math.max(3, Math.round(v)) })}
@@ -841,14 +1266,14 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
       );
     case 'CUBE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Subdivisión" value={p.segments ?? 1} onChange={v => up({ segments: Math.max(1, Math.round(v)) })}
             min={1} max={128} step={1} slider/>
         </Section>
       );
     case 'SPHERE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
             <span>Tipo de Esfera</span>
             <select
@@ -874,7 +1299,7 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     case 'PYRAMID':
     case 'PRISM':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Seg. radiales" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
             min={3} max={256} step={1} slider/>
           <NumRow label="Seg. altura" value={p.heightSegments ?? 1} onChange={v => up({ heightSegments: Math.max(1, Math.round(v)) })}
@@ -884,14 +1309,14 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     case 'CAPSULE':
     case 'HEMISPHERE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(4, Math.round(v)) })}
             min={4} max={256} step={1} slider/>
         </Section>
       );
     case 'TUBE':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Radio interior" value={p.innerRadius ?? 0.25} onChange={v => up({ innerRadius: Math.max(0.01, v) })} min={0.01} max={10} step={0.05} slider/>
           <NumRow label="Radio exterior" value={p.outerRadius ?? 0.5} onChange={v => up({ outerRadius: Math.max(0.05, v) })} min={0.05} max={12} step={0.05} slider/>
           <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })} min={3} max={256} step={1} slider/>
@@ -899,7 +1324,7 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
       );
     case 'ARC':
       return (
-        <Section title="Parámetros Arco 3D" defaultOpen>
+        <Section title="Parámetros Arco 3D">
           <NumRow label="Ángulo (°)" value={p.arcAngle ?? 180} onChange={v => up({ arcAngle: Math.max(1, Math.min(360, Math.round(v))) })} min={1} max={360} step={1} slider/>
           <NumRow label="Radio int." value={p.innerRadius ?? 0.25} onChange={v => up({ innerRadius: Math.max(0.01, v) })} min={0.01} max={10} step={0.05} slider/>
           <NumRow label="Radio ext." value={p.outerRadius ?? 0.5} onChange={v => up({ outerRadius: Math.max(0.05, v) })} min={0.05} max={12} step={0.05} slider/>
@@ -909,7 +1334,7 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
       );
     case 'STAR':
       return (
-        <Section title="Parámetros Estrella 3D" defaultOpen>
+        <Section title="Parámetros Estrella 3D">
           <NumRow label="Puntas" value={p.starPoints ?? p.points ?? 5} onChange={v => up({ starPoints: Math.max(3, Math.round(v)) })} min={3} max={32} step={1} slider/>
           <NumRow label="Radio int." value={p.innerRadius ?? 0.25} onChange={v => up({ innerRadius: Math.max(0.01, v) })} min={0.01} max={10} step={0.05} slider/>
           <NumRow label="Radio ext." value={p.outerRadius ?? 0.5} onChange={v => up({ outerRadius: Math.max(0.05, v) })} min={0.05} max={12} step={0.05} slider/>
@@ -918,7 +1343,7 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
       );
     case 'TORUS':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Radio" value={p.radius ?? 0.5} onChange={v => up({ radius: v })} min={0.05} step={0.05}/>
           <NumRow label="Tubo" value={p.tube ?? 0.2} onChange={v => up({ tube: v })} min={0.01} step={0.05}/>
           <NumRow label="Seg. radiales" value={p.radialSegments ?? 16} onChange={v => up({ radialSegments: Math.max(3, Math.round(v)) })}
@@ -932,24 +1357,109 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     case 'TETRAHEDRON':
     case 'OCTAHEDRON':
       return (
-        <Section title="Parámetros" defaultOpen>
+        <Section title="Parámetros">
           <NumRow label="Detalle" value={p.detail ?? 0} onChange={v => up({ detail: Math.max(0, Math.round(v)) })}
             min={0} max={8} step={1} slider/>
         </Section>
       );
-    case 'SHAPE':
+    case 'SHAPE': {
+      const selectedVertexIndices = useStore.getState().selectedVertexIndices;
+      const insertVertexMode = useStore.getState().insertVertexMode;
+      const setInsertVertexMode = useStore.getState().setInsertVertexMode;
+      const weldSelectedVertices = useStore.getState().weldSelectedVertices;
+      const subdivideShapeSegment = useStore.getState().subdivideShapeSegment;
+      const deleteSelectedVertices = useStore.getState().deleteSelectedVertices;
+      const toggleShapeClosed = useStore.getState().toggleShapeClosed;
+
       return (
-        <Section title="Parámetros" defaultOpen>
-          <NumRow label="Segmentos (Bezier)" value={p.segments ?? 20} onChange={v => up({ segments: Math.max(1, Math.round(v)) })}
-            min={1} max={128} step={1} slider/>
-          <NumRow label="Profundidad" value={p.extrusionDepth ?? 0} onChange={v => up({ extrusionDepth: v })}
-            min={0} max={50} step={0.1} />
-          {p.extrusionDepth !== undefined && p.extrusionDepth > 0 && (
-            <NumRow label="Seg. Profundidad" value={p.depthSegments ?? 1} onChange={v => up({ depthSegments: Math.max(1, Math.round(v)) })}
+        <>
+          <Section title="Herramientas de Vértices">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px] text-zinc-400 bg-zinc-900/60 p-2 rounded border border-zinc-800">
+                <span>Vértices: <strong className="text-zinc-200">{obj.vertices?.length || 0}</strong></span>
+                <span className="text-[10px] text-indigo-400 font-semibold">{selectedVertexIndices.length} seleccionados</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await weldSelectedVertices(obj.id, selectedVertexIndices);
+                    alert(res.message);
+                  }}
+                  className="px-2 py-1.5 bg-zinc-800 hover:bg-indigo-600 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all border border-zinc-700 hover:border-indigo-500"
+                  title="Soldar / Fusionar vértices (W)"
+                >
+                  🔗 Soldar (W)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = subdivideShapeSegment(obj.id);
+                    alert(res.message);
+                  }}
+                  className="px-2 py-1.5 bg-zinc-800 hover:bg-violet-600 text-zinc-200 hover:text-white rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all border border-zinc-700 hover:border-violet-500"
+                  title="Dividir segmento por la mitad (D)"
+                >
+                  ✂️ Dividir (D)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setInsertVertexMode(!insertVertexMode)}
+                  className={`px-2 py-1.5 rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all border ${
+                    insertVertexMode
+                      ? 'bg-amber-600 text-white border-amber-400'
+                      : 'bg-zinc-800 text-zinc-200 border-zinc-700 hover:bg-zinc-700'
+                  }`}
+                  title="Insertar vértice haciendo clic en la línea (I)"
+                >
+                  ➕ Insertar (I)
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const res = deleteSelectedVertices(obj.id, selectedVertexIndices);
+                    if (!res.success) alert(res.message);
+                  }}
+                  disabled={selectedVertexIndices.length === 0}
+                  className={`px-2 py-1.5 rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all border ${
+                    selectedVertexIndices.length > 0
+                      ? 'bg-rose-950/80 hover:bg-rose-600 text-rose-200 hover:text-white border-rose-800 hover:border-rose-500'
+                      : 'bg-zinc-900/50 text-zinc-600 border-zinc-800 cursor-not-allowed'
+                  }`}
+                  title="Eliminar vértices seleccionados (Supr / Delete / Backspace)"
+                >
+                  🗑️ Eliminar (Supr)
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => toggleShapeClosed(obj.id)}
+                className="w-full py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-[10px] font-semibold flex items-center justify-center gap-1 transition-all border border-zinc-700 mt-1"
+                title="Cerrar o abrir la línea (C)"
+              >
+                ⭕ {obj.parameters?.closed ? 'Abrir Curva/Polilínea' : 'Cerrar Forma (C)'}
+              </button>
+            </div>
+          </Section>
+
+          <Section title="Parámetros">
+            <NumRow label="Segmentos (Bezier)" value={p.segments ?? 20} onChange={v => up({ segments: Math.max(1, Math.round(v)) })}
               min={1} max={128} step={1} slider/>
-          )}
-        </Section>
+            <NumRow label="Profundidad" value={p.extrusionDepth ?? 0} onChange={v => up({ extrusionDepth: v })}
+              min={0} max={50} step={0.1} />
+            {p.extrusionDepth !== undefined && p.extrusionDepth > 0 && (
+              <NumRow label="Seg. Profundidad" value={p.depthSegments ?? 1} onChange={v => up({ depthSegments: Math.max(1, Math.round(v)) })}
+                min={1} max={128} step={1} slider/>
+            )}
+          </Section>
+        </>
       );
+    }
     default:
       return null;
   }
@@ -973,7 +1483,7 @@ const GeneratedSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   };
 
   return (
-    <Section title="Generador" icon={<RotateCw size={12}/>} defaultOpen>
+    <Section title="Generador" icon={<RotateCw size={12}/>}>
       <div className="px-1.5 py-1 bg-indigo-900/30 border border-indigo-800/50 rounded text-[9px] text-indigo-300 mb-2 flex items-center gap-1.5">
         <Wand2 size={10}/>
         <span>Objeto Paramétrico: <span className="font-bold uppercase">{genType}</span></span>
@@ -1220,7 +1730,7 @@ const AlignSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   };
 
   return (
-    <Section title="Alinear / Pivote / Rotación" icon={<AlignCenterHorizontal size={12}/>} defaultOpen={true}>
+    <Section title="Alinear / Pivote / Rotación" icon={<AlignCenterHorizontal size={12}/>}>
       <div className="space-y-3">
         <button 
           onClick={() => recenterPivotObject(obj.id)} 
@@ -1380,7 +1890,7 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
   };
 
   return (
-    <Section title="Material del Objeto" icon={<Palette size={14}/>} defaultOpen={true}>
+    <Section title="Material del Objeto" icon={<Palette size={14}/>}>
       <div className="space-y-4">
         {/* Selector de material de proyecto */}
         <div className="space-y-2">
@@ -1474,7 +1984,29 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
 
 
 const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
-  const { smoothObject, roundAnglesObject, subdivideObject, optimizeObject, updateObject, fillHolesObject, capSelectedFacesObject, repairObject, weldObject, healObject, separateLoosePartsObject, editMode, selectedGLTFMeshes, setSelectedGLTFMeshes, isolateGLTFSelection, setIsolateGLTFSelection } = useStore();
+  const {
+    smoothObject,
+    roundAnglesObject,
+    subdivideObject,
+    applyNoiseObject,
+    optimizeObject,
+    regularizeObject,
+    isotropicRemeshObject,
+    dissolveCoplanarObject,
+    cleanIslandsObject,
+    updateObject,
+    fillHolesObject,
+    capSelectedFacesObject,
+    repairObject,
+    weldObject,
+    healObject,
+    separateLoosePartsObject,
+    editMode,
+    selectedGLTFMeshes,
+    setSelectedGLTFMeshes,
+    isolateGLTFSelection,
+    setIsolateGLTFSelection
+  } = useStore();
   const [smoothFactor, setSmoothFactor] = useState(0.5);
   const [smoothIters, setSmoothIters] = useState(1);
   const [roundRadius, setRoundRadius] = useState(0.08);
@@ -1487,6 +2019,49 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [separateMsg, setSeparateMsg] = useState<string | null>(null);
   const [meshSortMode, setMeshSortMode] = useState<'desc' | 'asc' | 'default'>('desc');
   const [meshSearch, setMeshSearch] = useState('');
+
+  // Estados de Regularización y Limpieza Avanzada de Topología
+  const [regStrength, setRegStrength] = useState(0.65);
+  const [regIters, setRegIters] = useState(3);
+  const [regFeatureAngle, setRegFeatureAngle] = useState(40);
+  const [remeshIters, setRemeshIters] = useState(2);
+  const [coplanarTolerance, setCoplanarTolerance] = useState(3.5);
+  const [islandRatio, setIslandRatio] = useState(0.05);
+
+  // Estados del Deformador de Malla por Ruido
+  const [noiseType, setNoiseType] = useState<MeshNoiseType>('VORONOI_CELLULAR');
+  const [noiseIntensity, setNoiseIntensity] = useState(0.12);
+  const [noiseScale, setNoiseScale] = useState(1.8);
+  const [noiseOctaves, setNoiseOctaves] = useState(3);
+  const [noiseRoughness, setNoiseRoughness] = useState(0.55);
+  const [noiseDirection, setNoiseDirection] = useState<MeshNoiseDirection>('NORMAL');
+  const [noiseSeed, setNoiseSeed] = useState(1337);
+  const [noiseSubdivideFirst, setNoiseSubdivideFirst] = useState(true);
+  const [isApplyingNoise, setIsApplyingNoise] = useState(false);
+
+  const handleApplyPreset = (preset: typeof MESH_NOISE_PRESETS[0]) => {
+    setNoiseType(preset.config.noiseType);
+    setNoiseIntensity(preset.config.intensity);
+    setNoiseScale(preset.config.scale);
+    if (preset.config.octaves !== undefined) setNoiseOctaves(preset.config.octaves);
+    if (preset.config.roughness !== undefined) setNoiseRoughness(preset.config.roughness);
+    if (preset.config.direction !== undefined) setNoiseDirection(preset.config.direction);
+  };
+
+  const handleApplyNoise = async () => {
+    setIsApplyingNoise(true);
+    await applyNoiseObject(obj.id, {
+      noiseType,
+      intensity: noiseIntensity,
+      scale: noiseScale,
+      octaves: noiseOctaves,
+      roughness: noiseRoughness,
+      direction: noiseDirection,
+      seed: noiseSeed,
+      subdivideFirst: noiseSubdivideFirst,
+    });
+    setIsApplyingNoise(false);
+  };
 
   const sortedAndFilteredMeshes = useMemo(() => {
     if (!obj.meshData?.meshes) return [];
@@ -1600,6 +2175,153 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
         </div>
         <button onClick={() => subdivideObject(obj.id)} className="w-full py-1 bg-indigo-700 rounded text-[10px] font-bold">Subdividir</button>
         
+        {/* ─── RUIDO DEFORMADOR DE MALLA (ROMPER GEOMETRÍA PERFECTA) ─── */}
+        <div className="space-y-2 p-2.5 bg-gradient-to-b from-cyan-950/40 via-zinc-900/70 to-zinc-900/80 border border-cyan-500/30 rounded-lg shadow-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-wide flex items-center gap-1.5">
+              <Sparkles size={12} className="text-cyan-400" />
+              Ruido Deformador 3D (Romper Geometría)
+            </span>
+            <span className="text-[8.5px] bg-cyan-900/60 text-cyan-200 border border-cyan-500/30 px-1.5 py-0.5 rounded font-mono font-bold">
+              3D Noise
+            </span>
+          </div>
+
+          <p className="text-[9px] text-zinc-300 leading-tight">
+            Rompe la geometría lisa y antinatural aplicando fractales, facetas de hielo/roca, ondas y microporos sobre los vértices.
+          </p>
+
+          {/* Barra de Presets Rápidos */}
+          <div className="space-y-1">
+            <span className="text-[8.5px] text-zinc-400 font-semibold uppercase">Presets Rápidos:</span>
+            <div className="grid grid-cols-3 gap-1">
+              {MESH_NOISE_PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => handleApplyPreset(p)}
+                  className={`py-1 px-1.5 rounded text-[9px] font-medium flex items-center justify-center gap-1 border transition-all text-left truncate cursor-pointer ${
+                    noiseType === p.config.noiseType
+                      ? 'bg-cyan-900/80 border-cyan-400/60 text-cyan-100 font-bold shadow-sm'
+                      : 'bg-zinc-800/80 hover:bg-zinc-700/80 border-zinc-700 text-zinc-300'
+                  }`}
+                  title={`${p.name}: ${p.desc}`}
+                >
+                  <span className="text-xs">{p.icon}</span>
+                  <span className="truncate">{p.name.split('&')[0].trim()}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Selector de Tipo de Ruido */}
+          <div className="space-y-1">
+            <label className="text-[9px] text-zinc-300 font-bold flex items-center justify-between">
+              <span>Tipo de Ruido / Patrón:</span>
+            </label>
+            <select
+              value={noiseType}
+              onChange={(e) => setNoiseType(e.target.value as MeshNoiseType)}
+              className="w-full bg-zinc-950 border border-zinc-700 text-zinc-200 rounded px-2 py-1.5 text-[10px] font-medium focus:outline-none focus:border-cyan-500 cursor-pointer"
+            >
+              <option value="VORONOI_CELLULAR">🧊 Voronoi Celular (Bloques Glaciales / Facetas)</option>
+              <option value="PERLIN_FBM">🪨 Perlin FBM Fractal (Roca Orgánica / Montañas)</option>
+              <option value="GLACIAL_RIPPLE">🌊 Rizado Glacial (Ondas y Surcos de Deshielo)</option>
+              <option value="CRATER_EROSION">🌋 Cráteres & Erosión (Hendiduras / Meteorito)</option>
+              <option value="MICRO_PORES_3D">🧽 Microporos 3D (Relieve Táctil en Vértices)</option>
+              <option value="SIMPLEX_TURBULENCE">🌪️ Simplex Turbulencia (Pliegues y Distorsión)</option>
+            </select>
+          </div>
+
+          {/* Sliders de Ajuste */}
+          <div className="space-y-1 pt-0.5">
+            <NumRow label="Fuerza / Intensidad" value={noiseIntensity} min={0.005} max={0.4} step={0.005} onChange={setNoiseIntensity} slider />
+            <NumRow label="Escala / Tamaño de Ruido" value={noiseScale} min={0.2} max={12.0} step={0.1} onChange={setNoiseScale} slider />
+            <NumRow label="Detalle / Octavas" value={noiseOctaves} min={1} max={5} step={1} onChange={setNoiseOctaves} slider />
+            <NumRow label="Persistencia / Rugosidad" value={noiseRoughness} min={0.1} max={0.9} step={0.05} onChange={setNoiseRoughness} slider />
+          </div>
+
+          {/* Selector de Dirección */}
+          <div className="space-y-1">
+            <span className="text-[8.5px] text-zinc-400 font-semibold uppercase">Dirección de Deformación:</span>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => setNoiseDirection('NORMAL')}
+                className={`flex-1 py-1 rounded text-[9px] font-bold border transition-all cursor-pointer ${
+                  noiseDirection === 'NORMAL'
+                    ? 'bg-cyan-700 border-cyan-400 text-white shadow-sm'
+                    : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Desplaza vértices a lo largo de las normales de la superficie"
+              >
+                Normal (Superficie)
+              </button>
+              <button
+                type="button"
+                onClick={() => setNoiseDirection('RADIAL')}
+                className={`flex-1 py-1 rounded text-[9px] font-bold border transition-all cursor-pointer ${
+                  noiseDirection === 'RADIAL'
+                    ? 'bg-cyan-700 border-cyan-400 text-white shadow-sm'
+                    : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Desplaza vértices hacia afuera del centro del objeto"
+              >
+                Radial (Centro)
+              </button>
+              <button
+                type="button"
+                onClick={() => setNoiseDirection('XYZ')}
+                className={`flex-1 py-1 rounded text-[9px] font-bold border transition-all cursor-pointer ${
+                  noiseDirection === 'XYZ'
+                    ? 'bg-cyan-700 border-cyan-400 text-white shadow-sm'
+                    : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Deformación tridimensional volumétrica libre"
+              >
+                3D Libre (XYZ)
+              </button>
+            </div>
+          </div>
+
+          {/* Opciones Adicionales & Semilla */}
+          <div className="flex items-center justify-between pt-1 gap-2 border-t border-zinc-800/80">
+            <label className="flex items-center gap-1.5 text-[9.5px] text-zinc-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={noiseSubdivideFirst}
+                onChange={(e) => setNoiseSubdivideFirst(e.target.checked)}
+                className="accent-cyan-500 w-3.5 h-3.5 rounded"
+              />
+              <span>Subdividir si es baja resolución</span>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => setNoiseSeed(Math.floor(Math.random() * 999999))}
+              className="py-1 px-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded text-[9px] text-zinc-300 hover:text-white flex items-center gap-1 font-medium transition-colors cursor-pointer"
+              title="Genera una nueva variación aleatoria de ruido"
+            >
+              <RotateCw size={10} className="text-cyan-400" />
+              <span>🎲 Variación #{noiseSeed % 1000}</span>
+            </button>
+          </div>
+
+          {/* Botón Principal de Aplicar Ruido */}
+          <button
+            onClick={handleApplyNoise}
+            disabled={isApplyingNoise}
+            className={`w-full py-2 px-3 rounded-md text-[10.5px] font-bold text-white flex items-center justify-center gap-2 transition-all shadow-md active:scale-98 cursor-pointer ${
+              isApplyingNoise
+                ? 'bg-cyan-900 animate-pulse border border-cyan-500/50'
+                : 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 border border-cyan-400/40 shadow-cyan-950/40'
+            }`}
+            title="Aplica la deformación de ruido seleccionada a la geometría de la malla"
+          >
+            <Sparkles size={13} className={isApplyingNoise ? 'animate-spin' : ''} />
+            <span>{isApplyingNoise ? 'Deformando Malla...' : 'Romper Geometría con Ruido'}</span>
+          </button>
+        </div>
+
         <div className="pt-1 pb-0.5">
           <button
             onClick={handleSeparateLooseParts}
@@ -1681,115 +2403,150 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             Aplicar Suavizado Malla
           </button>
         </div>
-        <div className="space-y-1">
-          <NumRow label={selectedGLTFMeshes.length > 0 ? "Ratio (Selección)" : "Ratio (Completo)"} value={optimizeRatio} min={0.01} max={0.95} step={0.01} onChange={setOptimizeRatio} slider />
-          
-          <div className="flex gap-1 py-0.5">
-            <button onClick={() => setOptimizeRatio(0.05)} className={`flex-1 py-1 text-[9px] font-bold rounded border transition-colors ${optimizeRatio === 0.05 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'}`} title="Reducción extrema al 5% de polígonos (-95%)">
-              5% Ultra
-            </button>
-            <button onClick={() => setOptimizeRatio(0.20)} className={`flex-1 py-1 text-[9px] font-bold rounded border transition-colors ${optimizeRatio === 0.20 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'}`} title="Reducción fuerte al 20% de polígonos (-80%)">
-              20% Bajo
-            </button>
-            <button onClick={() => setOptimizeRatio(0.50)} className={`flex-1 py-1 text-[9px] font-bold rounded border transition-colors ${optimizeRatio === 0.50 ? 'bg-violet-600 border-violet-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'}`} title="Reducción moderada al 50% de polígonos (-50%)">
-              50% Medio
+
+        {/* ─── REGULARIZACIÓN Y LIMPIEZA DE TOPOLOGÍA POST-OPTIMIZACIÓN ─── */}
+        <div className="space-y-2 p-2 bg-gradient-to-b from-teal-950/40 via-zinc-900/70 to-zinc-900/80 border border-teal-500/30 rounded-lg shadow-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold text-teal-300 uppercase tracking-wide flex items-center gap-1.5">
+              <Sparkles size={12} className="text-teal-400" />
+              Malla Limpia & Regular (Post-Optimizar)
+            </span>
+            <span className="text-[8.5px] bg-teal-900/60 text-teal-200 border border-teal-500/30 px-1.5 py-0.5 rounded font-mono font-bold">
+              Topology
+            </span>
+          </div>
+
+          <p className="text-[9px] text-zinc-300 leading-tight">
+            Corrige la geometría tras optimizar o extruir: relaja vértices tangencialmente, iguala triángulos sin perder aristas vivas y elimina ruido flotante.
+          </p>
+
+          {/* 1. Regularización Tangencial */}
+          <div className="space-y-1 bg-zinc-950/60 border border-zinc-800 p-1.5 rounded">
+            <span className="text-[9px] text-teal-200 font-bold flex items-center justify-between">
+              <span>1. Relajación Tangencial (Triángulos Equiláteros)</span>
+            </span>
+            <NumRow label="Fuerza Relajación" value={regStrength} min={0.1} max={1.0} step={0.05} onChange={setRegStrength} slider />
+            <NumRow label="Iteraciones" value={regIters} min={1} max={10} step={1} onChange={setRegIters} slider />
+            <NumRow label="Ángulo Aristas Vivas (°)" value={regFeatureAngle} min={15} max={85} step={5} onChange={setRegFeatureAngle} slider />
+            <button
+              onClick={() => regularizeObject(obj.id, regStrength, regIters, regFeatureAngle)}
+              className="w-full py-1.5 bg-teal-700 hover:bg-teal-600 rounded text-[10px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
+              title="Equilibra y regulariza los triángulos a lo largo de la superficie preservando aristas vivas mecánicas"
+            >
+              Regularizar Malla (Topología Equilibrada)
             </button>
           </div>
 
-          {obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
-            <div className="mt-2 bg-zinc-900 border border-zinc-700 rounded p-2">
-              <div className="flex justify-between items-center mb-1.5 gap-1">
-                <span className="text-[10px] text-zinc-300 font-bold flex items-center gap-1">
-                  Partes ({obj.meshData.meshes.length})
-                </span>
-                <div className="flex gap-1 items-center">
-                  <button 
-                    onClick={() => setMeshSortMode(prev => prev === 'desc' ? 'asc' : prev === 'asc' ? 'default' : 'desc')}
-                    className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${
-                      meshSortMode !== 'default' 
-                        ? 'bg-amber-950/90 text-amber-300 border-amber-500/60 font-bold' 
-                        : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-white'
-                    }`}
-                    title={
-                      meshSortMode === 'desc' 
-                        ? "Orden actual: Mayor a Menor polígonos. Clic para Menor a Mayor" 
-                        : meshSortMode === 'asc' 
-                          ? "Orden actual: Menor a Mayor polígonos. Clic para Orden Original" 
-                          : "Orden original. Clic para Ordenar Mayor a Menor"
-                    }
-                  >
-                    <ArrowDownNarrowWide size={11} className={meshSortMode === 'asc' ? 'rotate-180 transition-transform' : ''} />
-                    {meshSortMode === 'desc' ? 'Mayor-Menor' : meshSortMode === 'asc' ? 'Menor-Mayor' : 'Original'}
-                  </button>
-                  <button onClick={selectAllMeshes} className="text-[9px] bg-zinc-800 px-1 py-0.5 rounded hover:bg-zinc-700">Todas</button>
-                  <button onClick={selectDenseMeshes} className="text-[9px] bg-purple-900/60 text-purple-200 border border-purple-500/30 px-1 py-0.5 rounded hover:bg-purple-800" title="Selecciona automáticamente las sub-mallas más densas (>2,000 polígonos)">Densas</button>
-                  <button onClick={deselectAllMeshes} className="text-[9px] bg-zinc-800 px-1 py-0.5 rounded hover:bg-zinc-700">Ninguna</button>
-                </div>
-              </div>
+          {/* 2. Remallado Isótropo Uniforme */}
+          <div className="space-y-1 bg-zinc-950/60 border border-zinc-800 p-1.5 rounded">
+            <span className="text-[9px] text-emerald-200 font-bold flex items-center justify-between">
+              <span>2. Remallado Isótropo Uniforme</span>
+            </span>
+            <NumRow label="Pasadas" value={remeshIters} min={1} max={5} step={1} onChange={setRemeshIters} slider />
+            <button
+              onClick={() => isotropicRemeshObject(obj.id, undefined, remeshIters)}
+              className="w-full py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-[10px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
+              title="Divide aristas largas y colapsa aristas microscópicas para crear una rejilla triangular uniforme"
+            >
+              Remallar Malla Uniforme (Isotropic)
+            </button>
+          </div>
 
-              {obj.meshData.meshes.length > 5 && (
-                <div className="mb-1.5">
+          {/* 3. Disolver Caras Coplanares & Limpiar Ruido */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <div className="space-y-1.5 bg-zinc-950/70 border border-amber-500/30 p-2 rounded-lg flex flex-col justify-between shadow-sm">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9.5px] text-amber-300 font-bold tracking-tight">Disolver Planos</span>
+                  <span className="text-[9px] font-mono font-bold bg-amber-950/80 text-amber-300 px-1.5 py-0.5 rounded border border-amber-600/40">
+                    {coplanarTolerance}°
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 pt-0.5">
                   <input
-                    type="text"
-                    placeholder="Buscar parte por nombre..."
-                    value={meshSearch}
-                    onChange={(e) => setMeshSearch(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[10px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
+                    type="range"
+                    min={0.5}
+                    max={25}
+                    step={0.5}
+                    value={coplanarTolerance}
+                    onChange={(e) => setCoplanarTolerance(parseFloat(e.target.value))}
+                    className="w-full h-1.5 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
                   />
                 </div>
-              )}
-
-              <div className="max-h-40 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
-                {sortedAndFilteredMeshes.map((mesh) => (
-                  <label key={mesh.id} className="flex items-center gap-1.5 text-[10px] cursor-pointer hover:bg-zinc-800 p-1.5 rounded border border-transparent hover:border-zinc-700/50 transition-colors">
-                    <input 
-                      type="checkbox" 
-                      className="accent-violet-600 w-3.5 h-3.5"
-                      checked={selectedGLTFMeshes.includes(mesh.id)}
-                      onChange={() => toggleMeshSelection(mesh.id)}
-                    />
-                    <span className="truncate flex-1 font-medium text-zinc-200" title={mesh.name}>{mesh.name}</span>
-                    <span 
-                      className="text-violet-300 font-mono text-[9px] bg-violet-950/70 px-1.5 py-0.5 rounded border border-violet-800/40 shrink-0 font-semibold"
-                      title={`${mesh.faces.toLocaleString()} polígonos (caras) / ${mesh.vertices ? mesh.vertices.toLocaleString() : '-'} vértices`}
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[1, 3, 5, 10, 20].map(deg => (
+                    <button
+                      key={deg}
+                      type="button"
+                      onClick={() => setCoplanarTolerance(deg)}
+                      className={`flex-1 py-0.5 text-[8px] font-mono font-bold rounded transition-colors cursor-pointer ${
+                        coplanarTolerance === deg
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
+                      }`}
                     >
-                      {mesh.faces.toLocaleString()} pol.
-                    </span>
-                  </label>
-                ))}
+                      {deg}°
+                    </button>
+                  ))}
+                </div>
               </div>
-              
-              <div className="mt-2 pt-2 border-t border-zinc-800 flex flex-col gap-1">
-                <label className="flex items-center gap-2 text-[10px] cursor-pointer text-zinc-300 hover:text-white transition-colors">
-                  <input 
-                    type="checkbox" 
-                    className="accent-violet-600 w-3 h-3"
-                    checked={isolateGLTFSelection}
-                    onChange={(e) => setIsolateGLTFSelection(e.target.checked)}
-                  />
-                  <span>Ver solo selección (Aislar)</span>
-                </label>
-
-                {selectedStats && (
-                  <div className="bg-zinc-800/50 rounded p-1.5 text-[9px] text-zinc-400 flex justify-between items-center">
-                    <span>Estadísticas selección:</span>
-                    <span className="font-mono text-violet-400">{selectedStats.vertices.toLocaleString()}v | {selectedStats.faces.toLocaleString()}f</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="text-[9px] text-zinc-500 mt-1 italic">
-                {selectedGLTFMeshes.length === 0 ? 'Se optimizará todo el modelo con el ratio indicado.' : `Se optimizarán ${selectedGLTFMeshes.length} partes con el ratio indicado.`}
-              </div>
+              <button
+                onClick={() => dissolveCoplanarObject(obj.id, coplanarTolerance)}
+                className="w-full py-1.5 bg-gradient-to-r from-amber-700 to-amber-600 hover:from-amber-600 hover:to-amber-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-1"
+                title="Detecta caras triangulares contiguas que yacen en el mismo plano y las fusiona, limpiando las mallas en superficies planas"
+              >
+                Disolver Coplanares
+              </button>
             </div>
-          )}
 
-          <button onClick={() => optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined)} className="w-full py-1 bg-violet-700 rounded text-[10px] font-bold mt-1">
-            Optimizar {selectedGLTFMeshes.length > 0 ? 'Selección' : 'Completo'}
-          </button>
+            <div className="space-y-1.5 bg-zinc-950/70 border border-rose-500/30 p-2 rounded-lg flex flex-col justify-between shadow-sm">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[9.5px] text-rose-300 font-bold tracking-tight">Quitar Islas / Ruido</span>
+                  <span className="text-[9px] font-mono font-bold bg-rose-950/80 text-rose-300 px-1.5 py-0.5 rounded border border-rose-600/40">
+                    {Math.round(islandRatio * 100)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 pt-0.5">
+                  <input
+                    type="range"
+                    min={1}
+                    max={30}
+                    step={1}
+                    value={Math.round(islandRatio * 100)}
+                    onChange={(e) => setIslandRatio(parseFloat(e.target.value) / 100)}
+                    className="w-full h-1.5 accent-rose-500 bg-zinc-800 rounded cursor-pointer"
+                  />
+                </div>
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[2, 5, 10, 15, 25].map(pct => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => setIslandRatio(pct / 100)}
+                      className={`flex-1 py-0.5 text-[8px] font-mono font-bold rounded transition-colors cursor-pointer ${
+                        Math.round(islandRatio * 100) === pct
+                          ? 'bg-rose-600 text-white'
+                          : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <button
+                onClick={() => cleanIslandsObject(obj.id, islandRatio)}
+                className="w-full py-1.5 bg-gradient-to-r from-rose-700 to-rose-600 hover:from-rose-600 hover:to-rose-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-1"
+                title="Elimina fragmentos poligonales flotantes y conchas desconectadas residuales"
+              >
+                🧹 Limpiar Islas 3D
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-1">
+        <div className="grid grid-cols-2 gap-1 pt-1">
           <button onClick={() => fillHolesObject(obj.id)} className="py-1 bg-emerald-700 hover:bg-emerald-600 rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-colors" title="Cierra todos los huecos abiertos">
             <Wand2 size={10}/> Tapar Huecos
           </button>
@@ -1802,6 +2559,267 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             <Square size={10}/> Tapar Selección
           </button>
         </div>
+      </div>
+    </Section>
+  );
+};
+
+// ─── OPTIMIZACIÓN Y DECIMACIÓN DE MALLA ──────────────────────────────────────────
+const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const {
+    optimizeObject,
+    selectedGLTFMeshes,
+    setSelectedGLTFMeshes,
+    isolateGLTFSelection,
+    setIsolateGLTFSelection
+  } = useStore();
+
+  const [optimizeRatio, setOptimizeRatio] = useState(0.3);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [meshSortMode, setMeshSortMode] = useState<'desc' | 'asc' | 'default'>('desc');
+  const [meshSearch, setMeshSearch] = useState('');
+
+  const currentVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+  const currentFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+  const targetFacesEst = Math.max(4, Math.round(currentFaces * optimizeRatio));
+  const reductionPercent = Math.round((1 - optimizeRatio) * 100);
+
+  const sortedAndFilteredMeshes = useMemo(() => {
+    if (!obj.meshData?.meshes) return [];
+    let list = [...obj.meshData.meshes];
+    if (meshSearch.trim()) {
+      const q = meshSearch.toLowerCase();
+      list = list.filter(m => m.name.toLowerCase().includes(q));
+    }
+    if (meshSortMode === 'desc') {
+      return list.sort((a, b) => b.faces - a.faces);
+    } else if (meshSortMode === 'asc') {
+      return list.sort((a, b) => a.faces - b.faces);
+    }
+    return list;
+  }, [obj.meshData?.meshes, meshSortMode, meshSearch]);
+
+  const toggleMeshSelection = (meshId: string) => {
+    setSelectedGLTFMeshes(
+      selectedGLTFMeshes.includes(meshId) 
+        ? selectedGLTFMeshes.filter(id => id !== meshId)
+        : [...selectedGLTFMeshes, meshId]
+    );
+  };
+
+  const selectAllMeshes = () => {
+    if (obj.meshData?.meshes) {
+      setSelectedGLTFMeshes(obj.meshData.meshes.map(m => m.id));
+    }
+  };
+
+  const selectDenseMeshes = () => {
+    if (obj.meshData?.meshes) {
+      const dense = obj.meshData.meshes.filter(m => m.faces >= 2000).map(m => m.id);
+      setSelectedGLTFMeshes(dense.length > 0 ? dense : obj.meshData.meshes.map(m => m.id));
+    }
+  };
+
+  const deselectAllMeshes = () => {
+    setSelectedGLTFMeshes([]);
+  };
+
+  const selectedStats = useMemo(() => {
+    if (!obj.meshData?.meshes || selectedGLTFMeshes.length === 0) return null;
+    return obj.meshData.meshes
+      .filter(m => selectedGLTFMeshes.includes(m.id))
+      .reduce((acc, m) => ({
+        vertices: acc.vertices + m.vertices,
+        faces: acc.faces + m.faces
+      }), { vertices: 0, faces: 0 });
+  }, [obj.meshData?.meshes, selectedGLTFMeshes]);
+
+  const handleExecuteOptimize = async () => {
+    setIsOptimizing(true);
+    try {
+      await optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined);
+    } finally {
+      setIsOptimizing(false);
+    }
+  };
+
+  return (
+    <Section title="Optimizar Malla (Decimación)" icon={<Zap size={12} className="text-violet-400" />}>
+      <div className="space-y-2.5">
+        {/* Resumen de Polígonos Actuales vs Estimados */}
+        <div className="grid grid-cols-2 gap-1.5 p-2 bg-zinc-950/70 border border-violet-500/30 rounded-lg">
+          <div className="flex flex-col">
+            <span className="text-[9px] uppercase font-bold text-zinc-400">Polígonos Actuales</span>
+            <span className="text-[12px] font-mono font-bold text-zinc-200">{currentFaces.toLocaleString()} caras</span>
+            <span className="text-[8.5px] text-zinc-500">{currentVerts.toLocaleString()} vértices</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="text-[9px] uppercase font-bold text-violet-400">Objetivo Estimado</span>
+            <span className="text-[12px] font-mono font-bold text-violet-300">~{targetFacesEst.toLocaleString()} caras</span>
+            <span className="text-[8.5px] font-bold text-emerald-400">-{reductionPercent}% reducción</span>
+          </div>
+        </div>
+
+        {/* Control Principal del Slider */}
+        <div className="space-y-1 bg-zinc-900/80 p-2 rounded-lg border border-zinc-800">
+          <div className="flex items-center justify-between text-[10px]">
+            <span className="text-zinc-300 font-bold">
+              {selectedGLTFMeshes.length > 0 ? 'Ratio Retenido (Selección)' : 'Ratio Retenido (Completo)'}
+            </span>
+            <span className="font-mono text-violet-300 font-bold">{Math.round(optimizeRatio * 100)}%</span>
+          </div>
+          
+          <input
+            type="range"
+            min={0.01}
+            max={0.95}
+            step={0.01}
+            value={optimizeRatio}
+            onChange={(e) => setOptimizeRatio(parseFloat(e.target.value))}
+            className="w-full h-1.5 accent-violet-500 bg-zinc-800 rounded cursor-pointer"
+          />
+
+          {/* Botones Rápidos de Porcentaje */}
+          <div className="grid grid-cols-4 gap-1 pt-1">
+            <button
+              onClick={() => setOptimizeRatio(0.05)}
+              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                optimizeRatio === 0.05 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+              }`}
+              title="Reducción extrema al 5% de polígonos (-95%)"
+            >
+              5% Ultra
+            </button>
+            <button
+              onClick={() => setOptimizeRatio(0.15)}
+              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                optimizeRatio === 0.15 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+              }`}
+              title="Reducción fuerte al 15% de polígonos (-85%)"
+            >
+              15%
+            </button>
+            <button
+              onClick={() => setOptimizeRatio(0.30)}
+              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                optimizeRatio === 0.30 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+              }`}
+              title="Reducción equilibrada al 30% de polígonos (-70%)"
+            >
+              30% Medio
+            </button>
+            <button
+              onClick={() => setOptimizeRatio(0.50)}
+              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                optimizeRatio === 0.50 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+              }`}
+              title="Reducción suave al 50% de polígonos (-50%)"
+            >
+              50% Suave
+            </button>
+          </div>
+        </div>
+
+        {/* Selector de Partes si es GLTF */}
+        {obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-2 space-y-1.5">
+            <div className="flex justify-between items-center gap-1">
+              <span className="text-[10px] text-zinc-300 font-bold flex items-center gap-1">
+                Partes ({obj.meshData.meshes.length})
+              </span>
+              <div className="flex gap-1 items-center">
+                <button 
+                  onClick={() => setMeshSortMode(prev => prev === 'desc' ? 'asc' : prev === 'asc' ? 'default' : 'desc')}
+                  className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 cursor-pointer ${
+                    meshSortMode !== 'default' 
+                      ? 'bg-amber-950/90 text-amber-300 border-amber-500/60 font-bold' 
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-white'
+                  }`}
+                  title={
+                    meshSortMode === 'desc' 
+                      ? "Orden actual: Mayor a Menor polígonos. Clic para Menor a Mayor" 
+                      : meshSortMode === 'asc' 
+                        ? "Orden actual: Menor a Mayor polígonos. Clic para Orden Original" 
+                        : "Orden original. Clic para Ordenar Mayor a Menor"
+                  }
+                >
+                  <ArrowDownNarrowWide size={11} className={meshSortMode === 'asc' ? 'rotate-180 transition-transform' : ''} />
+                  {meshSortMode === 'desc' ? 'Mayor-Menor' : meshSortMode === 'asc' ? 'Menor-Mayor' : 'Original'}
+                </button>
+                <button onClick={selectAllMeshes} className="text-[9px] bg-zinc-800 hover:bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-300 cursor-pointer">Todas</button>
+                <button onClick={selectDenseMeshes} className="text-[9px] bg-purple-900/60 text-purple-200 border border-purple-500/30 px-1.5 py-0.5 rounded hover:bg-purple-800 cursor-pointer" title="Selecciona automáticamente las sub-mallas más densas (>2,000 polígonos)">Densas</button>
+                <button onClick={deselectAllMeshes} className="text-[9px] bg-zinc-800 hover:bg-zinc-700 px-1.5 py-0.5 rounded text-zinc-300 cursor-pointer">Ninguna</button>
+              </div>
+            </div>
+
+            {obj.meshData.meshes.length > 5 && (
+              <input
+                type="text"
+                placeholder="Buscar parte por nombre..."
+                value={meshSearch}
+                onChange={(e) => setMeshSearch(e.target.value)}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[10px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
+              />
+            )}
+
+            <div className="max-h-36 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+              {sortedAndFilteredMeshes.map((mesh) => (
+                <label key={mesh.id} className="flex items-center gap-1.5 text-[10px] cursor-pointer hover:bg-zinc-800 p-1.5 rounded border border-transparent hover:border-zinc-700/50 transition-colors">
+                  <input 
+                    type="checkbox" 
+                    className="accent-violet-600 w-3.5 h-3.5 cursor-pointer"
+                    checked={selectedGLTFMeshes.includes(mesh.id)}
+                    onChange={() => toggleMeshSelection(mesh.id)}
+                  />
+                  <span className="truncate flex-1 font-medium text-zinc-200" title={mesh.name}>{mesh.name}</span>
+                  <span 
+                    className="text-violet-300 font-mono text-[9px] bg-violet-950/70 px-1.5 py-0.5 rounded border border-violet-800/40 shrink-0 font-semibold"
+                    title={`${mesh.faces.toLocaleString()} polígonos / ${mesh.vertices ? mesh.vertices.toLocaleString() : '-'} vértices`}
+                  >
+                    {mesh.faces.toLocaleString()} pol.
+                  </span>
+                </label>
+              ))}
+            </div>
+            
+            <div className="pt-1.5 border-t border-zinc-800 flex flex-col gap-1">
+              <label className="flex items-center gap-2 text-[10px] cursor-pointer text-zinc-300 hover:text-white transition-colors">
+                <input 
+                  type="checkbox" 
+                  className="accent-violet-600 w-3 h-3 cursor-pointer"
+                  checked={isolateGLTFSelection}
+                  onChange={(e) => setIsolateGLTFSelection(e.target.checked)}
+                />
+                <span>Ver solo selección (Aislar en 3D)</span>
+              </label>
+
+              {selectedStats && (
+                <div className="bg-zinc-800/60 rounded p-1.5 text-[9px] text-zinc-300 flex justify-between items-center border border-zinc-700/50">
+                  <span>Partes seleccionadas ({selectedGLTFMeshes.length}):</span>
+                  <span className="font-mono text-violet-300 font-bold">{selectedStats.vertices.toLocaleString()}v | {selectedStats.faces.toLocaleString()}f</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Botón Principal de Optimización */}
+        <button
+          disabled={isOptimizing}
+          onClick={handleExecuteOptimize}
+          className={`w-full py-2.5 px-3 rounded-lg text-[11px] font-bold flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer ${
+            isOptimizing
+              ? 'bg-zinc-800 text-zinc-400 cursor-wait animate-pulse'
+              : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-950/50 hover:shadow-violet-900/60 active:scale-98'
+          }`}
+        >
+          <Zap size={14} className={isOptimizing ? 'animate-spin' : 'text-amber-300'} />
+          <span>
+            {isOptimizing
+              ? 'Optimizando geometría...'
+              : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}
+          </span>
+        </button>
       </div>
     </Section>
   );
@@ -1834,12 +2852,6 @@ const ValidationSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     </Section>
   );
 };
-
-import { createNoiseTexture, createCheckerTexture, createWoodTexture, createOakPlanksTexture, createOakPlanksRoughnessMap, createOakPlanksAOMap } from '../utils/proceduralTextures';
-
-import { MATERIAL_LIBRARY, MATERIAL_CATEGORIES, generateMaterial } from '../utils/proceduralTextures';
-
-
 
 const LIGHT_ICONS: Record<string, string> = {
   POINT: '💡', DIRECTIONAL: '☀️', SPOT: '🔦', RECTAREA: '▭', AMBIENT: '🌍'
@@ -1911,7 +2923,7 @@ const LightPropertiesSection: React.FC<{ light: any }> = ({ light }) => {
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar space-y-1 p-1">
-        <Section title="Apariencia" icon={<Sun size={14}/>} defaultOpen>
+        <Section title="Apariencia" icon={<Sun size={14}/>}>
           <NumRow label="Intensidad" value={light.intensity} onChange={v => up({ intensity: v })} min={0} max={20} step={0.1} slider />
           {(light.type === 'POINT' || light.type === 'SPOT') && (
             <>
@@ -1945,7 +2957,7 @@ const LightPropertiesSection: React.FC<{ light: any }> = ({ light }) => {
           </div>
         </Section>
 
-        <Section title="Transformación" icon={<Move size={14}/>} defaultOpen>
+        <Section title="Transformación" icon={<Move size={14}/>}>
           <XYZRow label="Posición" values={light.transform.position} onChange={v => up({ transform: { ...light.transform, position: v } })} step={0.1} />
           <XYZRow label="Rotación" values={light.transform.rotation} onChange={v => up({ transform: { ...light.transform, rotation: v } })} step={0.1} />
         </Section>
@@ -2331,15 +3343,6 @@ const SceneManager: React.FC = () => {
     return <CameraPropertiesSection camera={selectedCamera} />;
   }
 
-  const hdriOptions = [
-    { name: 'Ninguno',    url: null,   icon: '○' },
-    { name: 'Atardecer',  url: 'https://threejs.org/examples/textures/equirectangular/venice_sunset_1k.hdr', icon: '🌅' },
-    { name: 'Urbano',     url: 'https://threejs.org/examples/textures/equirectangular/pedestrian_overpass_1k.hdr', icon: '🏙️' },
-    { name: 'Interior (Puente)', url: 'https://threejs.org/examples/textures/equirectangular/san_giuseppe_bridge_2k.hdr', icon: '🏛️' },
-    { name: 'Noche',      url: 'https://threejs.org/examples/textures/equirectangular/moonless_golf_1k.hdr', icon: '🌙' },
-    { name: 'Estudio',    url: 'https://threejs.org/examples/textures/equirectangular/quarry_01_1k.hdr', icon: '📸' },
-  ];
-
   const handleHDRIUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -2352,7 +3355,7 @@ const SceneManager: React.FC = () => {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <div className="flex-1 overflow-y-auto custom-scrollbar p-1 space-y-1">
-        <Section title="Entorno e Iluminación" icon={<Globe size={14}/>} defaultOpen>
+        <Section title="Entorno e Iluminación" icon={<Globe size={14}/>}>
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-2">
               {PRESET_HDRIS.map(opt => (
@@ -2376,6 +3379,20 @@ const SceneManager: React.FC = () => {
                 <span className="text-[7.5px] text-zinc-400 text-center leading-tight">EXR, HDR, JPG</span>
                 <input type="file" accept=".hdr,.exr,.png,.jpg,.jpeg,.webp,.avif" onChange={handleHDRIUpload} className="hidden" />
               </label>
+            </div>
+
+            {/* Input URL directa de HDRI */}
+            <div className="bg-zinc-900/60 p-2 rounded-xl border border-white/5 space-y-1">
+              <span className="text-[9px] text-zinc-400 font-semibold block">URL de Mapa HDRI Externo (Magnific / Poly Haven / Web):</span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  placeholder="https://.../mapa.hdr o imagen equirectangular"
+                  value={env.hdriUrl && !env.hdriUrl.startsWith('synthetic_') && !env.hdriUrl.startsWith('data:') ? env.hdriUrl : ''}
+                  onChange={e => updateEnvironment({ hdriUrl: e.target.value || null })}
+                  className="flex-1 bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-[10px] text-zinc-200 focus:outline-none focus:border-indigo-500 font-mono"
+                />
+              </div>
             </div>
 
             <div className="space-y-3 pt-2">
@@ -2452,7 +3469,7 @@ const SceneManager: React.FC = () => {
           </div>
         </Section>
 
-        <Section title="Jerarquía" icon={<Layers size={14}/>} defaultOpen badge={
+        <Section title="Jerarquía" icon={<Layers size={14}/>} badge={
           selectedObjectIds.length > 0 ? (
             <span className="text-[9px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-bold border border-indigo-500/30">
               {selectedObjectIds.length} sel.
@@ -2569,7 +3586,7 @@ const SceneManager: React.FC = () => {
           </div>
         </Section>
 
-        <Section title="Luces" icon={<Sun size={14}/>} defaultOpen badge={
+        <Section title="Luces" icon={<Sun size={14}/>} badge={
           <div className="relative group/light-menu">
             <button 
               onClick={(e) => { e.stopPropagation(); }}
@@ -2619,7 +3636,7 @@ const SceneManager: React.FC = () => {
           </div>
         </Section>
         
-        <Section title="Cámaras" icon={<Camera size={14}/>} defaultOpen badge={
+        <Section title="Cámaras" icon={<Camera size={14}/>} badge={
           <button 
             onClick={(e) => { e.stopPropagation(); addCamera('PERSPECTIVE'); }}
             className="p-1.5 rounded-lg bg-indigo-600/10 text-indigo-400 hover:bg-indigo-600 hover:text-white transition-all border border-indigo-500/20"
@@ -2763,7 +3780,6 @@ const BooleanOperationsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     <Section
       title="Operaciones Booleanas (CSG)"
       icon={<Scissors size={14} className="text-rose-400" />}
-      defaultOpen={true}
       badge={
         <button
           onClick={(e) => {
@@ -2987,7 +4003,6 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     <Section 
       title="Nube Volumétrica 3D (Raymarching)" 
       icon={<Cloud size={12} className={isVol ? "text-sky-400" : "text-zinc-400"} />}
-      defaultOpen={isVol}
     >
       <div className="space-y-3">
         <div className="flex items-center justify-between p-2 bg-zinc-950/60 rounded-lg border border-zinc-800">
@@ -3010,16 +4025,19 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           <div className="space-y-3 pt-1">
             {/* Presets */}
             <div className="space-y-1.5">
-              <span className="text-[9px] font-bold text-sky-400 uppercase tracking-wider block">Presets de Gas / Nube</span>
-              <div className="grid grid-cols-3 gap-1">
+              <span className="text-[9px] font-bold text-sky-400 uppercase tracking-wider block">Presets de Gas / Nube / Fuego</span>
+              <div className="grid grid-cols-2 gap-1.5">
                 {VOLUMETRIC_PRESETS.map((p, idx) => (
                   <button
                     key={idx}
                     onClick={() => applyPreset(p)}
-                    className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700/60 hover:border-sky-500 rounded text-[9px] font-medium text-zinc-200 transition-all flex flex-col items-center gap-1 cursor-pointer"
+                    className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700/90 border border-zinc-700/60 hover:border-amber-500/60 rounded-lg text-[9px] font-medium text-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer text-left group"
                     title={p.desc}
                   >
-                    <span className="truncate w-full text-center font-bold text-[9px]">{p.name}</span>
+                    <span className="text-base flex-shrink-0">{p.icon}</span>
+                    <div className="min-w-0">
+                      <span className="truncate block font-bold text-[9px] text-zinc-200 group-hover:text-white">{p.name}</span>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -3137,23 +4155,23 @@ export const PropertiesPanel: React.FC = () => {
     project, selectedObjectId, selectedObjectIds, updateObject, removeObject, removeObjects,
     duplicateObject, saveHistory, selectObject, toggleObjectSelection,
     moveObjectUp, moveObjectDown, selectedLightId, selectedCameraId,
-    removeLight, removeCamera, selectLight, selectCamera, updateLight
+    removeLight, removeCamera, selectLight, selectCamera, updateLight, editMode, setEditMode
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
+  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
   const [shortcutsFloating, setShortcutsFloating] = useState(false);
   const obj = project.objects.find(o => o.id === selectedObjectId);
   const [isExporting, setIsExporting] = useState(false);
 
-  // Auto-switch tabs based on selection
+  // Auto-switch tabs based on selection or edit mode
   useEffect(() => {
     if (selectedLightId || selectedCameraId) {
       setActiveTab('SCENE');
-    } else if (selectedObjectId) {
-      setActiveTab('PROPERTIES');
+    } else if (editMode !== 'OBJECT') {
+      setActiveTab('EDIT_MESH');
     }
-  }, [selectedObjectId, selectedLightId, selectedCameraId]);
+  }, [selectedObjectId, selectedLightId, selectedCameraId, editMode]);
 
   const handleExport = async (format: 'GLB' | 'GLTF' | 'OBJ') => {
     const objectsToExport = (selectedObjectIds && selectedObjectIds.length > 0)
@@ -3249,43 +4267,57 @@ export const PropertiesPanel: React.FC = () => {
       <div className="flex border-b border-zinc-800 bg-zinc-900/50">
         <button 
           onClick={() => setActiveTab('PROPERTIES')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'PROPERTIES' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
           title="Propiedades del objeto seleccionado"
         >
-          <Settings size={13} /> Propiedades
+          <Settings size={12} /> Propiedades
+        </button>
+        <button 
+          onClick={() => {
+            setActiveTab('EDIT_MESH');
+            if (editMode === 'OBJECT') setEditMode('VERTEX');
+          }}
+          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
+            activeTab === 'EDIT_MESH' ? 'text-emerald-400 border-b-2 border-emerald-500 bg-emerald-500/5' : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+          title="Editar Malla: añadir líneas, segmentos, nuevos vértices y polígonos"
+        >
+          <Scissors size={12} /> Malla
         </button>
         <button 
           onClick={() => setActiveTab('MATERIALS')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'MATERIALS' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
           title="Biblioteca y edición de materiales PBR"
         >
-          <Palette size={13} /> Materiales
+          <Palette size={12} /> Materiales
         </button>
         <button 
           onClick={() => setActiveTab('SCENE')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'SCENE' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
           title="Iluminación, cámaras y entorno de la escena"
         >
-          <Globe size={13} /> Escena
+          <Globe size={12} /> Escena
         </button>
         <button 
           onClick={() => setActiveTab('CONFIG')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-[9.5px] font-bold uppercase tracking-wider transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'CONFIG' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
           }`}
           title="Configuración, atajos de teclado y preferencias"
         >
-          <SlidersHorizontal size={13} /> Configuración
+          <SlidersHorizontal size={12} /> Config
         </button>
       </div>
 
-      {activeTab === 'MATERIALS' ? (
+      {activeTab === 'EDIT_MESH' ? (
+        <EditMeshPanel />
+      ) : activeTab === 'MATERIALS' ? (
         <MaterialPanel />
       ) : activeTab === 'SCENE' ? (
         <SceneManager />
@@ -3308,7 +4340,7 @@ export const PropertiesPanel: React.FC = () => {
               </div>
               
               <div className="border-t border-zinc-800">
-                <Section title="Exportar Proyecto" icon={<Download size={12}/>} defaultOpen={true}>
+                <Section title="Exportar Proyecto" icon={<Download size={12}/>}>
                   <div className="space-y-2">
                     <p className="text-[9px] text-zinc-500 leading-relaxed">
                       Exporta todo el proyecto actual con texturas.
@@ -3360,7 +4392,7 @@ export const PropertiesPanel: React.FC = () => {
               </div>
 
               <div className="flex-1 overflow-y-auto scrollbar-thin scrollbar-thumb-zinc-800">
-                <Section title="Apariencia" defaultOpen>
+                <Section title="Apariencia">
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-zinc-500 w-20">Color</span>
                     <input type="color" value={obj.color} onChange={e => updateObject(obj.id, { color: e.target.value })} className="w-8 h-6 rounded bg-transparent cursor-pointer p-0" />
@@ -3380,7 +4412,7 @@ export const PropertiesPanel: React.FC = () => {
                   <NumRow label="Opacidad" value={obj.opacity ?? 1} onChange={v => updateObject(obj.id, { opacity: v })} min={0} max={1} slider />
                 </Section>
 
-                <Section title="Transformación" icon={<Move size={12}/>} defaultOpen>
+                <Section title="Transformación" icon={<Move size={12}/>}>
                   <XYZRow label="Posición" values={obj.transform.position} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, position: v } })} step={0.1} />
                   <RotationXYZRow label="Rotación" values={obj.transform.rotation} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, rotation: v } })} />
                   <XYZRow label="Escala" values={obj.transform.scale} onChange={v => updateObject(obj.id, { transform: { ...obj.transform, scale: v } })} step={0.1} min={0.01} />
@@ -3395,12 +4427,14 @@ export const PropertiesPanel: React.FC = () => {
                 </Section>
 
                 <NurbsSection obj={obj}/>
+                <SubElementEditSection obj={obj}/>
                 <ParametersSection obj={obj}/>
                 <GeneratedSection obj={obj}/>
                 <AlignSection obj={obj}/>
                 <BooleanOperationsSection obj={obj}/>
                 <VolumetricSection obj={obj}/>
                 <ObjectMaterialSection obj={obj} onOpenMaterialTab={() => setActiveTab('MATERIALS')}/>
+                <OptimizeMeshSection obj={obj}/>
                 <MeshModifiersSection obj={obj}/>
                 <ValidationSection obj={obj}/>
 

@@ -100,28 +100,38 @@ export function createBaseGeometry(obj: CSGObject, mData?: any): THREE.BufferGeo
     } else {
       geometry.computeVertexNormals();
     }
+    try {
+      geometry.computeTangents();
+    } catch (_) {}
     return geometry;
   }
 
   // Fallback for legacy objects or if mesh data is missing
-  const p = obj.parameters;
+  const p = obj.parameters || {};
   let geo: THREE.BufferGeometry;
 
+  const needsSubdivision = Boolean(
+    mData?.isIce ||
+    (mData?.id && mData.id.startsWith('ice_')) ||
+    (mData?.name && mData.name.toLowerCase().includes('hielo')) ||
+    (mData?.displacementScale && mData.displacementScale > 0) ||
+    mData?.displacementMap
+  );
+
   switch (obj.type) {
-    case 'CUBE':
-      geo = new THREE.BoxGeometry(1, 1, 1,
-        Math.max(1, Math.round(p.segments ?? 1)),
-        Math.max(1, Math.round(p.segments ?? 1)),
-        Math.max(1, Math.round(p.segments ?? 1)));
+    case 'CUBE': {
+      const segs = needsSubdivision ? Math.max(32, Math.round(p.segments ?? 1)) : Math.max(1, Math.round(p.segments ?? 1));
+      geo = new THREE.BoxGeometry(1, 1, 1, segs, segs, segs);
       break;
+    }
     case 'SPHERE': {
       const sphereType = p.sphereType || 'UV';
       if (sphereType === 'ICO') {
-        const detail = Math.max(0, Math.min(5, Math.round(p.detail ?? 2)));
+        const detail = Math.max(needsSubdivision ? 3 : 0, Math.min(5, Math.round(p.detail ?? 2)));
         geo = new THREE.IcosahedronGeometry(0.5, detail);
       } else {
-        const S = Math.max(3, Math.round(p.segments ?? 32));
-        const H = Math.max(2, Math.round(p.heightSegments ?? Math.round(S / 2)));
+        const S = Math.max(needsSubdivision ? 48 : 3, Math.round(p.segments ?? 32));
+        const H = Math.max(needsSubdivision ? 32 : 2, Math.round(p.heightSegments ?? Math.round(S / 2)));
         geo = new THREE.SphereGeometry(0.5, S, H);
       }
       break;

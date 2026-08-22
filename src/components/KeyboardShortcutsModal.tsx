@@ -108,6 +108,43 @@ export const SHORTCUTS_DATA: ShortcutItem[] = [
 
   // ── Modelado 3D & Mallas ──
   {
+    id: 'mod-connect-verts',
+    category: 'modeling',
+    keys: ['J'],
+    description: 'Conectar Vértices con Línea (Cortar Cara)',
+    detail: 'Une 2 vértices seleccionados creando una nueva arista y dividiendo el polígono.',
+    badge: 'Nuevo',
+  },
+  {
+    id: 'mod-fill-face',
+    category: 'modeling',
+    keys: ['F'],
+    description: 'Crear Cara / Rellenar Polígono',
+    detail: 'Genera una nueva cara o polígono a partir de los vértices o aristas seleccionadas.',
+    badge: 'Nuevo',
+  },
+  {
+    id: 'mod-extrude-vert',
+    category: 'modeling',
+    keys: ['E'],
+    description: 'Extruir Vértice o Cara',
+    detail: 'Extruye el vértice creando un nuevo segmento o extruye las caras seleccionadas.',
+  },
+  {
+    id: 'mod-weld-verts',
+    category: 'modeling',
+    keys: ['W'],
+    description: 'Soldar / Fusionar Vértices',
+    detail: 'Une vértices coincidentes o seleccionados en un único punto común.',
+  },
+  {
+    id: 'mod-subdiv-segment',
+    category: 'modeling',
+    keys: ['D'],
+    description: 'Dividir Arista / Insertar Vértice',
+    detail: 'Subdivide la arista o segmento seleccionado insertando un nuevo vértice central.',
+  },
+  {
     id: 'mod-extrude',
     category: 'modeling',
     keys: ['Ctrl + E'],
@@ -156,6 +193,21 @@ export const SHORTCUTS_DATA: ShortcutItem[] = [
 
   // ── Historial y Proyecto ──
   {
+    id: 'hist-save',
+    category: 'history',
+    keys: ['Ctrl + S'],
+    description: 'Guardar / Sobreescribir Proyecto',
+    detail: 'Guarda y sobreescribe los cambios de la escena activa localmente.',
+    badge: 'Nuevo',
+  },
+  {
+    id: 'hist-save-as',
+    category: 'history',
+    keys: ['Ctrl + Shift + S'],
+    description: 'Guardar Escena Como...',
+    detail: 'Abre el cuadro de diálogo para guardar con un nuevo nombre o exportar archivo.',
+  },
+  {
     id: 'hist-undo',
     category: 'history',
     keys: ['Ctrl + Z'],
@@ -168,6 +220,14 @@ export const SHORTCUTS_DATA: ShortcutItem[] = [
     keys: ['Ctrl + Y', 'Ctrl + Shift + Z'],
     description: 'Rehacer (Redo)',
     detail: 'Vuelve a aplicar el cambio revertido.',
+  },
+  {
+    id: 'mod-symmetry',
+    category: 'modeling',
+    keys: ['Simetría (Panel)'],
+    description: 'Simetría de Vértices Seleccionados',
+    detail: 'Espeja y duplica la posición de los vértices seleccionados al otro lado del eje X, Y o Z.',
+    badge: 'Nuevo',
   },
   {
     id: 'hist-shortcuts-help',

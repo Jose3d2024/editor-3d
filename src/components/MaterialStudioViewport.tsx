@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { useStore } from '../store/useStore';
 import { createPBRMaterial } from '../utils/materialUtils';
 import { MaterialPanel } from './MaterialPanel';
+import { createPolarEquirectangularCanvas, createStudioEquirectangularCanvas } from '../utils/environmentHelper';
 import {
   ArrowLeft, Palette, Sparkles, RotateCw, Sun, Box, Eye, EyeOff,
   Maximize2, Camera, Download, Layers, ShieldCheck, Check,
@@ -12,7 +13,7 @@ import {
 } from 'lucide-react';
 import type { MaterialData } from '../types';
 
-type PreviewMeshType = 'SPHERE' | 'SHADER_BALL' | 'CUBE' | 'CYLINDER' | 'TORUS' | 'CLOTH' | 'VOLUME';
+type PreviewMeshType = 'SPHERE' | 'SHADER_BALL' | 'CUBE' | 'ROCK' | 'GEM' | 'CYLINDER' | 'TORUS' | 'CLOTH' | 'VOLUME';
 
 interface EnvironmentPreset {
   id: string;
@@ -34,6 +35,22 @@ interface EnvironmentPreset {
 }
 
 function createEquirectangularTextureForPreset(presetId: string): THREE.CanvasTexture {
+  if (presetId === 'polar_arctic') {
+    return createPolarEquirectangularCanvas('arctic');
+  } else if (presetId === 'polar_aurora') {
+    return createPolarEquirectangularCanvas('aurora');
+  } else if (presetId === 'polar_sunset') {
+    return createPolarEquirectangularCanvas('sunset');
+  } else if (presetId === 'polar_ice_cave') {
+    return createPolarEquirectangularCanvas('ice_cave');
+  } else if (presetId === 'polar_fjord') {
+    return createPolarEquirectangularCanvas('fjord');
+  } else if (presetId === 'polar_blizzard') {
+    return createPolarEquirectangularCanvas('blizzard');
+  } else if (presetId === 'studio_neutral') {
+    return createStudioEquirectangularCanvas('softbox');
+  }
+
   const canvas = document.createElement('canvas');
   canvas.width = 1024;
   canvas.height = 512;
@@ -96,21 +113,6 @@ function createEquirectangularTextureForPreset(presetId: string): THREE.CanvasTe
     magGrad.addColorStop(1, 'rgba(120, 0, 180, 0)');
     ctx.fillStyle = magGrad;
     ctx.fillRect(0, 0, 1024, 512);
-  } else if (presetId === 'warm_interior') {
-    const sky = ctx.createLinearGradient(0, 0, 0, 512);
-    sky.addColorStop(0, '#1c1612');
-    sky.addColorStop(0.4, '#382b22');
-    sky.addColorStop(0.65, '#4a3729');
-    sky.addColorStop(1, '#18120e');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, 1024, 512);
-
-    const warmLight = ctx.createRadialGradient(480, 160, 5, 480, 160, 140);
-    warmLight.addColorStop(0, 'rgba(255, 235, 200, 1)');
-    warmLight.addColorStop(0.5, 'rgba(255, 180, 110, 0.6)');
-    warmLight.addColorStop(1, 'rgba(180, 100, 40, 0)');
-    ctx.fillStyle = warmLight;
-    ctx.fillRect(0, 0, 1024, 512);
   } else if (presetId === 'clean_white') {
     const sky = ctx.createLinearGradient(0, 0, 0, 512);
     sky.addColorStop(0, '#f0f2f5');
@@ -125,26 +127,7 @@ function createEquirectangularTextureForPreset(presetId: string): THREE.CanvasTe
     ctx.fillStyle = softGrad;
     ctx.fillRect(0, 0, 1024, 512);
   } else {
-    const sky = ctx.createLinearGradient(0, 0, 0, 512);
-    sky.addColorStop(0, '#1d2027');
-    sky.addColorStop(0.5, '#2e3340');
-    sky.addColorStop(1, '#13151b');
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, 1024, 512);
-
-    const key = ctx.createRadialGradient(300, 180, 10, 300, 180, 180);
-    key.addColorStop(0, 'rgba(255, 255, 255, 1)');
-    key.addColorStop(0.4, 'rgba(240, 245, 255, 0.7)');
-    key.addColorStop(1, 'rgba(200, 220, 255, 0)');
-    ctx.fillStyle = key;
-    ctx.fillRect(0, 0, 1024, 512);
-
-    const fill = ctx.createRadialGradient(780, 220, 10, 780, 220, 200);
-    fill.addColorStop(0, 'rgba(215, 230, 255, 0.8)');
-    fill.addColorStop(0.5, 'rgba(180, 200, 240, 0.35)');
-    fill.addColorStop(1, 'rgba(140, 170, 220, 0)');
-    ctx.fillStyle = fill;
-    ctx.fillRect(0, 0, 1024, 512);
+    return createStudioEquirectangularCanvas('softbox');
   }
 
   const tex = new THREE.CanvasTexture(canvas);
@@ -154,6 +137,114 @@ function createEquirectangularTextureForPreset(presetId: string): THREE.CanvasTe
 }
 
 const ENVIRONMENT_PRESETS: EnvironmentPreset[] = [
+  {
+    id: 'polar_arctic',
+    name: 'Ártico Glacial (Polo)',
+    icon: '🧊',
+    bgColor: '#0d1824',
+    ambientColor: 0xcde8ff,
+    ambientIntensity: 0.9,
+    keyColor: 0xffffff,
+    keyIntensity: 2.8,
+    keyPos: [3.5, 5.5, 4],
+    fillColor: 0x38bdf8,
+    fillIntensity: 1.1,
+    fillPos: [-4, 2, -2],
+    rimColor: 0xe0f2fe,
+    rimIntensity: 1.8,
+    rimPos: [0, 4, -4],
+    groundColor: '#122538',
+  },
+  {
+    id: 'polar_aurora',
+    name: 'Noche Aurora Boreal',
+    icon: '🌌',
+    bgColor: '#040b14',
+    ambientColor: 0x22c55e,
+    ambientIntensity: 0.75,
+    keyColor: 0x4ade80,
+    keyIntensity: 2.4,
+    keyPos: [0, 6, 2],
+    fillColor: 0x06b6d4,
+    fillIntensity: 1.5,
+    fillPos: [-4, 3, -2],
+    rimColor: 0xc084fc,
+    rimIntensity: 1.9,
+    rimPos: [3, 4, -3],
+    groundColor: '#071622',
+  },
+  {
+    id: 'polar_sunset',
+    name: 'Ocaso Polar',
+    icon: '❄️',
+    bgColor: '#1a101b',
+    ambientColor: 0xff8c42,
+    ambientIntensity: 0.8,
+    keyColor: 0xff7034,
+    keyIntensity: 2.9,
+    keyPos: [4.5, 2.5, 3.5],
+    fillColor: 0x381c3e,
+    fillIntensity: 1.0,
+    fillPos: [-4, 2, -2],
+    rimColor: 0xffd180,
+    rimIntensity: 1.7,
+    rimPos: [-2, 3, -4],
+    groundColor: '#241022',
+  },
+  {
+    id: 'polar_ice_cave',
+    name: 'Cueva de Hielo',
+    icon: '🏔️',
+    bgColor: '#02182b',
+    ambientColor: 0x0873a4,
+    ambientIntensity: 0.85,
+    keyColor: 0xbae6fd,
+    keyIntensity: 2.6,
+    keyPos: [0, 6, 0],
+    fillColor: 0x0284c7,
+    fillIntensity: 1.3,
+    fillPos: [-3, 2, -3],
+    rimColor: 0x7dd3fc,
+    rimIntensity: 1.8,
+    rimPos: [3, 1, 3],
+    groundColor: '#011220',
+  },
+  {
+    id: 'polar_fjord',
+    name: 'Fiordo Glaciar',
+    icon: '🌊',
+    bgColor: '#0c2747',
+    ambientColor: 0x93c5fd,
+    ambientIntensity: 0.85,
+    keyColor: 0xffffff,
+    keyIntensity: 2.7,
+    keyPos: [4, 6, 3],
+    fillColor: 0x0284c7,
+    fillIntensity: 1.1,
+    fillPos: [-4, 2, -2],
+    rimColor: 0xe0f2fe,
+    rimIntensity: 1.6,
+    rimPos: [0, 4, -4],
+    groundColor: '#061726',
+  },
+  {
+    id: 'polar_blizzard',
+    name: 'Ventisca Polar',
+    icon: '🌨️',
+    bgColor: '#64748b',
+    ambientColor: 0xcbd5e1,
+    ambientIntensity: 1.1,
+    keyColor: 0xffffff,
+    keyIntensity: 2.0,
+    keyPos: [0, 5, 2],
+    fillColor: 0x94a3b8,
+    fillIntensity: 0.9,
+    fillPos: [-3, 2, -3],
+    rimColor: 0xffffff,
+    rimIntensity: 1.4,
+    rimPos: [0, 3, -3],
+    groundColor: '#475569',
+  },
   {
     id: 'studio_neutral',
     name: 'Estudio Neutral (5500K)',
@@ -200,67 +291,49 @@ const ENVIRONMENT_PRESETS: EnvironmentPreset[] = [
     keyColor: 0xfffbe8,
     keyIntensity: 2.5,
     keyPos: [3, 6, 3],
-    fillColor: 0x558866,
-    fillIntensity: 0.6,
-    fillPos: [-3, 1, 2],
-    rimColor: 0xaaddcc,
-    rimIntensity: 1.0,
-    rimPos: [0, 2, -4],
-    groundColor: '#142019',
+    fillColor: 0x446655,
+    fillIntensity: 0.75,
+    fillPos: [-4, 2, -2],
+    rimColor: 0xccddbb,
+    rimIntensity: 1.5,
+    rimPos: [-2, 4, -4],
+    groundColor: '#1a241e',
   },
   {
     id: 'cyberpunk_neon',
-    name: 'Ciudad Cyberpunk',
-    icon: '🏙️',
-    bgColor: '#0c0d18',
-    ambientColor: 0x223366,
+    name: 'Cyberpunk Neón',
+    icon: '⚡',
+    bgColor: '#060714',
+    ambientColor: 0x1e1035,
     ambientIntensity: 0.5,
-    keyColor: 0x00e5ff,
+    keyColor: 0x00f0ff,
     keyIntensity: 2.6,
-    keyPos: [4, 3, 3],
-    fillColor: 0xff007f,
+    keyPos: [4, 4, 3],
+    fillColor: 0xff0088,
     fillIntensity: 2.2,
-    fillPos: [-4, 2, -2],
-    rimColor: 0x9900ff,
+    fillPos: [-4, 3, -2],
+    rimColor: 0xaa00ff,
     rimIntensity: 2.0,
     rimPos: [0, 4, -4],
-    groundColor: '#101222',
-  },
-  {
-    id: 'warm_interior',
-    name: 'Interior Cálido / Hogar',
-    icon: '🏢',
-    bgColor: '#181512',
-    ambientColor: 0xffd1a4,
-    ambientIntensity: 0.8,
-    keyColor: 0xffe8d0,
-    keyIntensity: 2.0,
-    keyPos: [3, 4, 3],
-    fillColor: 0xaa9988,
-    fillIntensity: 0.9,
-    fillPos: [-3, 2, -2],
-    rimColor: 0xffc488,
-    rimIntensity: 1.1,
-    rimPos: [1, 3, -3],
-    groundColor: '#221e1a',
+    groundColor: '#0a0a18',
   },
   {
     id: 'clean_white',
-    name: 'Estudio Blanco Puro',
+    name: 'Estudio Blanco Minimal',
     icon: '⚪',
-    bgColor: '#2a2b36',
+    bgColor: '#f4f4f6',
     ambientColor: 0xffffff,
-    ambientIntensity: 1.0,
+    ambientIntensity: 0.95,
     keyColor: 0xffffff,
-    keyIntensity: 2.0,
-    keyPos: [4, 6, 4],
-    fillColor: 0xdde5f0,
-    fillIntensity: 1.0,
-    fillPos: [-4, 3, -3],
+    keyIntensity: 1.8,
+    keyPos: [3, 5, 3],
+    fillColor: 0xe8ecf2,
+    fillIntensity: 0.9,
+    fillPos: [-3, 2, -2],
     rimColor: 0xffffff,
-    rimIntensity: 1.0,
+    rimIntensity: 1.1,
     rimPos: [0, 4, -4],
-    groundColor: '#343644',
+    groundColor: '#e0e4eb',
   },
 ];
 
@@ -286,9 +359,7 @@ export const MaterialStudioViewport: React.FC = () => {
   const [isTurntableActive, setIsTurntableActive] = useState<boolean>(true);
   const [turntableSpeed, setTurntableSpeed] = useState<number>(0.6);
   const [lightRotation, setLightRotation] = useState<number>(45); // degrees
-  const [showGrid, setShowGrid] = useState<boolean>(true);
   const [showWireframe, setShowWireframe] = useState<boolean>(false);
-  const [showEnvironment, setShowEnvironment] = useState<boolean>(false);
   const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
 
   const animState = useRef({ turntable: isTurntableActive, speed: turntableSpeed });
@@ -302,15 +373,25 @@ export const MaterialStudioViewport: React.FC = () => {
       const found = project.materials.find((m) => m.id === materialStudioMaterialId);
       if (found) return found;
     }
+    const selObj = project.objects.find((o) => o.id === selectedObjectId);
+    if (selObj?.materialId) {
+      const found = project.materials.find((m) => m.id === selObj.materialId);
+      if (found) return found;
+    }
     return project.materials[0] || null;
-  }, [project.materials, materialStudioMaterialId]);
+  }, [project.materials, materialStudioMaterialId, selectedObjectId, project.objects]);
 
   // Sync active material ID if missing
   useEffect(() => {
     if (!materialStudioMaterialId && project.materials.length > 0) {
-      setMaterialStudioMaterialId(project.materials[0].id);
+      const selObj = project.objects.find((o) => o.id === selectedObjectId);
+      if (selObj?.materialId && project.materials.some(m => m.id === selObj.materialId)) {
+        setMaterialStudioMaterialId(selObj.materialId);
+      } else {
+        setMaterialStudioMaterialId(project.materials[0].id);
+      }
     }
-  }, [materialStudioMaterialId, project.materials, setMaterialStudioMaterialId]);
+  }, [materialStudioMaterialId, project.materials, selectedObjectId, project.objects, setMaterialStudioMaterialId]);
 
   // Three.js References
   const threeRefs = useRef<{
@@ -378,17 +459,61 @@ export const MaterialStudioViewport: React.FC = () => {
       stepMesh.position.y = -0.85;
       group.add(stepMesh);
     } else if (type === 'CUBE') {
-      // Rounded Chamfered Cube
-      const geom = new THREE.BoxGeometry(1.7, 1.7, 1.7, 32, 32, 32);
-      // Round the vertices slightly
+      // Sculpted Organic Block (non-planar natural chamfers and subtle eroded undulations)
+      const geom = new THREE.BoxGeometry(1.7, 1.7, 1.7, 48, 48, 48);
       const pos = geom.attributes.position;
       const v = new THREE.Vector3();
       for (let i = 0; i < pos.count; i++) {
         v.fromBufferAttribute(pos, i);
-        // Subtle spherical rounding towards edges
         const len = v.length();
-        const factor = Math.min(1.0, 1.3 / len);
-        v.lerp(v.clone().normalize().multiplyScalar(1.2), 0.12);
+        const norm = v.clone().normalize();
+        // Subtle spherical rounding towards corners
+        v.lerp(norm.clone().multiplyScalar(1.2), 0.12);
+        // Organic non-planar face undulation
+        const undulation = Math.sin(v.x * 3.5 + v.y * 2.8) * Math.cos(v.z * 3.5) * 0.022;
+        v.addScaledVector(norm, undulation);
+        pos.setXYZ(i, v.x, v.y, v.z);
+      }
+      geom.computeVertexNormals();
+      geom.computeTangents();
+      const mesh = new THREE.Mesh(geom, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    } else if (type === 'ROCK') {
+      // Natural Organic Boulder / Iceberg Formation
+      const geom = new THREE.IcosahedronGeometry(1.2, 32);
+      const pos = geom.attributes.position;
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i);
+        const nx = v.x, ny = v.y, nz = v.z;
+        // Multi-frequency organic carving: macro rock mass + asymmetric facets + micro ridges
+        const macro = Math.sin(nx * 2.2 + ny * 1.8) * Math.cos(nz * 2.0 + nx * 1.6) * 0.22;
+        const facets = Math.abs(Math.sin(nx * 3.8) * Math.cos(ny * 3.8) * Math.sin(nz * 3.8)) * 0.14;
+        const micro = Math.sin(nx * 8.5 + nz * 8.0) * 0.035;
+        const displacement = 1.0 + macro + facets + micro;
+        v.multiplyScalar(displacement);
+        pos.setXYZ(i, v.x, v.y, v.z);
+      }
+      geom.computeVertexNormals();
+      geom.computeTangents();
+      const mesh = new THREE.Mesh(geom, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    } else if (type === 'GEM') {
+      // Natural Crystal / Mineral Cluster with organic cleavage facets
+      const geom = new THREE.IcosahedronGeometry(1.2, 5);
+      const pos = geom.attributes.position;
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i);
+        // Vertical crystal elongation
+        v.y *= 1.4;
+        // Organic asymmetric crystal growth facets
+        const planeCut = Math.sin(v.x * 2.8 + v.z * 2.2) * 0.10;
+        v.addScaledVector(v.clone().normalize(), planeCut);
         pos.setXYZ(i, v.x, v.y, v.z);
       }
       geom.computeVertexNormals();
@@ -501,45 +626,12 @@ export const MaterialStudioViewport: React.FC = () => {
     rimLight.position.set(0, 4, -4);
     lightsGroup.add(rimLight);
 
-    // Studio Ground (Soft shadow catcher / infinite cyclorama floor)
-    const groundGeo = new THREE.PlaneGeometry(24, 24, 64, 64);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: '#18181f',
-      roughness: 0.85,
-      metalness: 0.05,
-    });
-    const groundMesh = new THREE.Mesh(groundGeo, groundMat);
-    groundMesh.rotation.x = -Math.PI / 2;
-    groundMesh.position.y = -1.4;
-    groundMesh.receiveShadow = true;
-    scene.add(groundMesh);
-
-    // Studio Grid
-    const gridHelper = new THREE.GridHelper(16, 32, 0x4f46e5, 0x27272a);
-    gridHelper.position.y = -1.39;
-    scene.add(gridHelper);
-
     // Environment map generator (creates natural reflective environment for PBR)
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
-    const envScene = new THREE.Scene();
-    envScene.background = new THREE.Color('#22222a');
-    // Add soft gradient sphere in envScene
-    const envSphere = new THREE.Mesh(
-      new THREE.SphereGeometry(10, 32, 16),
-      new THREE.MeshBasicMaterial({ color: '#3b3d4f', side: THREE.BackSide })
-    );
-    envScene.add(envSphere);
-    const envLight1 = new THREE.PointLight(0xffffff, 3, 20);
-    envLight1.position.set(5, 8, 5);
-    envScene.add(envLight1);
-    const envLight2 = new THREE.PointLight(0x88aaff, 2, 20);
-    envLight2.position.set(-5, 4, -5);
-    envScene.add(envLight2);
-
-    const renderTarget = pmremGenerator.fromScene(envScene);
-    scene.environment = renderTarget.texture;
-    scene.background = new THREE.Color('#0a0a0c'); // Initial background
+    const envTexture = createEquirectangularTextureForPreset(envPresetId);
+    scene.environment = envTexture;
+    scene.background = envTexture; // Full HDRI 360 background
 
     const clock = new THREE.Clock();
 
@@ -550,8 +642,6 @@ export const MaterialStudioViewport: React.FC = () => {
       controls,
       previewGroup,
       lightsGroup,
-      groundMesh,
-      gridHelper,
       currentMesh: null,
       currentMaterial: null,
       ambientLight,
@@ -620,7 +710,6 @@ export const MaterialStudioViewport: React.FC = () => {
         cancelAnimationFrame(threeRefs.current.reqId);
       }
       pmremGenerator.dispose();
-      renderTarget.dispose();
       renderer.dispose();
     };
   }, []);
@@ -655,27 +744,20 @@ export const MaterialStudioViewport: React.FC = () => {
     refs.rimLight.color.set(preset.rimColor);
     refs.rimLight.intensity = preset.rimIntensity;
 
-    (refs.groundMesh.material as THREE.MeshStandardMaterial).color.set(preset.groundColor);
-
     // Generate dynamic equirectangular texture for preset
     const envTexture = createEquirectangularTextureForPreset(envPresetId);
     refs.scene.environment = envTexture;
-    if (showEnvironment) {
-      refs.scene.background = envTexture;
-    } else {
-      refs.scene.background = new THREE.Color(preset.bgColor || '#0a0a0c');
-    }
-  }, [envPresetId, lightRotation, showEnvironment]);
+    refs.scene.background = envTexture; // Set HDRI environment as the 100% full background
+  }, [envPresetId, lightRotation]);
 
-  // Update Grid & Wireframe visibility
+  // Update Wireframe visibility
   useEffect(() => {
     const refs = threeRefs.current;
     if (!refs) return;
-    refs.gridHelper.visible = showGrid;
     if (refs.currentMaterial && 'wireframe' in refs.currentMaterial) {
       (refs.currentMaterial as any).wireframe = showWireframe;
     }
-  }, [showGrid, showWireframe]);
+  }, [showWireframe]);
 
   // Update Mesh & Material when activeMaterial or selectedMeshType changes
   useEffect(() => {
@@ -832,28 +914,41 @@ export const MaterialStudioViewport: React.FC = () => {
                 <span className="text-xs font-bold text-white tracking-wide">Visor de Materiales PBR</span>
                 <span className="text-[9px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  GPU Aislada (100% Rendimiento)
+                  GPU Aislada
                 </span>
               </div>
-              <span className="text-[10px] text-zinc-400 font-medium">
-                Editando: <strong className="text-indigo-300">{activeMaterial?.name || 'Sin Material'}</strong>
-              </span>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className="text-[10px] text-zinc-400 font-medium">Material:</span>
+                <select
+                  value={activeMaterial?.id || ''}
+                  onChange={(e) => setMaterialStudioMaterialId(e.target.value)}
+                  className="bg-black/40 border border-white/10 hover:border-indigo-500/50 rounded px-1.5 py-0.5 text-[11px] font-bold text-indigo-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                >
+                  {project.materials.map((m) => (
+                    <option key={m.id} value={m.id} className="bg-zinc-900 text-zinc-200">
+                      {m.name} {(m.category === 'imported' || m.id.startsWith('mat_imp_') || m.id.startsWith('mat_obj_') || (m.map && !m.proceduralBaseId)) ? '(📦 Importado)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
         </div>
 
         {/* Center: Mesh Selector & Environment Presets */}
-        <div className="hidden xl:flex items-center gap-2 bg-[#181922] p-1 rounded-xl border border-white/5">
+        <div className="flex items-center gap-1.5 bg-[#181922] p-1 rounded-xl border border-white/5 max-w-full overflow-x-auto custom-scrollbar">
           {/* Sample Mesh Switcher */}
-          <div className="flex items-center gap-0.5 px-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mr-1.5">Malla:</span>
+          <div className="flex items-center gap-0.5 px-0.5">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 mr-1 hidden sm:inline">Malla:</span>
             {[
-              { id: 'SPHERE', label: 'Esfera PBR', icon: '🌐' },
+              { id: 'SPHERE', label: 'Esfera', icon: '🌐' },
               { id: 'SHADER_BALL', label: 'Shader Ball', icon: '🪩' },
-              { id: 'CUBE', label: 'Cubo', icon: '🧊' },
+              { id: 'ROCK', label: 'Roca / Iceberg', icon: '🏔️' },
+              { id: 'GEM', label: 'Cristal / Gema', icon: '💎' },
+              { id: 'CUBE', label: 'Bloque', icon: '🧊' },
               { id: 'TORUS', label: 'Toroide', icon: '🍩' },
               { id: 'CLOTH', label: 'Paño', icon: '👕' },
-              { id: 'VOLUME', label: 'Volumétrico', icon: '☁️' },
+              { id: 'VOLUME', label: 'Nube', icon: '☁️' },
             ].map((m) => (
               <button
                 key={m.id}
@@ -866,7 +961,7 @@ export const MaterialStudioViewport: React.FC = () => {
                 title={m.label}
               >
                 <span>{m.icon}</span>
-                <span className="hidden 2xl:inline">{m.label}</span>
+                <span className="hidden lg:inline">{m.label}</span>
               </button>
             ))}
           </div>
@@ -875,11 +970,12 @@ export const MaterialStudioViewport: React.FC = () => {
 
           {/* Environment Lighting Selector */}
           <div className="flex items-center gap-1 px-1">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 mr-1">Luz:</span>
+            <Sun size={12} className="text-amber-400 flex-shrink-0" />
             <select
               value={envPresetId}
               onChange={(e) => setEnvPresetId(e.target.value)}
-              className="bg-zinc-900 border border-white/10 rounded-lg px-2 py-1 text-[10px] font-semibold text-zinc-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+              className="bg-zinc-900 border border-white/10 rounded-lg px-1.5 py-1 text-[10px] font-semibold text-zinc-200 focus:outline-none focus:border-indigo-500 cursor-pointer max-w-[140px] truncate"
+              title="Preset de iluminación HDRI"
             >
               {ENVIRONMENT_PRESETS.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -941,64 +1037,6 @@ export const MaterialStudioViewport: React.FC = () => {
           {/* Three.js Canvas */}
           <canvas ref={canvasRef} className="w-full h-full block cursor-grab active:cursor-grabbing outline-none" />
 
-          {/* ── TOP-LEFT HUD CONTROLS: Mesh & Lighting on Small/Medium screens ── */}
-          <div className="absolute top-3 left-3 z-20 flex flex-col gap-2 pointer-events-none">
-            {/* Quick Shape Picker Pills */}
-            <div className="flex items-center gap-1 p-1 bg-black/60 backdrop-blur-md border border-white/10 rounded-xl pointer-events-auto shadow-xl">
-              {[
-                { id: 'SPHERE', label: 'Esfera', icon: '🌐' },
-                { id: 'SHADER_BALL', label: 'Shader Ball', icon: '🪩' },
-                { id: 'CUBE', label: 'Cubo', icon: '🧊' },
-                { id: 'CLOTH', label: 'Tela', icon: '👕' },
-                { id: 'VOLUME', label: 'Nube', icon: '☁️' },
-              ].map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => setSelectedMeshType(m.id as PreviewMeshType)}
-                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 transition-all ${
-                    selectedMeshType === m.id
-                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/10'
-                  }`}
-                  title={m.label}
-                >
-                  <span>{m.icon}</span>
-                  <span className="hidden sm:inline">{m.label}</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Lighting Preset Picker */}
-            <div className="flex items-center gap-2 p-1.5 px-2 bg-black/60 backdrop-blur-md border border-white/10 rounded-xl pointer-events-auto shadow-xl">
-              <Sun size={13} className="text-amber-400" />
-              <select
-                value={envPresetId}
-                onChange={(e) => setEnvPresetId(e.target.value)}
-                className="bg-transparent text-[10px] font-semibold text-zinc-200 focus:outline-none cursor-pointer"
-              >
-                {ENVIRONMENT_PRESETS.map((p) => (
-                  <option key={p.id} value={p.id} className="bg-zinc-900 text-white">
-                    {p.icon} {p.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* HDRI 360 Toggle Button */}
-            <button
-              onClick={() => setShowEnvironment((v) => !v)}
-              className={`flex items-center gap-1.5 p-1.5 px-2.5 rounded-xl text-[10px] font-bold tracking-wider transition-all pointer-events-auto shadow-xl ${
-                showEnvironment
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
-                  : 'bg-black/60 backdrop-blur-md border border-white/10 text-zinc-400 hover:text-zinc-200'
-              }`}
-              title="Alternar fondo panorámico HDRI 360°"
-            >
-              <Globe size={13} className={showEnvironment ? 'text-white' : 'text-indigo-400'} />
-              <span>HDRI: {showEnvironment ? 'ON' : 'OFF'}</span>
-            </button>
-          </div>
-
           {/* ── TOP-RIGHT HUD: Light Angle Slider ── */}
           <div className="absolute top-3 right-3 z-20 flex items-center gap-2 p-1.5 px-3 bg-black/60 backdrop-blur-md border border-white/10 rounded-xl shadow-xl">
             <Sun size={13} className="text-yellow-400" />
@@ -1047,38 +1085,11 @@ export const MaterialStudioViewport: React.FC = () => {
               </div>
             )}
 
-            <div className="h-4 w-px bg-white/10" />
-
-            {/* Background Environment Toggle */}
-            <button
-              onClick={() => setShowEnvironment((v) => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[10px] font-bold uppercase transition-all ${
-                showEnvironment
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
-                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400'
-              }`}
-              title="Mostrar / Ocultar Mapa de Fondo HDRI 360°"
-            >
-              <Globe size={12} className={showEnvironment ? 'text-white' : 'text-indigo-400'} />
-              <span>HDRI {showEnvironment ? 'ON' : 'OFF'}</span>
-            </button>
-            
-            {/* Grid Toggle */}
-            <button
-              onClick={() => setShowGrid((v) => !v)}
-              className={`p-1.5 rounded-xl text-[10px] font-bold transition-all ${
-                showGrid ? 'bg-zinc-700 text-indigo-300' : 'text-zinc-500 hover:text-zinc-300'
-              }`}
-              title="Alternar cuadrícula de calibración"
-            >
-              <Layers size={13} />
-            </button>
-
             {/* Wireframe Toggle */}
             <button
               onClick={() => setShowWireframe((v) => !v)}
               className={`p-1.5 rounded-xl text-[10px] font-bold transition-all ${
-                showWireframe ? 'bg-zinc-700 text-indigo-300' : 'text-zinc-500 hover:text-zinc-300'
+                showWireframe ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30' : 'text-zinc-400 hover:text-white hover:bg-white/10'
               }`}
               title="Modo Malla de Alambre (Wireframe)"
             >

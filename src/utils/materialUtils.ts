@@ -3,6 +3,194 @@ import type { MaterialData } from '../types';
 import { createRaymarchedCloudMaterial } from './volumetricRaymarch';
 
 /**
+ * Safely converts a Three.js Texture to a base64 PNG Data URL so it can be stored,
+ * previewed in 2D UI panels, edited in MapEditorModal, and used across viewports.
+ */
+export function textureToDataURL(texture: THREE.Texture | null | undefined): string | undefined {
+  if (!texture) return undefined;
+  
+  const img: any = texture.image || (texture as any).source?.data;
+  if (!img) return undefined;
+
+  try {
+    // If it's already a DataURL, return it directly
+    if (typeof img.src === 'string' && img.src.startsWith('data:image/')) {
+      return img.src;
+    }
+
+    const width = img.width || img.naturalWidth || img.videoWidth || (img.data ? 512 : 512);
+    const height = img.height || img.naturalHeight || img.videoHeight || (img.data ? 512 : 512);
+    if (!width || !height || width <= 0 || height <= 0) {
+      if (typeof img.src === 'string' && !img.src.startsWith('blob:')) return img.src;
+      return undefined;
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.min(width, 2048);
+    canvas.height = Math.min(height, 2048);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return undefined;
+
+    if (img instanceof ImageData) {
+      ctx.putImageData(img, 0, 0);
+    } else if (img.data && (img.data instanceof Uint8Array || img.data instanceof Uint8ClampedArray)) {
+      const imgData = ctx.createImageData(width, height);
+      imgData.data.set(img.data);
+      ctx.putImageData(imgData, 0, 0);
+    } else {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    }
+    return canvas.toDataURL('image/png');
+  } catch (e) {
+    console.warn('Could not convert texture to DataURL', e);
+    if (typeof img.src === 'string' && !img.src.startsWith('blob:')) {
+      return img.src;
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Extracts all PBR materials from a Three.js Object3D hierarchy (GLTF scene, OBJ, etc.)
+ */
+export function extractPBRMaterialsFromObject3D(object: THREE.Object3D, baseName = 'Objeto'): MaterialData[] {
+  const materials: MaterialData[] = [];
+  const seen = new Set<THREE.Material>();
+  let matCount = 0;
+
+  object.traverse((child) => {
+    if ((child as THREE.Mesh).isMesh) {
+      const mesh = child as THREE.Mesh;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((m) => {
+        if (m && !seen.has(m)) {
+          seen.add(m);
+          matCount++;
+          const pbr = m as any;
+
+          const getFlipY = () => {
+            if (pbr.map) return pbr.map.flipY;
+            if (pbr.normalMap) return pbr.normalMap.flipY;
+            if (pbr.roughnessMap) return pbr.roughnessMap.flipY;
+            if (pbr.metalnessMap) return pbr.metalnessMap.flipY;
+            return true;
+          };
+
+          const matId = 'mat_imp_' + Math.random().toString(36).substr(2, 9);
+          m.userData.csgMaterialId = matId;
+
+          const rawName = (m.name && m.name.trim() !== '') ? m.name.trim() : `${baseName}_Material_${matCount}`;
+          
+          const albedoData = textureToDataURL(pbr.map);
+          const normalData = textureToDataURL(pbr.normalMap);
+          const roughData = textureToDataURL(pbr.roughnessMap);
+          const metalData = textureToDataURL(pbr.metalnessMap);
+          const aoData = textureToDataURL(pbr.aoMap);
+          const emissiveData = textureToDataURL(pbr.emissiveMap);
+          const alphaData = textureToDataURL(pbr.alphaMap);
+          const transData = textureToDataURL(pbr.transmissionMap);
+          const thickData = textureToDataURL(pbr.thicknessMap);
+          const dispData = textureToDataURL(pbr.displacementMap);
+
+          const hasRealTransmission = typeof pbr.transmission === 'number' && pbr.transmission > 0.01;
+
+          const matData: MaterialData = {
+            id: matId,
+            name: rawName,
+            category: 'imported',
+            color: pbr.color ? '#' + pbr.color.getHexString() : '#ffffff',
+            roughness: typeof pbr.roughness === 'number' ? pbr.roughness : 0.5,
+            metalness: typeof pbr.metalness === 'number' ? pbr.metalness : 0,
+            opacity: typeof m.opacity === 'number' ? m.opacity : 1,
+            transparent: m.transparent === true && (m.opacity < 1 || !hasRealTransmission),
+            emissive: pbr.emissive ? '#' + pbr.emissive.getHexString() : '#000000',
+            emissiveIntensity: typeof pbr.emissiveIntensity === 'number' ? pbr.emissiveIntensity : 1,
+            ior: typeof pbr.ior === 'number' ? pbr.ior : 1.5,
+            transmission: hasRealTransmission ? pbr.transmission : 0,
+            thickness: (hasRealTransmission && typeof pbr.thickness === 'number') ? pbr.thickness : 0,
+            attenuationColor: pbr.attenuationColor ? '#' + pbr.attenuationColor.getHexString() : undefined,
+            attenuationDistance: typeof pbr.attenuationDistance === 'number' ? pbr.attenuationDistance : undefined,
+            clearcoat: typeof pbr.clearcoat === 'number' ? pbr.clearcoat : 0,
+            clearcoatRoughness: typeof pbr.clearcoatRoughness === 'number' ? pbr.clearcoatRoughness : 0,
+            sheen: typeof pbr.sheen === 'number' ? pbr.sheen : 0,
+            sheenColor: pbr.sheenColor ? '#' + pbr.sheenColor.getHexString() : undefined,
+            map: albedoData,
+            normalMap: normalData,
+            roughnessMap: roughData,
+            metalnessMap: metalData,
+            aoMap: aoData,
+            emissiveMap: emissiveData,
+            alphaMap: alphaData,
+            transmissionMap: transData,
+            thicknessMap: thickData,
+            displacementMap: dispData,
+            flipY: getFlipY(),
+            mapRepeat: pbr.map?.repeat ? [pbr.map.repeat.x, pbr.map.repeat.y] : undefined,
+            mapOffset: pbr.map?.offset ? [pbr.map.offset.x, pbr.map.offset.y] : undefined,
+            mapRotation: pbr.map?.rotation ? (pbr.map.rotation * 180) / Math.PI : undefined,
+          };
+
+          materials.push(matData);
+        }
+      });
+    }
+  });
+
+  return materials;
+}
+
+/**
+ * Parses meshData (GLTF, GLB, OBJ) and extracts all PBR materials asynchronously.
+ */
+export async function extractPBRMaterialFromGLTFOrOBJ(
+  meshData: { type: string; data: string },
+  baseName = 'Modelo'
+): Promise<MaterialData[]> {
+  if (!meshData || !meshData.data) return [];
+
+  if (meshData.type === 'gltf' || meshData.type === 'glb') {
+    const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+    const { DRACOLoader } = await import('three/examples/jsm/loaders/DRACOLoader.js');
+    const loader = new GLTFLoader();
+    const draco = new DRACOLoader();
+    draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+    loader.setDRACOLoader(draco);
+
+    return new Promise((resolve) => {
+      loader.load(
+        meshData.data,
+        (gltf) => {
+          const mats = extractPBRMaterialsFromObject3D(gltf.scene, baseName);
+          resolve(mats);
+        },
+        undefined,
+        (err) => {
+          console.warn('Error loading GLTF to extract materials:', err);
+          resolve([]);
+        }
+      );
+    });
+  } else if (meshData.type === 'obj') {
+    const { OBJLoader } = await import('three/examples/jsm/loaders/OBJLoader.js');
+    return new Promise((resolve) => {
+      new OBJLoader().load(
+        meshData.data,
+        (obj3d) => {
+          const mats = extractPBRMaterialsFromObject3D(obj3d, baseName);
+          resolve(mats);
+        },
+        undefined,
+        (err) => {
+          console.warn('Error loading OBJ to extract materials:', err);
+          resolve([]);
+        }
+      );
+    });
+  }
+  return [];
+}
+
+/**
  * Combines AO, Roughness, and Metalness maps into a single ORM texture.
  * R: Ambient Occlusion
  * G: Roughness
@@ -148,6 +336,12 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
     (data.name && data.name.toLowerCase().includes('velvet'))
   );
 
+  const isIceMat = Boolean(
+    data.isIce === true ||
+    (data.id && (data.id.startsWith('ice_') || data.id.includes('ice_glacial') || data.id.includes('ice_frosted') || data.id.includes('ice_cracked') || data.id.includes('snow_ice'))) ||
+    (data.name && (data.name.toLowerCase().includes('hielo') || data.name.toLowerCase().includes('glacial') || data.name.toLowerCase().includes('ice')))
+  );
+
   const isPhysical = 
     (data.transmission ?? 0) > 0 || 
     (data.clearcoat ?? 0) > 0 || 
@@ -155,6 +349,7 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
     (data.anisotropy ?? 0) > 0 ||
     (data.dispersion ?? 0) > 0 ||
     isVelvet ||
+    isIceMat ||
     (data.iridescence ?? 0) > 0 ||
     (data.specularIntensity !== undefined && data.specularIntensity !== 1) ||
     (data.ior !== undefined && data.ior !== 1.5) ||
@@ -164,13 +359,16 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
   
   material.name = data.name || 'Material';
   material.color.set(data.color || '#ffffff');
-  material.roughness = data.roughness ?? 0.5;
+  material.roughness = data.roughness ?? (isIceMat ? 0.08 : 0.5);
   material.metalness = data.metalness ?? 0;
   material.emissive.set(data.emissive || '#000000');
   material.emissiveIntensity = data.emissiveIntensity ?? 1;
   material.opacity = data.opacity ?? 1;
-  material.transparent = data.transparent ?? (material.opacity < 1 || (data.transmission ?? 0) > 0);
+  // Note: For transmission materials, keeping transparent=false with depthWrite=true provides solid closed-mesh volumetric refraction
+  material.transparent = data.transparent ?? (material.opacity < 1);
+  material.depthWrite = true;
   material.side = THREE.DoubleSide;
+  material.dithering = true;
 
   const albedoUrl = data.map || data.mapAlbedo;
   const normalUrl = data.normalMap || data.mapNormal;
@@ -210,20 +408,24 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
 
   if (isPhysical) {
     const m = material as THREE.MeshPhysicalMaterial;
-    m.ior = data.ior ?? 1.5;
-    m.transmission = data.transmission ?? 0;
+    m.ior = data.ior ?? (isIceMat ? 1.31 : 1.5);
+    m.transmission = data.transmission ?? (isIceMat ? 0.98 : 0);
     if (data.transmissionMap) m.transmissionMap = loadTexture(data.transmissionMap);
-    m.thickness = data.thickness ?? 0;
+    m.thickness = data.thickness ?? (isIceMat ? 1.8 : 0);
     if (data.thicknessMap) m.thicknessMap = loadTexture(data.thicknessMap);
-    if ('dispersion' in m && data.dispersion !== undefined) {
-      (m as any).dispersion = data.dispersion;
+    if ('dispersion' in m && (data.dispersion !== undefined || isIceMat)) {
+      (m as any).dispersion = data.dispersion ?? (isIceMat ? 0.035 : 0);
     }
-    m.attenuationDistance = data.attenuationDistance ?? Infinity;
-    if (data.attenuationColor) m.attenuationColor.set(data.attenuationColor);
+    m.attenuationDistance = data.attenuationDistance ?? (isIceMat ? 0.45 : Infinity);
+    if (data.attenuationColor) {
+      m.attenuationColor.set(data.attenuationColor);
+    } else if (isIceMat) {
+      m.attenuationColor.set('#0284c7');
+    }
     
     // Clearcoat
-    m.clearcoat = data.clearcoat ?? 0;
-    m.clearcoatRoughness = data.clearcoatRoughness ?? 0;
+    m.clearcoat = data.clearcoat ?? (isIceMat ? 0.95 : 0);
+    m.clearcoatRoughness = data.clearcoatRoughness ?? (isIceMat ? 0.03 : 0);
     if (data.clearcoatMap) m.clearcoatMap = loadTexture(data.clearcoatMap);
     if (data.clearcoatRoughnessMap) m.clearcoatRoughnessMap = loadTexture(data.clearcoatRoughnessMap);
     m.clearcoatNormalMap = loadTexture(data.clearcoatNormalMap);
@@ -293,7 +495,490 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
 
   injectSeamlessDisplacement(material);
 
+  if (isIceMat && material instanceof THREE.MeshPhysicalMaterial) {
+    injectProceduralIceShader(material, data);
+  } else if (
+    (typeof data.porosity === 'number' ? data.porosity > 0.001 : Boolean(data.porosity)) ||
+    (data.porosityStrength ?? 0) > 0.001
+  ) {
+    injectPorosityControls(material as THREE.MeshStandardMaterial, data);
+  }
+
   return material;
+}
+
+/**
+ * Common GLSL noise math for vertex & fragment shaders.
+ */
+const COMMON_NOISE_GLSL = `
+  vec3 glsl_mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 glsl_mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+  vec4 glsl_permute(vec4 x) { return glsl_mod289(((x*34.0)+1.0)*x); }
+  vec4 glsl_taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+  
+  float glsl_snoise(vec3 v) {
+    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i  = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = glsl_mod289(i);
+    vec4 p = glsl_permute(glsl_permute(glsl_permute(
+               i.z + vec4(0.0, i1.z, i2.z, 1.0))
+             + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+             + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+    float n_ = 0.142857142857;
+    vec3 ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ *ns.x + ns.yyyy;
+    vec4 y = y_ *ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = glsl_taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+  }
+
+  // Multi-octave 3D cellular / Voronoi noise for pores & micro-cavities
+  float glsl_voronoiPores(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    float minDist = 1.0;
+    for (int z = -1; z <= 1; z++) {
+      for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+          vec3 neighbor = vec3(float(x), float(y), float(z));
+          vec3 cell = i + neighbor;
+          vec3 h = fract(sin(vec3(dot(cell, vec3(127.1, 311.7, 74.7)),
+                                  dot(cell, vec3(269.5, 183.3, 246.1)),
+                                  dot(cell, vec3(113.5, 271.9, 124.6)))) * 43758.5453);
+          vec3 pt = neighbor + h - f;
+          float d = length(pt);
+          if (d < minDist) {
+            minDist = d;
+          }
+        }
+      }
+    }
+    return minDist;
+  }
+`;
+
+/**
+ * Inyecta modulación procedural de Porosidad y Micro-rugosidad en materiales estándar y físicos.
+ * Rompe el aspecto sintético demasiado liso y los reflejos especulares de espejo uniforme.
+ */
+export function injectPorosityControls(material: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial, data: MaterialData) {
+  const prevOnBefore = material.onBeforeCompile;
+
+  material.onBeforeCompile = (shader, renderer) => {
+    if (prevOnBefore) {
+      prevOnBefore(shader, renderer);
+    }
+
+    const rawPorosity = data.porosity;
+    const porosity = typeof rawPorosity === 'number' 
+      ? rawPorosity 
+      : (rawPorosity ? (data.porosityStrength ?? 0.65) : (data.porosityStrength ?? 0.0));
+    
+    const porosityScale = data.porosityScale ?? 18.0;
+    const porosityRoughness = data.porosityMatteBias ?? data.porosityRoughness ?? 0.85;
+    const porosityCavityDepth = data.porosityCavityDarkening ?? data.porosityCavityDepth ?? 0.35;
+    const patchiness = data.porosityPatchiness ?? 0.65;
+    const patchScale = data.porosityPatchScale ?? 3.0;
+    const porosityCoverage = Math.min(Math.max(1.0 - patchiness * 0.7, 0.1), 1.0);
+
+    shader.uniforms.uPorosity = { value: porosity };
+    shader.uniforms.uPorosityScale = { value: porosityScale };
+    shader.uniforms.uPorosityRoughness = { value: porosityRoughness };
+    shader.uniforms.uPorosityCavityDepth = { value: porosityCavityDepth };
+    shader.uniforms.uPorosityCoverage = { value: porosityCoverage };
+    shader.uniforms.uPorosityPatchScale = { value: patchScale };
+
+    shader.vertexShader = `
+      varying vec3 vPorosityLocalPos;
+      ${shader.vertexShader}
+    `.replace(
+      '#include <begin_vertex>',
+      `
+      #include <begin_vertex>
+      vPorosityLocalPos = position;
+      `
+    );
+
+    shader.fragmentShader = `
+      varying vec3 vPorosityLocalPos;
+      uniform float uPorosity;
+      uniform float uPorosityScale;
+      uniform float uPorosityRoughness;
+      uniform float uPorosityCavityDepth;
+      uniform float uPorosityCoverage;
+      uniform float uPorosityPatchScale;
+
+      ${COMMON_NOISE_GLSL}
+
+      ${shader.fragmentShader}
+    `.replace(
+      '#include <color_fragment>',
+      `
+      #include <color_fragment>
+
+      if (uPorosity > 0.005) {
+        vec3 pPore = vPorosityLocalPos * uPorosityScale;
+        
+        // 1. Parches de distribución (zonas con poros vs zonas más pulidas)
+        float patchNoise = glsl_snoise(vPorosityLocalPos * uPorosityPatchScale) * 0.5 + 0.5;
+        float patchMask = smoothstep(1.0 - uPorosityCoverage, 1.0, patchNoise);
+
+        // 2. Micro-cavidades celulares y micro-poros
+        float vPore = glsl_voronoiPores(pPore);
+        float poreHole = 1.0 - smoothstep(0.0, 0.45, vPore);
+        
+        // 3. Microrugosidad fina fractal
+        float fineGrain = glsl_snoise(pPore * 2.8) * 0.5 + 0.5;
+        float ultraGrain = glsl_snoise(pPore * 7.5) * 0.5 + 0.5;
+        float poreTexture = (poreHole * 0.7 + fineGrain * 0.2 + ultraGrain * 0.1);
+
+        float finalPorosity = clamp(poreTexture * patchMask * uPorosity, 0.0, 1.0);
+
+        // Oclusión suave de cavidades oscuras en el fondo del poro
+        float cavityAO = 1.0 - (poreHole * patchMask * uPorosityCavityDepth * 0.55);
+        diffuseColor.rgb *= cavityAO;
+      }
+      `
+    ).replace(
+      '#include <roughnessmap_fragment>',
+      `
+      #include <roughnessmap_fragment>
+
+      if (uPorosity > 0.005) {
+        vec3 pPore = vPorosityLocalPos * uPorosityScale;
+        float patchNoise = glsl_snoise(vPorosityLocalPos * uPorosityPatchScale) * 0.5 + 0.5;
+        float patchMask = smoothstep(1.0 - uPorosityCoverage, 1.0, patchNoise);
+        float vPore = glsl_voronoiPores(pPore);
+        float poreHole = 1.0 - smoothstep(0.0, 0.45, vPore);
+        float fineGrain = glsl_snoise(pPore * 2.8) * 0.5 + 0.5;
+        float poreFactor = clamp((poreHole * 0.75 + fineGrain * 0.25) * patchMask * uPorosity, 0.0, 1.0);
+
+        // Aumentar rugosidad en poros para eliminar el brillo especular uniforme de plástico/espejo
+        #ifdef USE_ROUGHNESSMAP
+          roughnessFactor = clamp(roughnessFactor + poreFactor * uPorosityRoughness, 0.02, 0.98);
+        #else
+          roughnessFactor = clamp(roughness + poreFactor * uPorosityRoughness, 0.02, 0.98);
+        #endif
+      }
+      `
+    ).replace(
+      '#include <normal_fragment_begin>',
+      `
+      #include <normal_fragment_begin>
+
+      if (uPorosity > 0.005 && uPorosityCavityDepth > 0.01) {
+        vec3 pPore = vPorosityLocalPos * uPorosityScale;
+        float eps = 0.08;
+        float n0 = glsl_voronoiPores(pPore);
+        float nx = glsl_voronoiPores(pPore + vec3(eps, 0.0, 0.0));
+        float ny = glsl_voronoiPores(pPore + vec3(0.0, eps, 0.0));
+        float nz = glsl_voronoiPores(pPore + vec3(0.0, 0.0, eps));
+        
+        vec3 poreGrad = vec3(nx - n0, ny - n0, nz - n0) / eps;
+        float patchNoise = glsl_snoise(vPorosityLocalPos * uPorosityPatchScale) * 0.5 + 0.5;
+        float patchMask = smoothstep(1.0 - uPorosityCoverage, 1.0, patchNoise);
+        
+        vec3 perturbedNormal = normalize(normal - poreGrad * (uPorosity * uPorosityCavityDepth * patchMask * 0.35));
+        normal = perturbedNormal;
+      }
+      `
+    );
+
+    material.userData.shader = shader;
+  };
+}
+
+/**
+ * Procedural Ice & Frozen Core Shader Node Injection for MeshPhysicalMaterial.
+ * Implements:
+ * 1. [Voronoi/Perlin Noise] -> Surface organic deformation (wavy non-flat faces/edges)
+ * 2. [3D Musgrave Noise]    -> Deep cloudy core, internal fractures & white air bubbles (Subsurface scattering)
+ * 3. [Fresnel Facing Angle] -> Outer frost, rime accumulation on edges, higher rim roughness
+ * 4. [Porosity & Pores]     -> Micro-cavities & localized porous matte patches to break excessive shine
+ */
+export function injectProceduralIceShader(material: THREE.MeshPhysicalMaterial, data: MaterialData) {
+  const prevOnBefore = material.onBeforeCompile;
+  const cfg = data.iceConfig || {};
+
+  material.onBeforeCompile = (shader, renderer) => {
+    if (prevOnBefore) {
+      prevOnBefore(shader, renderer);
+    }
+
+    const icePorosity = cfg.porosity ?? data.porosity ?? 0.45;
+    const icePorosityScale = cfg.porosityScale ?? data.porosityScale ?? 22.0;
+
+    shader.uniforms.uIceWarp = { value: cfg.surfaceWarp ?? 0.045 };
+    shader.uniforms.uIceCloudDensity = { value: cfg.cloudDensity ?? 1.4 };
+    shader.uniforms.uIceCloudColor = { value: new THREE.Color(cfg.cloudColor || '#edf7fd') };
+    shader.uniforms.uIceCloudScale = { value: cfg.cloudScale ?? 2.6 };
+    shader.uniforms.uIceFrostIntensity = { value: cfg.frostIntensity ?? 0.85 };
+    shader.uniforms.uIceCrackIntensity = { value: cfg.crackIntensity ?? 0.9 };
+    shader.uniforms.uIcePorosity = { value: icePorosity };
+    shader.uniforms.uIcePorosityScale = { value: icePorosityScale };
+
+    // Common GLSL noise math for vertex & fragment shaders
+    const commonNoiseGLSL = `
+      vec3 ice_mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 ice_mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 ice_permute(vec4 x) { return ice_mod289(((x*34.0)+1.0)*x); }
+      vec4 ice_taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+      
+      float ice_snoise(vec3 v) {
+        const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+        vec3 i  = floor(v + dot(v, C.yyy));
+        vec3 x0 = v - i + dot(i, C.xxx);
+        vec3 g = step(x0.yzx, x0.xyz);
+        vec3 l = 1.0 - g;
+        vec3 i1 = min(g.xyz, l.zxy);
+        vec3 i2 = max(g.xyz, l.zxy);
+        vec3 x1 = x0 - i1 + C.xxx;
+        vec3 x2 = x0 - i2 + C.yyy;
+        vec3 x3 = x0 - D.yyy;
+        i = ice_mod289(i);
+        vec4 p = ice_permute(ice_permute(ice_permute(
+                   i.z + vec4(0.0, i1.z, i2.z, 1.0))
+                 + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+                 + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+        float n_ = 0.142857142857;
+        vec3 ns = n_ * D.wyz - D.xzx;
+        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+        vec4 x_ = floor(j * ns.z);
+        vec4 y_ = floor(j - 7.0 * x_);
+        vec4 x = x_ *ns.x + ns.yyyy;
+        vec4 y = y_ *ns.x + ns.yyyy;
+        vec4 h = 1.0 - abs(x) - abs(y);
+        vec4 b0 = vec4(x.xy, y.xy);
+        vec4 b1 = vec4(x.zw, y.zw);
+        vec4 s0 = floor(b0)*2.0 + 1.0;
+        vec4 s1 = floor(b1)*2.0 + 1.0;
+        vec4 sh = -step(h, vec4(0.0));
+        vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+        vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+        vec3 p0 = vec3(a0.xy, h.x);
+        vec3 p1 = vec3(a0.zw, h.y);
+        vec3 p2 = vec3(a1.xy, h.z);
+        vec3 p3 = vec3(a1.zw, h.w);
+        vec4 norm = ice_taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+        p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+        vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+        m = m * m;
+        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+      }
+
+      float ice_voronoiPores(vec3 p) {
+        vec3 i = floor(p);
+        vec3 f = fract(p);
+        float minDist = 1.0;
+        for (int z = -1; z <= 1; z++) {
+          for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+              vec3 neighbor = vec3(float(x), float(y), float(z));
+              vec3 cell = i + neighbor;
+              vec3 h = fract(sin(vec3(dot(cell, vec3(127.1, 311.7, 74.7)),
+                                      dot(cell, vec3(269.5, 183.3, 246.1)),
+                                      dot(cell, vec3(113.5, 271.9, 124.6)))) * 43758.5453);
+              vec3 pt = neighbor + h - f;
+              float d = length(pt);
+              if (d < minDist) minDist = d;
+            }
+          }
+        }
+        return minDist;
+      }
+    `;
+
+    // ── VERTEX SHADER INJECTION ──────────────────────────────────────────────
+    shader.vertexShader = `
+      varying vec3 vIceLocalPos;
+      uniform float uIceWarp;
+      ${commonNoiseGLSL}
+      ${shader.vertexShader}
+    `.replace(
+      '#include <begin_vertex>',
+      `
+      #include <begin_vertex>
+      vIceLocalPos = position;
+      
+      // Node 1: Surface organic deformation (multi-frequency domain-warped organic displacement)
+      if (uIceWarp > 0.001) {
+        vec3 p = position;
+        float w1 = ice_snoise(p * 1.4);
+        float w2 = ice_snoise(p * 1.4 + vec3(4.3, 1.7, 8.2));
+        float w3 = ice_snoise(p * 1.4 + vec3(7.1, 9.5, 3.4));
+        vec3 warpedP = p + vec3(w1, w2, w3) * 0.35;
+        
+        float macroNoise = ice_snoise(warpedP * 1.6) * 0.65;
+        float midNoise = ice_snoise(warpedP * 3.8) * 0.25;
+        float fineNoise = ice_snoise(p * 9.0) * 0.10;
+        float totalDeform = (macroNoise + midNoise + fineNoise);
+
+        vec3 dispNorm = length(position) > 0.0001 ? normalize(position) : normalize(objectNormal);
+        transformed += dispNorm * (totalDeform * uIceWarp);
+      }
+      `
+    );
+
+    // ── FRAGMENT SHADER INJECTION ────────────────────────────────────────────
+    shader.fragmentShader = `
+      varying vec3 vIceLocalPos;
+      uniform float uIceWarp;
+      uniform float uIceCloudDensity;
+      uniform vec3 uIceCloudColor;
+      uniform float uIceCloudScale;
+      uniform float uIceFrostIntensity;
+      uniform float uIceCrackIntensity;
+      uniform float uIcePorosity;
+      uniform float uIcePorosityScale;
+
+      ${commonNoiseGLSL}
+
+      float ice_musgrave3D(vec3 p) {
+        float f = 0.0;
+        float amp = 0.55;
+        vec3 pos = p;
+        for (int i = 0; i < 4; i++) {
+          float n = abs(ice_snoise(pos));
+          f += amp * n;
+          pos *= 2.15;
+          amp *= 0.5;
+        }
+        return f;
+      }
+
+      float ice_voronoi3DCracks(vec3 p) {
+        float w = ice_snoise(p * 1.2) * 0.35;
+        vec3 wp = p + vec3(w, -w * 0.8, w * 1.2);
+        vec3 i = floor(wp);
+        vec3 f = fract(wp);
+        float minDist = 1.0;
+        float secondMin = 1.0;
+        for (int z = -1; z <= 1; z++) {
+          for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+              vec3 neighbor = vec3(float(x), float(y), float(z));
+              vec3 cell = i + neighbor;
+              vec3 h = fract(sin(vec3(dot(cell, vec3(127.1, 311.7, 74.7)),
+                                      dot(cell, vec3(269.5, 183.3, 246.1)),
+                                      dot(cell, vec3(113.5, 271.9, 124.6)))) * 43758.5453);
+              vec3 pt = neighbor + h - f;
+              float d = length(pt);
+              if (d < minDist) {
+                secondMin = minDist;
+                minDist = d;
+              } else if (d < secondMin) {
+                secondMin = d;
+              }
+            }
+          }
+        }
+        return secondMin - minDist;
+      }
+
+      ${shader.fragmentShader}
+    `.replace(
+      '#include <color_fragment>',
+      `
+      #include <color_fragment>
+
+      // ── Node 2: 3D Musgrave Internal Core + Bubbles & Fractures ───────────
+      float musgVal = ice_musgrave3D(vIceLocalPos * uIceCloudScale);
+      float crackEdge = ice_voronoi3DCracks(vIceLocalPos * (uIceCloudScale * 2.3));
+      float crackMask = 1.0 - smoothstep(0.015, 0.12, crackEdge);
+
+      // Concentración radial del núcleo
+      float distFromCenter = length(vIceLocalPos);
+      float centerMask = smoothstep(1.15, 0.18, distFromCenter);
+      float internalCloud = clamp(
+        (musgVal * 0.82 + crackMask * 0.55 * uIceCrackIntensity) * centerMask * uIceCloudDensity,
+        0.0,
+        1.0
+      );
+
+      // CAMBIO 1: Sumamos el color de la nube de forma aditiva sobre el color base
+      diffuseColor.rgb += uIceCloudColor * internalCloud * 0.45;
+
+      // ── Node 3: Fresnel Facing Frost & Rime on Grazing Angles ─────────────
+      vec3 vDir = normalize(vViewPosition);
+      vec3 nDir = normalize(vNormal);
+      float facingGrad = 1.0 - max(0.0, dot(nDir, -vDir));
+      float fresnelFrost = pow(facingGrad, 2.6);
+      float fineFrost = ice_snoise(vIceLocalPos * 22.0) * 0.5 + 0.5;
+      float edgeFrost = fresnelFrost * (0.55 + 0.45 * fineFrost) * uIceFrostIntensity;
+
+      // Añadimos la escarcha sin machacar el fondo
+      diffuseColor.rgb += vec3(0.95, 0.98, 1.0) * edgeFrost * 0.35;
+
+      // ── Node 4: Porosidad Glacial & Micro-cavidades para Romper Brillo ────
+      float poreFactor = 0.0;
+      if (uIcePorosity > 0.01) {
+        vec3 pPore = vIceLocalPos * uIcePorosityScale;
+        float patchNoise = ice_snoise(pPore * 0.2) * 0.5 + 0.5;
+        float patchMask = smoothstep(0.35, 0.85, patchNoise);
+        float vPore = ice_voronoiPores(pPore);
+        float poreHole = 1.0 - smoothstep(0.0, 0.45, vPore);
+        float fineGrain = ice_snoise(pPore * 3.0) * 0.5 + 0.5;
+        poreFactor = clamp((poreHole * 0.75 + fineGrain * 0.25) * patchMask * uIcePorosity, 0.0, 1.0);
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.96, 1.0), poreFactor * 0.65);
+      }
+
+      // ── NUEVO - Node 5: Variación Dinámica por Espesor (Thickness) ──────────
+      // Calculamos el ángulo de incidencia (1.0 en el centro visual, 0.0 en siluetas delgadas)
+      float viewDotNormal = max(0.0, dot(nDir, vDir));
+      float thicknessFactor = smoothstep(0.15, 0.80, viewDotNormal);
+
+      // Paleta tonal realista: Azul marino profundo para masas pesadas
+      vec3 colProfundo = vec3(0.02, 0.15, 0.35); // #022759
+      vec3 colCristalinoBase = vec3(0.90, 0.96, 1.0); // #e5f5ff
+
+      // Modulamos el Albedo: en bordes finos aclaramos el azul plano, concentrándolo en el núcleo
+      vec3 tintedThicknessColor = mix(colCristalinoBase, diffuseColor.rgb, thicknessFactor);
+      diffuseColor.rgb = mix(tintedThicknessColor, diffuseColor.rgb + colProfundo * (1.0 - thicknessFactor) * 0.2, thicknessFactor);
+      `
+    ).replace(
+      '#include <roughnessmap_fragment>',
+      `
+      #include <roughnessmap_fragment>
+      // Surface roughness modulation from facing frost, porosity and internal cloud scattering
+      float addedRoughness = edgeFrost * 0.38 + internalCloud * 0.14 + (poreFactor * 0.85);
+      #ifdef USE_ROUGHNESSMAP
+        roughnessFactor = clamp(roughnessFactor + addedRoughness, 0.02, 0.98);
+      #else
+        roughnessFactor = clamp(roughness + addedRoughness, 0.02, 0.98);
+      #endif
+      `
+    );
+
+    material.userData.shader = shader;
+  };
 }
 
 /**

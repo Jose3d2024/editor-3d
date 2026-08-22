@@ -36,9 +36,15 @@ import {
   RotateCw,
   Copy,
   Image as ImageIcon, Cloud,
-  Check
+  Check,
+  Link as LinkIcon,
+  Unlink,
+  Wand2,
+  SlidersHorizontal,
+  RefreshCw
 } from 'lucide-react';
-import { createORMMap } from '../utils/materialUtils';
+import { adjustTextureColors, AlbedoColorAdjustments, generateFullPBRMapsFromSource } from '../utils/textureColorUtils';
+import { createORMMap, extractPBRMaterialFromGLTFOrOBJ, extractPBRMaterialsFromObject3D } from '../utils/materialUtils';
 import { applyUVWMapping, generateUVs } from '../utils/modifiers';
 import { importPBRPack, detectSlotFromFilename, importTextureFile } from '../utils/materialImporter';
 import { 
@@ -52,6 +58,8 @@ import {
   generateAllThumbnailsAsync,
   ProceduralMaterial 
 } from '../utils/proceduralTextures';
+import { MapEditorModal } from './MapEditorModal';
+import { ProceduralMapModal, ProceduralConfig } from './ProceduralMapModal';
 
 // ── Presets Físicos Calibrados de Acceso Rápido ────────────────────────────
 const PHYSICALLY_CALIBRATED_PRESETS: {
@@ -184,6 +192,44 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     apply: { color: '#b91c1c', metalness: 0.0, roughness: 0.85, normalScale: 3.5, displacementScale: 0.04 }
   },
   {
+    name: 'Piedra Caliza Travertino Porosa',
+    category: 'Madera & Piedra',
+    icon: '🪨',
+    description: 'Piedra natural con microcavidades y zonas mates no reflectantes',
+    apply: {
+      color: '#e2d9cc',
+      metalness: 0.0,
+      roughness: 0.78,
+      normalScale: 2.2,
+      porosity: true,
+      porosityStrength: 0.95,
+      porosityScale: 16.0,
+      porosityPatchiness: 0.70,
+      porosityPatchScale: 3.0,
+      porosityMatteBias: 0.95,
+      porosityCavityDarkening: 0.35,
+    }
+  },
+  {
+    name: 'Terracota / Barro Poroso',
+    category: 'Madera & Piedra',
+    icon: '🏺',
+    description: 'Arcilla cocida artesanal con acabado poroso mate natural',
+    apply: {
+      color: '#c25e36',
+      metalness: 0.0,
+      roughness: 0.82,
+      normalScale: 1.8,
+      porosity: true,
+      porosityStrength: 0.85,
+      porosityScale: 22.0,
+      porosityPatchiness: 0.45,
+      porosityPatchScale: 2.5,
+      porosityMatteBias: 0.90,
+      porosityCavityDarkening: 0.28,
+    }
+  },
+  {
     name: 'Mármol Calacatta Gold (Substance)',
     category: 'Madera & Piedra',
     icon: '🏛️',
@@ -191,7 +237,205 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     apply: { color: '#ffffff', metalness: 0.0, roughness: 0.08, clearcoat: 0.9, clearcoatRoughness: 0.04, normalScale: 0.6 }
   },
 
-  // Vidrios & Gemas
+  // ── Pack Procedural Hielo y Nieve (Física Realista / IOR 1.31 / Beer-Lambert) ─────────────────
+  {
+    name: 'Cubo de Hielo Físico (Beer-Lambert PBR)',
+    category: 'Hielo & Nieve',
+    icon: '🧊',
+    description: 'Masa tridimensional real: IOR 1.31, absorción volumétrica baja (0.45), atenuación cian profunda y refracción HDRI',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.05,
+      metalness: 0.0,
+      transmission: 0.99,
+      ior: 1.31,
+      thickness: 2.0,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.45,
+      dispersion: 0.035,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      transparent: false,
+      opacity: 1,
+      isIce: true,
+      iceConfig: {
+        enabled: true,
+        surfaceWarp: 0.04,
+        cloudDensity: 1.2,
+        cloudColor: '#edf7fd',
+        cloudScale: 2.6,
+        frostIntensity: 0.75,
+        crackIntensity: 0.85,
+      }
+    }
+  },
+  {
+    name: 'Hielo Antártico Orgánico Poroso',
+    category: 'Hielo & Nieve',
+    icon: '🧊',
+    description: 'Hielo natural con zonas porosas no reflectantes, microburbujas y escarcha',
+    apply: {
+      color: '#f0f9ff',
+      roughness: 0.22,
+      metalness: 0.0,
+      transmission: 0.90,
+      ior: 1.31,
+      thickness: 2.2,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.50,
+      dispersion: 0.03,
+      clearcoat: 0.7,
+      clearcoatRoughness: 0.12,
+      transparent: false,
+      opacity: 1,
+      porosity: true,
+      porosityStrength: 0.80,
+      porosityScale: 22.0,
+      porosityPatchiness: 0.75,
+      porosityPatchScale: 3.5,
+      porosityMatteBias: 0.90,
+      porosityCavityDarkening: 0.15,
+      isIce: true,
+      iceConfig: {
+        enabled: true,
+        surfaceWarp: 0.08,
+        cloudDensity: 1.6,
+        cloudColor: '#e0f2fe',
+        cloudScale: 2.8,
+        frostIntensity: 0.9,
+        crackIntensity: 0.95,
+      }
+    }
+  },
+  {
+    name: 'Hielo Glacial Puro (CGTrader PBR)',
+    category: 'Hielo & Nieve',
+    icon: '🧊',
+    description: '100% Transmisión, IOR 1.31, volumen sólido Beer-Lambert y atenuación azul glaciar',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.04,
+      metalness: 0.0,
+      transmission: 1.0,
+      ior: 1.31,
+      thickness: 2.2,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.45,
+      dispersion: 0.035,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      transparent: false,
+      opacity: 1,
+      isIce: true,
+      iceConfig: {
+        enabled: true,
+        surfaceWarp: 0.03,
+        cloudDensity: 1.1,
+        cloudColor: '#f0f9ff',
+        cloudScale: 2.4,
+        frostIntensity: 0.6,
+        crackIntensity: 0.75,
+      }
+    }
+  },
+  {
+    name: 'Hielo con Escarcha Superficial',
+    category: 'Hielo & Nieve',
+    icon: '❄️',
+    description: 'Cristales dendríticos de escarcha y zonas cristalinas transparentes',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.16,
+      metalness: 0.0,
+      transmission: 0.94,
+      ior: 1.31,
+      thickness: 2.0,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.60,
+      dispersion: 0.025,
+      clearcoat: 0.85,
+      clearcoatRoughness: 0.08,
+      transparent: false,
+      opacity: 1,
+      isIce: true,
+      iceConfig: {
+        enabled: true,
+        surfaceWarp: 0.05,
+        cloudDensity: 1.3,
+        cloudColor: '#e0f2fe',
+        cloudScale: 2.6,
+        frostIntensity: 1.1,
+        crackIntensity: 0.8,
+      }
+    }
+  },
+  {
+    name: 'Hielo Fisurado de Lago',
+    category: 'Hielo & Nieve',
+    icon: '💎',
+    description: 'Red profunda de grietas de tensión y microburbujas bajo superficie lisa',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.05,
+      metalness: 0.0,
+      transmission: 0.98,
+      ior: 1.31,
+      thickness: 2.5,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.40,
+      dispersion: 0.03,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      transparent: false,
+      opacity: 1,
+      isIce: true,
+      iceConfig: {
+        enabled: true,
+        surfaceWarp: 0.04,
+        cloudDensity: 1.2,
+        cloudColor: '#edf7fd',
+        cloudScale: 2.8,
+        frostIntensity: 0.7,
+        crackIntensity: 1.3,
+      }
+    }
+  },
+  {
+    name: 'Nieve Fresca / Polvo',
+    category: 'Hielo & Nieve',
+    icon: '🌨️',
+    description: 'Manto de nieve esponjosa con microdestellos cristalinos y sheen',
+    apply: {
+      color: '#f8fafc',
+      roughness: 0.85,
+      metalness: 0.0,
+      sheen: 0.95,
+      sheenColor: '#e0f2fe',
+      sheenRoughness: 0.35,
+      transparent: false,
+      opacity: 1
+    }
+  },
+  {
+    name: 'Nieve y Hielo Descongelado',
+    category: 'Hielo & Nieve',
+    icon: '🏔️',
+    description: 'Transición entre nieve compactada húmeda y charcos de hielo transparente',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.28,
+      metalness: 0.0,
+      transmission: 0.75,
+      ior: 1.31,
+      thickness: 1.8,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 0.55,
+      clearcoat: 0.9,
+      clearcoatRoughness: 0.04,
+      transparent: false,
+      opacity: 1
+    }
+  },
   {
     name: 'Vidrio Óptico Claro',
     category: 'Vidrio & Gemas',
@@ -304,7 +548,128 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     apply: { color: '#fdfcfb', roughness: 0.22, metalness: 0.05, sheen: 0.45, sheenColor: '#fbcfe8', iridescence: 0.8, iridescenceIOR: 1.5, iridescenceThicknessRange: [200, 500], transmission: 0 }
   },
 
-  // Volumétricos 3D (Raymarching)
+  // Volumétricos 3D (Raymarching: WebGPU Fire, Lighting, Perlin & Ice)
+  {
+    name: 'Fuego Volumétrico 3D (WebGPU Fire)',
+    category: 'Volumétricos 3D',
+    icon: '🔥',
+    description: 'Llama ardiente con gradiente de temperatura, convección y emisión aditiva',
+    apply: {
+      color: '#ef4444',
+      emissive: '#fbbf24',
+      emissiveIntensity: 3.2,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        mode: 'fire',
+        density: 2.8,
+        scale: 2.4,
+        lightIntensity: 2.2,
+        color: '#ef4444',
+        secondaryColor: '#fbbf24',
+        emissiveIntensity: 3.2,
+        threshold: 0.28,
+        thresholdMax: 0.78,
+        absorption: 1.2,
+        steps: 42,
+        shadowSteps: 4,
+        windSpeed: 0.35,
+        windDirection: [0.0, 1.2, 0.0],
+        blending: 'additive',
+        turbulentFlame: true,
+      }
+    }
+  },
+  {
+    name: 'Gas Plasma / Raymarching',
+    category: 'Volumétricos 3D',
+    icon: '⚡',
+    description: 'Gas ionizado brillante con filamentos Voronoi y blending aditivo',
+    apply: {
+      color: '#06b6d4',
+      emissive: '#a855f7',
+      emissiveIntensity: 2.8,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        mode: 'plasma',
+        density: 2.4,
+        scale: 2.0,
+        lightIntensity: 2.0,
+        color: '#06b6d4',
+        secondaryColor: '#a855f7',
+        emissiveIntensity: 2.8,
+        threshold: 0.32,
+        thresholdMax: 0.80,
+        absorption: 1.0,
+        steps: 40,
+        shadowSteps: 4,
+        windSpeed: 0.12,
+        windDirection: [0.1, 0.05, 0.1],
+        blending: 'additive',
+      }
+    }
+  },
+  {
+    name: 'Niebla / Bruma Densa (Raymarching)',
+    category: 'Volumétricos 3D',
+    icon: '🌫️',
+    description: 'Capa de niebla densa volumétrica con dispersión suave de luz ambiental',
+    apply: {
+      color: '#f1f5f9',
+      emissive: '#000000',
+      emissiveIntensity: 0.0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        mode: 'cloud',
+        density: 1.8,
+        scale: 1.4,
+        lightIntensity: 1.2,
+        color: '#f1f5f9',
+        secondaryColor: '#cbd5e1',
+        emissiveIntensity: 0,
+        threshold: 0.12,
+        thresholdMax: 0.85,
+        absorption: 0.8,
+        steps: 32,
+        shadowSteps: 4,
+        windSpeed: 0.05,
+        windDirection: [0.1, 0.0, 0.05],
+        blending: 'normal',
+      }
+    }
+  },
+  {
+    name: 'Humo Volumétrico Denso',
+    category: 'Volumétricos 3D',
+    icon: '💨',
+    description: 'Humo industrial con auto-sombreado interno y dispersión',
+    apply: {
+      color: '#334155',
+      emissive: '#000000',
+      emissiveIntensity: 0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        mode: 'smoke',
+        density: 3.0,
+        scale: 3.2,
+        lightIntensity: 0.85,
+        color: '#334155',
+        secondaryColor: '#64748b',
+        emissiveIntensity: 0,
+        threshold: 0.35,
+        thresholdMax: 0.85,
+        absorption: 3.8,
+        steps: 36,
+        shadowSteps: 8,
+        windSpeed: 0.22,
+        windDirection: [0.0, 0.8, 0.1],
+        blending: 'normal',
+      }
+    }
+  },
   {
     name: 'Nube Cúmulo 3D',
     category: 'Volumétricos 3D',
@@ -317,17 +682,21 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
       isVolumetric: true,
       volumetric: {
         enabled: true,
+        mode: 'cloud',
         density: 1.6,
         scale: 2.2,
         lightIntensity: 1.2,
         color: '#ffffff',
+        secondaryColor: '#cbd5e1',
+        emissiveIntensity: 0,
         threshold: 0.38,
         thresholdMax: 0.82,
         absorption: 2.2,
-        steps: 32,
+        steps: 36,
         shadowSteps: 6,
         windSpeed: 0.08,
         windDirection: [0.1, 0.05, 0.0],
+        blending: 'normal',
       }
     }
   },
@@ -337,23 +706,27 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     icon: '🌩️',
     description: 'Nube densa de tormenta con absorción alta',
     apply: {
-      color: '#64748b',
+      color: '#475569',
       emissive: '#000000',
       emissiveIntensity: 0,
       isVolumetric: true,
       volumetric: {
         enabled: true,
-        density: 3.2,
-        scale: 2.8,
-        lightIntensity: 0.9,
-        color: '#64748b',
-        threshold: 0.32,
-        thresholdMax: 0.78,
-        absorption: 3.5,
-        steps: 40,
-        shadowSteps: 8,
-        windSpeed: 0.18,
-        windDirection: [0.2, 0.1, 0.0],
+        mode: 'cloud',
+        density: 5.5,
+        scale: 5.8,
+        lightIntensity: 1.5,
+        color: '#475569',
+        secondaryColor: '#2d3748',
+        emissiveIntensity: 0,
+        threshold: 0.34,
+        thresholdMax: 0.86,
+        absorption: 3.2,
+        steps: 24,
+        shadowSteps: 5,
+        windSpeed: 0.12,
+        windDirection: [0.15, 0.05, 0.0],
+        blending: 'normal',
       }
     }
   },
@@ -364,22 +737,56 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     description: 'Gas espacial púrpura con dispersión anisotrópica',
     apply: {
       color: '#c084fc',
-      emissive: '#000000',
-      emissiveIntensity: 0,
+      emissive: '#f43f5e',
+      emissiveIntensity: 2.2,
       isVolumetric: true,
       volumetric: {
         enabled: true,
+        mode: 'plasma',
         density: 1.8,
         scale: 1.6,
-        lightIntensity: 1.6,
+        lightIntensity: 1.8,
         color: '#c084fc',
-        threshold: 0.35,
+        secondaryColor: '#f43f5e',
+        emissiveIntensity: 2.2,
+        threshold: 0.34,
         thresholdMax: 0.80,
         absorption: 1.2,
         steps: 36,
         shadowSteps: 6,
-        windSpeed: 0.04,
+        windSpeed: 0.05,
         windDirection: [0.05, 0.02, 0.08],
+        blending: 'additive',
+      }
+    }
+  },
+  {
+    name: 'Aurora Boreal 3D',
+    category: 'Volumétricos 3D',
+    icon: '✨',
+    description: 'Velo etéreo con brillo esmeralda y cian',
+    apply: {
+      color: '#10b981',
+      emissive: '#06b6d4',
+      emissiveIntensity: 2.0,
+      isVolumetric: true,
+      volumetric: {
+        enabled: true,
+        mode: 'plasma',
+        density: 1.4,
+        scale: 1.8,
+        lightIntensity: 1.6,
+        color: '#10b981',
+        secondaryColor: '#06b6d4',
+        emissiveIntensity: 2.0,
+        threshold: 0.40,
+        thresholdMax: 0.86,
+        absorption: 1.0,
+        steps: 36,
+        shadowSteps: 4,
+        windSpeed: 0.08,
+        windDirection: [0.1, 0.0, 0.1],
+        blending: 'additive',
       }
     }
   }
@@ -654,6 +1061,7 @@ export const MaterialPanel: React.FC = () => {
   const {
     project,
     updateMaterial,
+    updateObject,
     addMaterial,
     removeMaterial,
     selectedObjectId,
@@ -664,6 +1072,7 @@ export const MaterialPanel: React.FC = () => {
     closeMaterialStudio,
     materialStudioMaterialId,
     setMaterialStudioMaterialId,
+    updateEnvironment,
   } = useStore();
   const { materials, objects } = project;
   
@@ -671,7 +1080,7 @@ export const MaterialPanel: React.FC = () => {
   const activeMaterialId = selectedObject?.materialId;
   
   const [editingMaterialId, setEditingMaterialId] = useState<string | null>(materialStudioMaterialId || activeMaterialId || null);
-  const [activeTab, setActiveTab] = useState<'library' | 'cloud' | 'textures' | 'edit'>(
+  const [activeTab, setActiveTab] = useState<'library' | 'textures' | 'edit'>(
     (isMaterialStudioOpen || (materialStudioMaterialId || activeMaterialId)) ? 'edit' : 'library'
   );
   const [showPBRImport, setShowPBRImport] = useState(false);
@@ -686,6 +1095,27 @@ export const MaterialPanel: React.FC = () => {
   const [textureCategory, setTextureCategory] = useState<string>('all');
   const [textureSlotTarget, setTextureSlotTarget] = useState<'map' | 'normalMap' | 'roughnessMap' | 'metalnessMap' | 'aoMap' | 'displacementMap'>('map');
   const [copiedNotification, setCopiedNotification] = useState<string | null>(null);
+
+  // Estados de control avanzado de Mapeo UV y Color de Albedo
+  const [isTilingLinked, setIsTilingLinked] = useState<boolean>(true);
+  const [isOffsetLinked, setIsOffsetLinked] = useState<boolean>(false);
+  const [albedoAdjustOpen, setAlbedoAdjustOpen] = useState<boolean>(false);
+  const [albedoColorAdjustments, setAlbedoColorAdjustments] = useState<AlbedoColorAdjustments>({
+    tintColor: '#ffffff',
+    tintAmount: 0,
+    hueShift: 0,
+    saturation: 1,
+    brightness: 1,
+    contrast: 1,
+    invert: false,
+  });
+  const [isProcessingAlbedo, setIsProcessingAlbedo] = useState<boolean>(false);
+  const originalAlbedoBackup = useRef<Map<string, string>>(new Map());
+
+  // Estados para modales de edición avanzada de mapas (Procedimental / Editor de Mapa)
+  const [activeEditorMapKey, setActiveEditorMapKey] = useState<keyof MaterialData | null>(null);
+  const [activeEditorTitle, setActiveEditorTitle] = useState<string>('');
+  const [proceduralModalConfig, setProceduralModalConfig] = useState<ProceduralConfig | null>(null);
 
   const [proceduralThumbnails, setProceduralThumbnails] = useState<Map<string, string>>(() => generateAllThumbnails());
 
@@ -704,12 +1134,101 @@ export const MaterialPanel: React.FC = () => {
     }
   }, [materialStudioMaterialId, activeMaterialId, isMaterialStudioOpen]);
 
+  // Auto-Recovery & Extraction for Imported Objects without MaterialId or missing in project.materials
+  useEffect(() => {
+    if (!selectedObject) return;
+
+    // 1. If object already has a valid materialId in project.materials
+    if (selectedObject.materialId) {
+      const existing = materials.find(m => m.id === selectedObject.materialId);
+      if (existing) {
+        if (editingMaterialId !== selectedObject.materialId) {
+          setEditingMaterialId(selectedObject.materialId);
+        }
+        return;
+      }
+    }
+
+    // 2. If object has meshData (GLTF/GLB/OBJ), auto-extract its PBR materials
+    if (selectedObject.meshData?.data) {
+      extractPBRMaterialFromGLTFOrOBJ(selectedObject.meshData, selectedObject.name || 'Modelo').then((extracted) => {
+        if (extracted && extracted.length > 0) {
+          const newMaterials = [...materials];
+          extracted.forEach((mat) => {
+            if (!newMaterials.some(m => m.id === mat.id)) {
+              newMaterials.push(mat);
+            }
+          });
+          const primaryMat = extracted[0];
+          updateObject(selectedObject.id, {
+            materialId: primaryMat.id,
+            material: { ...primaryMat },
+            color: primaryMat.color || selectedObject.color || '#ffffff',
+          });
+          useStore.getState().setProject({ ...project, materials: newMaterials });
+          setEditingMaterialId(primaryMat.id);
+        }
+      });
+    } else if (selectedObject.material && (selectedObject.material.map || selectedObject.material.roughnessMap || selectedObject.material.normalMap || selectedObject.material.transmission)) {
+      // 3. If object has inline material with textures or PBR properties
+      const newId = 'mat_obj_' + selectedObject.id;
+      const inlineMat: MaterialData = {
+        color: selectedObject.material.color || '#ffffff',
+        roughness: selectedObject.material.roughness ?? 0.5,
+        metalness: selectedObject.material.metalness ?? 0.0,
+        emissive: selectedObject.material.emissive || '#000000',
+        emissiveIntensity: selectedObject.material.emissiveIntensity ?? 1.0,
+        opacity: selectedObject.material.opacity ?? 1.0,
+        transparent: selectedObject.material.transparent ?? false,
+        ...selectedObject.material,
+        id: newId,
+        name: `Material ${selectedObject.name || 'Objeto'}`,
+        category: 'imported',
+      };
+      const newMaterials = [...materials, inlineMat];
+      updateObject(selectedObject.id, { materialId: newId });
+      useStore.getState().setProject({ ...project, materials: newMaterials });
+      setEditingMaterialId(newId);
+    }
+  }, [selectedObject?.id, selectedObject?.materialId, selectedObject?.meshData]);
+
+  const handleReextractPBRMapsFromSelectedObject = async () => {
+    if (!selectedObject) return;
+    if (selectedObject.meshData?.data) {
+      const extracted = await extractPBRMaterialFromGLTFOrOBJ(selectedObject.meshData, selectedObject.name || 'Modelo');
+      if (extracted && extracted.length > 0) {
+        const newMaterials = [...materials];
+        extracted.forEach((mat) => {
+          const idx = newMaterials.findIndex(m => m.id === mat.id || m.name === mat.name);
+          if (idx >= 0) {
+            newMaterials[idx] = mat;
+          } else {
+            newMaterials.push(mat);
+          }
+        });
+        const primaryMat = extracted[0];
+        updateObject(selectedObject.id, {
+          materialId: primaryMat.id,
+          material: { ...primaryMat },
+        });
+        useStore.getState().setProject({ ...project, materials: newMaterials });
+        setEditingMaterialId(primaryMat.id);
+        setCopiedNotification('¡Mapas PBR extraídos y sincronizados!');
+        setTimeout(() => setCopiedNotification(null), 3000);
+      }
+    } else {
+      setCopiedNotification('Este objeto no tiene mallas GLTF/OBJ embebidas');
+      setTimeout(() => setCopiedNotification(null), 2500);
+    }
+  };
+
   const currentMaterialId = editingMaterialId || materialStudioMaterialId || activeMaterialId;
   const activeMaterial = materials.find(m => m.id === currentMaterialId);
 
   const handleSelectProceduralMaterial = (pMat: ProceduralMaterial) => {
+    const isVol = Boolean(pMat.isVolumetric || pMat.volumetric || pMat.category === 'gaseous');
     const defaultFilters = { rust: 0, scratches: 0, dirt: 0 };
-    const maps = generateMaterial(pMat.id, 512, 512, defaultFilters);
+    const maps = isVol ? null : generateMaterial(pMat.id, 512, 512, defaultFilters);
     const newId = 'mat_' + pMat.id + '_' + Math.random().toString(36).substr(2, 6);
     const d = pMat.defaults;
 
@@ -718,13 +1237,35 @@ export const MaterialPanel: React.FC = () => {
       name: pMat.name,
       proceduralBaseId: pMat.id,
       filters: defaultFilters,
-      color: '#ffffff',
-      map: maps?.albedo,
-      normalMap: maps?.normal,
-      roughnessMap: maps?.roughness,
-      metalnessMap: maps?.metallic,
-      aoMap: maps?.ao,
-      displacementMap: maps?.displacement,
+      color: d.color ?? (pMat.volumetric?.color || '#ffffff'),
+      emissive: d.emissive ?? (isVol ? (pMat.volumetric?.secondaryColor || '#fbbf24') : '#000000'),
+      emissiveIntensity: d.emissiveIntensity ?? (isVol ? (pMat.volumetric?.emissiveIntensity ?? 2.0) : 1),
+      isVolumetric: isVol,
+      volumetric: isVol ? {
+        enabled: true,
+        mode: pMat.volumetric?.mode || (pMat.id.includes('fire') ? 'fire' : pMat.id.includes('smoke') ? 'smoke' : pMat.id.includes('ice') ? 'ice' : pMat.id.includes('cloud') || pMat.id.includes('storm') ? 'cloud' : 'plasma'),
+        density: pMat.volumetric?.density ?? 2.5,
+        scale: pMat.volumetric?.scale ?? 2.2,
+        lightIntensity: pMat.volumetric?.lightIntensity ?? 1.5,
+        color: pMat.volumetric?.color || d.color || '#ffffff',
+        secondaryColor: pMat.volumetric?.secondaryColor || d.emissive || '#fbbf24',
+        emissiveIntensity: pMat.volumetric?.emissiveIntensity ?? (d.emissiveIntensity ?? 2.0),
+        threshold: pMat.volumetric?.threshold ?? 0.22,
+        thresholdMax: pMat.volumetric?.thresholdMax ?? 0.75,
+        absorption: pMat.volumetric?.absorption ?? 1.6,
+        steps: pMat.volumetric?.steps ?? 36,
+        shadowSteps: pMat.volumetric?.shadowSteps ?? 4,
+        windSpeed: pMat.volumetric?.windSpeed ?? 0.12,
+        windDirection: pMat.volumetric?.windDirection ?? [0.0, 1.0, 0.0],
+        blending: pMat.volumetric?.blending ?? (pMat.id.includes('fire') || pMat.id.includes('plasma') || pMat.id.includes('aurora') || pMat.id.includes('nebula') ? 'additive' : 'normal'),
+        turbulentFlame: pMat.volumetric?.turbulentFlame ?? pMat.id.includes('fire'),
+      } : undefined,
+      map: isVol ? undefined : maps?.albedo,
+      normalMap: isVol ? undefined : maps?.normal,
+      roughnessMap: isVol ? undefined : maps?.roughness,
+      metalnessMap: isVol ? undefined : maps?.metallic,
+      aoMap: isVol ? undefined : maps?.ao,
+      displacementMap: isVol ? undefined : maps?.displacement,
       roughness: d.roughness ?? 0.5,
       metalness: d.metalness ?? 0.0,
       normalScale: d.normalScale ?? 1.0,
@@ -741,10 +1282,21 @@ export const MaterialPanel: React.FC = () => {
       transmission: d.transmission ?? 0.0,
       ior: d.ior ?? 1.5,
       thickness: d.thickness ?? 0.0,
-      emissive: '#000000',
-      emissiveIntensity: 1,
+      attenuationColor: d.attenuationColor,
+      attenuationDistance: d.attenuationDistance,
+      dispersion: d.dispersion ?? 0.0,
+      isIce: pMat.category === 'ice_snow' || pMat.id.startsWith('ice_'),
+      iceConfig: (pMat.category === 'ice_snow' || pMat.id.startsWith('ice_')) ? {
+        enabled: true,
+        surfaceWarp: 0.05,
+        cloudDensity: pMat.id === 'ice_glacial' ? 1.5 : pMat.id === 'ice_cracked' ? 1.2 : 0.8,
+        cloudColor: '#e0f2fe',
+        cloudScale: 2.8,
+        frostIntensity: pMat.id === 'ice_frosted' ? 1.0 : 0.85,
+        crackIntensity: pMat.id === 'ice_cracked' ? 1.2 : 0.9,
+      } : undefined,
       opacity: 1,
-      transparent: (d.transmission ?? 0) > 0,
+      transparent: isVol || (d.transmission ?? 0) > 0,
     };
 
     addMaterial(newMat);
@@ -804,6 +1356,166 @@ export const MaterialPanel: React.FC = () => {
       aoMap: customMaps.ao,
       displacementMap: customMaps.displacement,
     });
+  };
+
+  const handleBatchFiltersChange = (newFilters: MaterialFilters) => {
+    if (!activeMaterial) return;
+    if (activeMaterial.proceduralBaseId) {
+      const maps = generateMaterial(activeMaterial.proceduralBaseId, 512, 512, newFilters);
+      if (maps) {
+        updateMaterial(activeMaterial.id, {
+          filters: newFilters,
+          map: maps.albedo,
+          normalMap: maps.normal,
+          roughnessMap: maps.roughness,
+          metalnessMap: maps.metallic,
+          aoMap: maps.ao,
+          displacementMap: maps.displacement,
+        });
+        return;
+      }
+    }
+
+    const customMaps = applyImperfectionsToCustomMaps({
+      albedo: activeMaterial.map,
+      normal: activeMaterial.normalMap,
+      roughness: activeMaterial.roughnessMap,
+      metallic: activeMaterial.metalnessMap,
+      ao: activeMaterial.aoMap,
+      displacement: activeMaterial.displacementMap,
+      baseColorHex: activeMaterial.color,
+      baseRoughness: activeMaterial.roughness,
+      baseMetalness: activeMaterial.metalness,
+    }, newFilters);
+
+    updateMaterial(activeMaterial.id, {
+      filters: newFilters,
+      map: customMaps.albedo,
+      normalMap: customMaps.normal,
+      roughnessMap: customMaps.roughness,
+      metalnessMap: customMaps.metallic,
+      aoMap: customMaps.ao,
+      displacementMap: customMaps.displacement,
+    });
+  };
+
+  const onSelectTextureFile = useCallback((file: File, type: keyof MaterialData) => {
+    if (!activeMaterial) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const url = event.target?.result as string;
+      updateMaterial(activeMaterial.id, { [type]: url });
+      setCopiedNotification(`¡Textura cargada correctamente en ${String(type)}!`);
+      setTimeout(() => setCopiedNotification(null), 2500);
+    };
+    reader.readAsDataURL(file);
+  }, [activeMaterial, updateMaterial]);
+
+  const handleApplyAlbedoColor = async () => {
+    if (!activeMaterial || !activeMaterial.map) return;
+    if (!originalAlbedoBackup.current.has(activeMaterial.id)) {
+      originalAlbedoBackup.current.set(activeMaterial.id, activeMaterial.map);
+    }
+    setIsProcessingAlbedo(true);
+    try {
+      const baseMapToProcess = originalAlbedoBackup.current.get(activeMaterial.id) || activeMaterial.map;
+      const updatedDataUrl = await adjustTextureColors(baseMapToProcess, albedoColorAdjustments);
+      updateMaterial(activeMaterial.id, { map: updatedDataUrl });
+      setCopiedNotification('¡Ajustes de color aplicados al mapa Albedo!');
+      setTimeout(() => setCopiedNotification(null), 2500);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsProcessingAlbedo(false);
+    }
+  };
+
+  const handleResetAlbedoColor = () => {
+    if (!activeMaterial) return;
+    const original = originalAlbedoBackup.current.get(activeMaterial.id);
+    if (original) {
+      updateMaterial(activeMaterial.id, { map: original });
+    }
+    setAlbedoColorAdjustments({
+      tintColor: '#ffffff',
+      tintAmount: 0,
+      hueShift: 0,
+      saturation: 1,
+      brightness: 1,
+      contrast: 1,
+      invert: false,
+    });
+    setCopiedNotification('¡Mapa Albedo restaurado a su color original!');
+    setTimeout(() => setCopiedNotification(null), 2500);
+  };
+
+  const handleModifyMap = (slotKey: string, mapProperty: keyof MaterialData) => {
+    if (!activeMaterial) return;
+
+    // Abrir siempre el editor de mapa 2D interactivo con herramientas de color, tintes y tonalidad
+    setActiveEditorMapKey(mapProperty);
+    setActiveEditorTitle(slotKey);
+  };
+
+  const handleGeneratePBRFromSource = async (sourceUrl?: string) => {
+    if (!activeMaterial || !sourceUrl) {
+      setCopiedNotification('No hay imagen en esta ranura para generar los mapas PBR');
+      setTimeout(() => setCopiedNotification(null), 2000);
+      return;
+    }
+    try {
+      setCopiedNotification('⚡ Procesando imagen y sintetizando mapas PBR...');
+      const pbrSet = await generateFullPBRMapsFromSource(sourceUrl);
+      updateMaterial(activeMaterial.id, {
+        normalMap: pbrSet.normalMap || activeMaterial.normalMap,
+        roughnessMap: pbrSet.roughnessMap || activeMaterial.roughnessMap,
+        aoMap: pbrSet.aoMap || activeMaterial.aoMap,
+        displacementMap: pbrSet.displacementMap || activeMaterial.displacementMap,
+        metalnessMap: pbrSet.metalnessMap || activeMaterial.metalnessMap,
+      });
+      setCopiedNotification('✓ ¡Mapas Normal, Rugosidad, AO y Altura generados con éxito!');
+      setTimeout(() => setCopiedNotification(null), 3500);
+    } catch (err) {
+      console.error(err);
+      setCopiedNotification('Error al generar mapas PBR');
+      setTimeout(() => setCopiedNotification(null), 2500);
+    }
+  };
+
+  const handleApplyTilingToAllMaps = () => {
+    if (!activeMaterial) return;
+    const currentRepeat = activeMaterial.mapRepeat ?? [1, 1];
+    const currentOffset = activeMaterial.mapOffset ?? [0, 0];
+    const currentRot = activeMaterial.mapRotation ?? 0;
+    const rep: [number, number] = Array.isArray(currentRepeat) ? [currentRepeat[0], currentRepeat[1]] : [currentRepeat, currentRepeat];
+    const off: [number, number] = Array.isArray(currentOffset) ? [currentOffset[0], currentOffset[1]] : [currentOffset, currentOffset];
+
+    updateMaterial(activeMaterial.id, {
+      mapRepeat: [rep[0], rep[1]],
+      mapOffset: [off[0], off[1]],
+      mapRotation: currentRot,
+    });
+    setCopiedNotification('¡Transformación UV (Tiling / Offset / Rotación) aplicada a TODOS los mapas!');
+    setTimeout(() => setCopiedNotification(null), 3000);
+  };
+
+  const handleClearAllMaps = () => {
+    if (!activeMaterial) return;
+    updateMaterial(activeMaterial.id, {
+      map: undefined,
+      normalMap: undefined,
+      roughnessMap: undefined,
+      metalnessMap: undefined,
+      aoMap: undefined,
+      displacementMap: undefined,
+      emissiveMap: undefined,
+      alphaMap: undefined,
+      transmissionMap: undefined,
+      anisotropyMap: undefined,
+      ormMap: undefined,
+    });
+    setCopiedNotification('¡Todas las ranuras de mapas han sido vaciadas!');
+    setTimeout(() => setCopiedNotification(null), 2500);
   };
 
   const handleExportMaterial = () => {
@@ -872,22 +1584,37 @@ export const MaterialPanel: React.FC = () => {
     e.preventDefault();
     if (!activeMaterial) return;
 
-    const file = e.dataTransfer.files[0];
+    // 1. Check if a texture URL was dragged from the Textures tab
+    const textureUrl = e.dataTransfer.getData('application/x-texture-url') || e.dataTransfer.getData('text/plain');
+    if (textureUrl && (textureUrl.startsWith('data:') || textureUrl.startsWith('http') || textureUrl.startsWith('blob:') || textureUrl.startsWith('/'))) {
+      updateMaterial(activeMaterial.id, { [type]: textureUrl });
+      setCopiedNotification(`¡Textura asignada a ${String(type)}!`);
+      setTimeout(() => setCopiedNotification(null), 2500);
+      return;
+    }
+
+    // 2. Check if a file was dropped from the OS
+    const file = e.dataTransfer.files?.[0];
     if (!file || !file.type.startsWith('image/')) return;
 
     const reader = new FileReader();
     reader.onload = (event) => {
       const url = event.target?.result as string;
       updateMaterial(activeMaterial.id, { [type]: url });
+      setCopiedNotification(`¡Textura cargada en ${String(type)}!`);
+      setTimeout(() => setCopiedNotification(null), 2500);
     };
     reader.readAsDataURL(file);
   }, [activeMaterial, updateMaterial]);
 
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     presets: true,
+    volumetric: true,
     basic: true,
     normal: true,
+    porosity: true,
     glass: true,
+    ice_nodes: true,
     clearcoat: false,
     sheen: false,
     anisotropy: false,
@@ -1050,95 +1777,6 @@ export const MaterialPanel: React.FC = () => {
   }, [selectedObjectId, objects, addMaterial, assignMaterialToObjects, setEditingMaterialId, updateMaterial, textureSlotTarget]);
 
 
-  if (activeTab === 'cloud') {
-    return (
-      <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
-        {/* ── SELECTOR SUPERIOR DE PESTAÑAS ── */}
-        <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
-          <button
-            onClick={() => setActiveTab('library')}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
-          >
-            <Sparkles size={12} />
-            <span className="hidden sm:inline">Materiales</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('cloud')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-sky-600 text-white shadow-md shadow-sky-600/30"
-          >
-            <Cloud size={12} />
-            <span className="hidden sm:inline">Nube</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('textures')}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
-          >
-            <ImageIcon size={12} />
-            <span className="hidden sm:inline">Texturas</span>
-          </button>
-          <button
-            onClick={() => {
-              if (activeMaterial) setActiveTab('edit');
-              else if (materials.length > 0) { setEditingMaterialId(materials[0].id); setActiveTab('edit'); }
-              else handleCreateMaterial();
-            }}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"}
-          >
-            <Settings size={12} />
-            <span className="hidden sm:inline">Editor PBR</span>
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 flex flex-col gap-4">
-          <div className="p-4 bg-sky-900/20 border border-sky-500/20 rounded-xl flex items-center gap-4">
-            <div className="p-3 bg-sky-500/20 text-sky-400 rounded-lg">
-              <Cloud size={24} />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-sky-300">Substance 3D Library</h3>
-              <p className="text-xs text-zinc-400 mt-1 leading-relaxed">Explora materiales PBR inspirados en Adobe Substance 3D. Selecciona para importar a tu proyecto local.</p>
-            </div>
-          </div>
-          
-          <div className="grid grid-cols-2 gap-3">
-            {[
-              { id: 'sub_gold', name: 'Oro Martillado', desc: 'Metal precioso con relieve', color: '#ffb833', type: 'metal' },
-              { id: 'sub_carbon', name: 'Fibra de Carbono', desc: 'Patrón trenzado industrial', color: '#1a1a1a', type: 'synthetic' },
-              { id: 'sub_leather', name: 'Cuero Envejecido', desc: 'Textura orgánica realista', color: '#5c3a21', type: 'organic' },
-              { id: 'sub_wood', name: 'Nogal Barnizado', desc: 'Madera fina con anillos', color: '#3d2314', type: 'wood' },
-              { id: 'sub_concrete', name: 'Hormigón Armado', desc: 'Concreto gris poroso', color: '#888888', type: 'stone' },
-              { id: 'sub_ceramic', name: 'Cerámica Esmaltada', desc: 'Superficie vítrea brillante', color: '#f0f0f0', type: 'stone' }
-            ].map(mat => (
-              <div key={mat.id} className="p-3 border border-white/5 bg-zinc-900 rounded-xl hover:bg-zinc-800 transition-colors flex flex-col items-center text-center gap-2 group cursor-pointer" onClick={() => {
-                const newId = mat.id + '_' + Math.random().toString(36).substr(2,6);
-                addMaterial({
-                  id: newId,
-                  name: mat.name,
-                  color: mat.color,
-                  roughness: mat.type === 'metal' ? 0.2 : 0.6,
-                  metalness: mat.type === 'metal' ? 1.0 : 0.0,
-                  emissive: '#000000',
-                  emissiveIntensity: 0,
-                  opacity: 1,
-                  transparent: false,
-                  uvwMapping: 'BOX'
-                });
-                setActiveTab('library');
-              }}>
-                <div className="w-16 h-16 rounded-full border-2 border-white/10 shadow-lg shadow-black/50 group-hover:scale-110 transition-transform duration-300" style={{backgroundColor: mat.color}} />
-                <div>
-                  <h4 className="text-[11px] font-bold text-zinc-200">{mat.name}</h4>
-                  <p className="text-[9px] text-zinc-500 line-clamp-2 mt-0.5 leading-tight">{mat.desc}</p>
-                </div>
-                <div className="mt-2 px-3 py-1 text-[9px] font-bold bg-sky-500/20 text-sky-300 rounded hover:bg-sky-500 hover:text-white transition-colors w-full">Descargar</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   if (activeTab === 'library') {
     return (
       <div className="flex flex-col flex-1 min-h-0 bg-[#141417] text-zinc-300">
@@ -1162,34 +1800,11 @@ export const MaterialPanel: React.FC = () => {
             <span>Materiales</span>
           </button>
           <button
-            onClick={() => setActiveTab('cloud')}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
-          >
-            <Cloud size={12} />
-            <span className="hidden sm:inline">Nube</span>
-          </button>
-          <button
             onClick={() => setActiveTab('textures')}
             className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
-          </button>
-          <button
-            onClick={() => {
-              if (activeMaterial) {
-                setActiveTab('edit');
-              } else if (materials.length > 0) {
-                setEditingMaterialId(materials[0].id);
-                setActiveTab('edit');
-              } else {
-                handleCreateMaterial();
-              }
-            }}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
-          >
-            <Settings size={12} />
-            <span>Editor PBR</span>
           </button>
         </div>
         
@@ -1294,6 +1909,22 @@ export const MaterialPanel: React.FC = () => {
               <span className="opacity-60 text-[9px]">({materials.length})</span>
             </button>
 
+            {/* Categoría de Materiales Importados de Modelos 3D */}
+            <button
+              onClick={() => setSelectedCategory('imported')}
+              className={`px-2.5 py-1 rounded-lg font-medium whitespace-nowrap transition-all flex items-center gap-1 ${
+                selectedCategory === 'imported'
+                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                  : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <span>📦</span>
+              <span>Importados PBR</span>
+              <span className="opacity-60 text-[9px]">
+                ({materials.filter(m => m.category === 'imported' || m.id.startsWith('mat_imp_') || m.id.startsWith('mat_obj_') || Boolean(m.map && !m.proceduralBaseId)).length})
+              </span>
+            </button>
+
             {MATERIAL_CATEGORIES.map(cat => {
               const count = MATERIAL_LIBRARY.filter(m => m.category === cat.id).length;
               return (
@@ -1316,10 +1947,95 @@ export const MaterialPanel: React.FC = () => {
         </div>
 
         {/* ── CUADRÍCULA DE MINIATURAS CON SCROLL SEGURO ── */}
-        <div className="flex-1 overflow-y-auto p-3 custom-scrollbar min-h-0 min-w-0">
+        <div className="flex-1 overflow-y-auto p-3 custom-scrollbar min-h-0 min-w-0 space-y-3">
+          {/* Banner de Material Vinculado al Modelo Seleccionado */}
+          {selectedObject && (
+            <div className="p-3 bg-gradient-to-r from-indigo-950/40 via-purple-950/30 to-zinc-900/50 border border-indigo-500/30 rounded-xl space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Box size={14} className="text-indigo-400 flex-shrink-0" />
+                  <span className="text-xs font-bold text-white truncate">
+                    {selectedObject.name || 'Objeto Seleccionado'}
+                  </span>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30 flex-shrink-0">
+                  {activeMaterial ? 'Material PBR Activo' : 'Sin Material Asignado'}
+                </span>
+              </div>
+              
+              {activeMaterial ? (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <MaterialThumbnail material={activeMaterial} size={32} />
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-indigo-200 truncate">{activeMaterial.name}</p>
+                      <div className="flex items-center gap-1.5 text-[9px] text-zinc-400 font-medium">
+                        {activeMaterial.map && <span className="text-emerald-400">Color ✓</span>}
+                        {activeMaterial.normalMap && <span className="text-cyan-400">Normal ✓</span>}
+                        {activeMaterial.roughnessMap && <span className="text-amber-400">Rough ✓</span>}
+                        {(activeMaterial.transmission ?? 0) > 0 && <span className="text-sky-300">Vidrio/Hielo ✓</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {selectedObject.meshData && (
+                      <button
+                        onClick={() => {
+                          updateObject(selectedObject.id, {
+                            materialId: undefined,
+                            material: undefined,
+                            color: '#ffffff'
+                          });
+                          setEditingMaterialId(null);
+                          setCopiedNotification('¡Material restaurado al PBR original del modelo!');
+                          setTimeout(() => setCopiedNotification(null), 2500);
+                        }}
+                        className="px-2 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-lg text-[10px] font-bold transition-all border border-zinc-700"
+                        title="Restaurar material nativo del archivo 3D"
+                      >
+                        Restaurar Nativo
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        setEditingMaterialId(activeMaterial.id);
+                        openMaterialStudio(activeMaterial.id);
+                      }}
+                      className="p-1.5 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 hover:text-white rounded-lg text-[10px] font-bold transition-all border border-indigo-500/30"
+                      title="Abrir en Visor 3D"
+                    >
+                      <Sparkles size={13} />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditingMaterialId(activeMaterial.id);
+                        setActiveTab('edit');
+                      }}
+                      className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold transition-all shadow"
+                    >
+                      Editar
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <p className="text-[11px] text-zinc-400">
+                    {selectedObject.meshData ? 'Usando materiales y texturas nativas del modelo 3D' : 'Extraer mapas y propiedades PBR'}
+                  </p>
+                  <button
+                    onClick={handleReextractPBRMapsFromSelectedObject}
+                    className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold transition-all flex items-center gap-1"
+                  >
+                    <RefreshCw size={11} /> Extraer PBR
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2.5 pb-8">
             {/* Materiales Procedimentales de la Librería */}
-            {selectedCategory !== 'project' && MATERIAL_LIBRARY
+            {selectedCategory !== 'project' && selectedCategory !== 'imported' && MATERIAL_LIBRARY
               .filter(pMat => {
                 if (selectedCategory !== 'all' && pMat.category !== selectedCategory) return false;
                 if (searchQuery && !pMat.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
@@ -1358,45 +2074,55 @@ export const MaterialPanel: React.FC = () => {
               })
             }
 
-            {/* Materiales en el Proyecto Actual */}
-            {(selectedCategory === 'all' || selectedCategory === 'project') && materials
+            {/* Materiales en el Proyecto Actual / Importados */}
+            {(selectedCategory === 'all' || selectedCategory === 'project' || selectedCategory === 'imported') && materials
               .filter(mat => {
+                const isImported = mat.category === 'imported' || mat.id.startsWith('mat_imp_') || mat.id.startsWith('mat_obj_') || Boolean(mat.map && !mat.proceduralBaseId);
+                if (selectedCategory === 'imported' && !isImported) return false;
                 if (searchQuery && !mat.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
                 return true;
               })
-              .map(mat => (
-                <button
-                  key={mat.id}
-                  onClick={() => {
-                    const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
-                    if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
-                    setEditingMaterialId(mat.id);
-                    setMaterialStudioMaterialId(mat.id);
-                    openMaterialStudio(mat.id);
-                    setActiveTab('edit');
-                  }}
-                  className={`group relative flex flex-col items-center p-2 rounded-xl border transition-all text-left overflow-hidden min-h-[96px] ${
-                    activeMaterialId === mat.id 
-                      ? 'border-indigo-500 bg-indigo-500/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]' 
-                      : 'border-white/5 bg-zinc-900/40 hover:border-white/20'
-                  }`}
-                >
-                  <div className="relative">
-                    <MaterialThumbnail material={mat} size={48} />
-                    {activeMaterialId === mat.id && (
-                      <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-indigo-500 border-2 border-zinc-900 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
-                    )}
-                  </div>
+              .map(mat => {
+                const isImported = mat.category === 'imported' || mat.id.startsWith('mat_imp_') || mat.id.startsWith('mat_obj_') || Boolean(mat.map && !mat.proceduralBaseId);
+                return (
+                  <button
+                    key={mat.id}
+                    onClick={() => {
+                      const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
+                      if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
+                      setEditingMaterialId(mat.id);
+                      setMaterialStudioMaterialId(mat.id);
+                      openMaterialStudio(mat.id);
+                      setActiveTab('edit');
+                    }}
+                    className={`group relative flex flex-col items-center p-2 rounded-xl border transition-all text-left overflow-hidden min-h-[96px] ${
+                      activeMaterialId === mat.id 
+                        ? 'border-indigo-500 bg-indigo-500/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]' 
+                        : 'border-white/5 bg-zinc-900/40 hover:border-white/20'
+                    }`}
+                  >
+                    <div className="relative">
+                      <MaterialThumbnail material={mat} size={48} />
+                      {activeMaterialId === mat.id && (
+                        <div className="absolute -top-1 -right-1 w-3 h-3 rounded-full bg-indigo-500 border-2 border-zinc-900 shadow-[0_0_8px_rgba(99,102,241,0.8)]" />
+                      )}
+                      {isImported && (
+                        <div className="absolute -bottom-1 -left-1 px-1 py-0.2 bg-purple-600/90 text-[8px] font-bold text-white rounded shadow">
+                          PBR
+                        </div>
+                      )}
+                    </div>
 
-                  <span className="mt-1.5 text-[10px] font-semibold text-zinc-200 truncate w-full text-center px-1">
-                    {mat.name}
-                  </span>
+                    <span className="mt-1.5 text-[10px] font-semibold text-zinc-200 truncate w-full text-center px-1">
+                      {mat.name}
+                    </span>
 
-                  <span className="text-[9px] text-indigo-400 font-medium">
-                    En Proyecto
-                  </span>
-                </button>
-              ))
+                    <span className="text-[9px] text-indigo-400 font-medium">
+                      {isImported ? '📦 Importado' : 'En Proyecto'}
+                    </span>
+                  </button>
+                );
+              })
             }
           </div>
         </div>
@@ -1438,34 +2164,11 @@ export const MaterialPanel: React.FC = () => {
             <span>Materiales</span>
           </button>
           <button
-            onClick={() => setActiveTab('cloud')}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
-          >
-            <Cloud size={12} />
-            <span className="hidden sm:inline">Nube</span>
-          </button>
-          <button
             onClick={() => setActiveTab('textures')}
             className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-emerald-600 text-white shadow-md shadow-emerald-600/30"
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
-          </button>
-          <button
-            onClick={() => {
-              if (activeMaterial) {
-                setActiveTab('edit');
-              } else if (materials.length > 0) {
-                setEditingMaterialId(materials[0].id);
-                setActiveTab('edit');
-              } else {
-                handleCreateMaterial();
-              }
-            }}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
-          >
-            <Settings size={12} />
-            <span>Editor PBR</span>
           </button>
         </div>
 
@@ -1703,25 +2406,11 @@ export const MaterialPanel: React.FC = () => {
             <span>Materiales</span>
           </button>
           <button
-            onClick={() => setActiveTab('cloud')}
-            className={"flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all " + (activeTab === 'cloud' ? "bg-sky-600 text-white shadow-md shadow-sky-600/30" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60")}
-          >
-            <Cloud size={12} />
-            <span className="hidden sm:inline">Nube</span>
-          </button>
-          <button
             onClick={() => setActiveTab('textures')}
             className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('edit')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-          >
-            <Settings size={12} />
-            <span>Editor PBR</span>
           </button>
         </div>
 
@@ -1794,13 +2483,6 @@ export const MaterialPanel: React.FC = () => {
         >
           <ImageIcon size={12} />
           <span>Texturas</span>
-        </button>
-        <button
-          onClick={() => setActiveTab('edit')}
-          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
-        >
-          <Settings size={12} />
-          <span>Editor PBR</span>
         </button>
       </div>
 
@@ -1909,6 +2591,242 @@ export const MaterialPanel: React.FC = () => {
           </div>
         </div>
 
+        {/* ── SECCIÓN VOLUMÉTRICA 3D (RAYMARCHING: FUEGO, GAS, PLASMA, HUMO, HIELO) ── */}
+        <div className="bg-gradient-to-br from-amber-950/30 via-zinc-900/60 to-cyan-950/30 rounded-xl border border-amber-500/30 overflow-hidden shadow-lg">
+          <button 
+            onClick={() => toggleSection('volumetric')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-amber-300">
+              <span className="text-sm">🔥</span>
+              <span>Propiedades Volumétricas 3D (Raymarching)</span>
+              {activeMaterial.isVolumetric && (
+                <span className="text-[8px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded border border-amber-500/40">ACTIVO</span>
+              )}
+            </div>
+            {openSections.volumetric ? <ChevronDown size={14} className="text-amber-400" /> : <ChevronRight size={14} className="text-amber-400" />}
+          </button>
+
+          {openSections.volumetric && (
+            <div className="p-3 pt-1 space-y-3 border-t border-white/5 bg-black/20">
+              {/* Toggle Volumetric Mode */}
+              <div className="flex items-center justify-between bg-white/5 p-2 rounded-lg border border-white/5">
+                <div>
+                  <span className="text-[10px] font-bold text-zinc-200">Modo Volumétrico Raymarching</span>
+                  <p className="text-[8px] text-zinc-400">Renderizado 3D real de volumen en shader (sin caras planas)</p>
+                </div>
+                <button
+                  onClick={() => {
+                    const isVol = !activeMaterial.isVolumetric;
+                    updateMaterial(activeMaterial.id, {
+                      isVolumetric: isVol,
+                      volumetric: {
+                        enabled: isVol,
+                        mode: activeMaterial.volumetric?.mode || 'cloud',
+                        density: activeMaterial.volumetric?.density ?? 2.0,
+                        scale: activeMaterial.volumetric?.scale ?? 2.0,
+                        lightIntensity: activeMaterial.volumetric?.lightIntensity ?? 1.5,
+                        color: activeMaterial.color || '#ffffff',
+                        secondaryColor: activeMaterial.volumetric?.secondaryColor || '#fbbf24',
+                        emissiveIntensity: activeMaterial.volumetric?.emissiveIntensity ?? 2.0,
+                        threshold: activeMaterial.volumetric?.threshold ?? 0.35,
+                        thresholdMax: activeMaterial.volumetric?.thresholdMax ?? 0.80,
+                        absorption: activeMaterial.volumetric?.absorption ?? 2.0,
+                        steps: activeMaterial.volumetric?.steps ?? 36,
+                        shadowSteps: activeMaterial.volumetric?.shadowSteps ?? 6,
+                        windSpeed: activeMaterial.volumetric?.windSpeed ?? 0.15,
+                        windDirection: activeMaterial.volumetric?.windDirection ?? [0.0, 1.0, 0.0],
+                        blending: activeMaterial.volumetric?.blending ?? 'normal',
+                      }
+                    });
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase transition-all ${
+                    activeMaterial.isVolumetric 
+                      ? 'bg-amber-500 text-black font-bold shadow-md shadow-amber-500/20' 
+                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {activeMaterial.isVolumetric ? 'Activado' : 'Desactivado'}
+                </button>
+              </div>
+
+              {activeMaterial.isVolumetric && (
+                <>
+                  {/* Selector de Tipo de Volumen */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] text-amber-300 font-bold uppercase tracking-wider">Tipo de Medio Volumétrico</label>
+                    <div className="grid grid-cols-6 gap-1">
+                      {[
+                        { id: 'cloud', label: 'Nube', icon: '☁️', color: '#ffffff', sec: '#cbd5e1', blend: 'normal' },
+                        { id: 'fire', label: 'Fuego', icon: '🔥', color: '#ef4444', sec: '#fbbf24', blend: 'additive' },
+                        { id: 'explosion', label: 'Explosión', icon: '💥', color: '#ef4444', sec: '#fbbf24', blend: 'additive' },
+                        { id: 'plasma', label: 'Plasma', icon: '⚡', color: '#06b6d4', sec: '#a855f7', blend: 'additive' },
+                        { id: 'smoke', label: 'Humo', icon: '💨', color: '#94a3b8', sec: '#64748b', blend: 'normal' },
+                        { id: 'ice', label: 'Hielo', icon: '🧊', color: '#bae6fd', sec: '#38bdf8', blend: 'normal' },
+                      ].map(m => {
+                        const isCur = (activeMaterial.volumetric?.mode || 'cloud') === m.id;
+                        return (
+                          <button
+                            key={m.id}
+                            onClick={() => {
+                              updateMaterial(activeMaterial.id, {
+                                color: isCur ? activeMaterial.color : m.color,
+                                volumetric: {
+                                  ...activeMaterial.volumetric,
+                                  mode: m.id as any,
+                                  color: isCur ? (activeMaterial.volumetric?.color || activeMaterial.color) : m.color,
+                                  secondaryColor: m.sec,
+                                  blending: m.blend as any,
+                                  emissiveIntensity: m.blend === 'additive' ? 2.8 : 0.5,
+                                }
+                              });
+                            }}
+                            className={`p-1.5 rounded-lg text-center transition-all border ${
+                              isCur
+                                ? 'bg-amber-500/30 border-amber-400 text-white font-bold shadow-sm'
+                                : 'bg-zinc-800/60 border-white/5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                            }`}
+                          >
+                            <span className="text-sm block">{m.icon}</span>
+                            <span className="text-[8px] font-bold block">{m.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Colores Primario y Secundario (Gradiente térmico o dispersión) */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-zinc-400">Color Primario / Núcleo</label>
+                      <div className="flex items-center gap-2 bg-white/5 p-1 rounded-lg border border-white/5">
+                        <input 
+                          type="color" 
+                          value={activeMaterial.volumetric?.color || activeMaterial.color || '#ffffff'}
+                          onChange={e => updateMaterial(activeMaterial.id, { 
+                            color: e.target.value,
+                            volumetric: { ...activeMaterial.volumetric, color: e.target.value } 
+                          })}
+                          className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                        />
+                        <span className="text-[9px] font-mono uppercase text-zinc-300">{activeMaterial.volumetric?.color || activeMaterial.color || '#ffffff'}</span>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-zinc-400">Color Secundario / Borde</label>
+                      <div className="flex items-center gap-2 bg-white/5 p-1 rounded-lg border border-white/5">
+                        <input 
+                          type="color" 
+                          value={activeMaterial.volumetric?.secondaryColor || '#fbbf24'}
+                          onChange={e => updateMaterial(activeMaterial.id, { 
+                            volumetric: { ...activeMaterial.volumetric, secondaryColor: e.target.value } 
+                          })}
+                          className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                        />
+                        <span className="text-[9px] font-mono uppercase text-zinc-300">{activeMaterial.volumetric?.secondaryColor || '#fbbf24'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Sliders de Densidad, Escala y Emisión */}
+                  <div className="space-y-2">
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Densidad Volumétrica</label>
+                        <span className="font-mono text-amber-400 font-bold">{(activeMaterial.volumetric?.density ?? 2.0).toFixed(1)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0.2" max="6.0" step="0.1"
+                        value={activeMaterial.volumetric?.density ?? 2.0}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, density: parseFloat(e.target.value) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Escala de Ruido 3D (Frecuencia)</label>
+                        <span className="font-mono text-amber-400 font-bold">{(activeMaterial.volumetric?.scale ?? 2.0).toFixed(1)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0.5" max="8.0" step="0.1"
+                        value={activeMaterial.volumetric?.scale ?? 2.0}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, scale: parseFloat(e.target.value) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Intensidad Emisiva / Luminosidad</label>
+                        <span className="font-mono text-amber-400 font-bold">{(activeMaterial.volumetric?.emissiveIntensity ?? 2.0).toFixed(1)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0.0" max="6.0" step="0.1"
+                        value={activeMaterial.volumetric?.emissiveIntensity ?? 2.0}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, emissiveIntensity: parseFloat(e.target.value) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Absorción de Luz (Beer-Lambert)</label>
+                        <span className="font-mono text-amber-400 font-bold">{(activeMaterial.volumetric?.absorption ?? 2.0).toFixed(1)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0.2" max="6.0" step="0.1"
+                        value={activeMaterial.volumetric?.absorption ?? 2.0}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, absorption: parseFloat(e.target.value) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Velocidad de Flujo / Convección</label>
+                        <span className="font-mono text-amber-400 font-bold">{(activeMaterial.volumetric?.windSpeed ?? 0.15).toFixed(2)}</span>
+                      </div>
+                      <input 
+                        type="range" min="0.0" max="1.0" step="0.02"
+                        value={activeMaterial.volumetric?.windSpeed ?? 0.15}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, windSpeed: parseFloat(e.target.value) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[10px]">
+                        <label className="text-zinc-400">Pasos de Raymarching (Calidad)</label>
+                        <span className="font-mono text-amber-400 font-bold">{activeMaterial.volumetric?.steps ?? 36}</span>
+                      </div>
+                      <input 
+                        type="range" min="16" max="64" step="4"
+                        value={activeMaterial.volumetric?.steps ?? 36}
+                        onChange={e => updateMaterial(activeMaterial.id, { 
+                          volumetric: { ...activeMaterial.volumetric, steps: parseInt(e.target.value, 10) } 
+                        })}
+                        className="w-full accent-amber-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* ── SECCIÓN 1: SUPERFICIE BASE & COLOR ── */}
         <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
           <button 
@@ -1997,6 +2915,152 @@ export const MaterialPanel: React.FC = () => {
                   onChange={e => updateMaterial(activeMaterial.id, { specularIntensity: parseFloat(e.target.value) })}
                   className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
                 />
+              </div>
+
+              {/* 🎨 MODIFICADOR Y AJUSTE DE COLORES DE MAPA ALBEDO */}
+              <div className="pt-2 border-t border-white/5 space-y-2">
+                <button
+                  onClick={() => setAlbedoAdjustOpen(v => !v)}
+                  className={`w-full py-1.5 px-2.5 rounded-lg text-[10px] font-bold flex items-center justify-between transition-all border ${
+                    albedoAdjustOpen 
+                      ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/40' 
+                      : 'bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300 border-white/5'
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Wand2 size={12} className="text-indigo-400" />
+                    <span>Ajustar / Teñir Color del Mapa Albedo</span>
+                  </span>
+                  <span className="text-[8px] font-mono text-zinc-400">
+                    {albedoAdjustOpen ? 'Ocultar ▲' : 'Desplegar ▼'}
+                  </span>
+                </button>
+
+                {albedoAdjustOpen && (
+                  <div className="p-2.5 bg-black/30 rounded-xl border border-white/5 space-y-2.5">
+                    {/* Tinte de Color */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className="text-[9px] text-zinc-400 font-semibold">Tinte de Color</label>
+                        <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded-lg border border-white/5">
+                          <input 
+                            type="color" 
+                            value={albedoColorAdjustments.tintColor || '#ffffff'}
+                            onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, tintColor: e.target.value }))}
+                            className="w-5 h-5 rounded bg-transparent border-none cursor-pointer"
+                          />
+                          <span className="text-[9px] font-mono text-zinc-300 truncate">{albedoColorAdjustments.tintColor || '#ffffff'}</span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-center text-[9px]">
+                          <label className="text-zinc-400 font-semibold">Intensidad Tinte</label>
+                          <span className="font-mono text-indigo-400">{((albedoColorAdjustments.tintAmount || 0) * 100).toFixed(0)}%</span>
+                        </div>
+                        <input 
+                          type="range" min="0" max="1" step="0.02"
+                          value={albedoColorAdjustments.tintAmount || 0}
+                          onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, tintAmount: parseFloat(e.target.value) }))}
+                          className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Desplazamiento de Tono (Hue) */}
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center text-[9px]">
+                        <label className="text-zinc-400 font-semibold">Desplazamiento Tonal (Hue Shift)</label>
+                        <span className="font-mono text-cyan-400">{albedoColorAdjustments.hueShift || 0}°</span>
+                      </div>
+                      <input 
+                        type="range" min="-180" max="180" step="1"
+                        value={albedoColorAdjustments.hueShift || 0}
+                        onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, hueShift: parseInt(e.target.value, 10) }))}
+                        className="w-full accent-cyan-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Saturación & Brillo */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-center text-[9px]">
+                          <label className="text-zinc-400">Saturación</label>
+                          <span className="font-mono text-zinc-300">{((albedoColorAdjustments.saturation ?? 1) * 100).toFixed(0)}%</span>
+                        </div>
+                        <input 
+                          type="range" min="0" max="2" step="0.05"
+                          value={albedoColorAdjustments.saturation ?? 1}
+                          onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, saturation: parseFloat(e.target.value) }))}
+                          className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-center text-[9px]">
+                          <label className="text-zinc-400">Brillo</label>
+                          <span className="font-mono text-zinc-300">{((albedoColorAdjustments.brightness ?? 1) * 100).toFixed(0)}%</span>
+                        </div>
+                        <input 
+                          type="range" min="0.3" max="2" step="0.05"
+                          value={albedoColorAdjustments.brightness ?? 1}
+                          onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, brightness: parseFloat(e.target.value) }))}
+                          className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Contraste & Inversión */}
+                    <div className="grid grid-cols-2 gap-2 items-center">
+                      <div className="space-y-1">
+                        <div className="flex justify-between items-center text-[9px]">
+                          <label className="text-zinc-400">Contraste</label>
+                          <span className="font-mono text-zinc-300">{((albedoColorAdjustments.contrast ?? 1) * 100).toFixed(0)}%</span>
+                        </div>
+                        <input 
+                          type="range" min="0.4" max="2" step="0.05"
+                          value={albedoColorAdjustments.contrast ?? 1}
+                          onChange={e => setAlbedoColorAdjustments(prev => ({ ...prev, contrast: parseFloat(e.target.value) }))}
+                          className="w-full accent-indigo-500 h-1 bg-white/10 rounded-lg cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between pt-3">
+                        <span className="text-[9px] text-zinc-400 font-semibold">Invertir</span>
+                        <button
+                          onClick={() => setAlbedoColorAdjustments(prev => ({ ...prev, invert: !prev.invert }))}
+                          className={`px-2 py-0.5 rounded text-[9px] font-bold border transition-all ${
+                            albedoColorAdjustments.invert 
+                              ? 'bg-amber-600/30 text-amber-300 border-amber-500/40' 
+                              : 'bg-zinc-800 text-zinc-400 border-white/5'
+                          }`}
+                        >
+                          {albedoColorAdjustments.invert ? 'SÍ' : 'NO'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Botones de Acción */}
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <button
+                        onClick={handleApplyAlbedoColor}
+                        disabled={isProcessingAlbedo || !activeMaterial.map}
+                        className="py-1.5 px-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[10px] font-bold rounded-lg transition-colors flex items-center justify-center gap-1 shadow-sm"
+                      >
+                        <Wand2 size={11} />
+                        <span>{isProcessingAlbedo ? 'Procesando...' : 'Aplicar al Mapa'}</span>
+                      </button>
+
+                      <button
+                        onClick={handleResetAlbedoColor}
+                        className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] font-bold rounded-lg transition-colors flex items-center justify-center gap-1 border border-white/5"
+                      >
+                        <RefreshCw size={11} />
+                        <span>Restaurar Color</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -2091,6 +3155,199 @@ export const MaterialPanel: React.FC = () => {
           )}
         </div>
 
+        {/* ── SECCIÓN 2.5: POROSIDAD Y MATIZADO ORGÁNICO DE SUPERFICIE ── */}
+        <div className="bg-emerald-950/25 rounded-xl border border-emerald-500/25 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('porosity')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-emerald-500/10 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+              <span className="text-sm">🧽</span>
+              <span>Porosidad & Microcavidades (Superficie Mate)</span>
+              {(activeMaterial.porosity || (activeMaterial.porosityStrength ?? 0) > 0) && (
+                <span className="text-[8px] bg-emerald-500/20 text-emerald-300 px-1 rounded border border-emerald-500/30">
+                  ACTIVO
+                </span>
+              )}
+            </div>
+            {openSections.porosity ? <ChevronDown size={14} className="text-emerald-400" /> : <ChevronRight size={14} className="text-emerald-400" />}
+          </button>
+
+          {openSections.porosity && (
+            <div className="p-3 pt-1 space-y-3 border-t border-emerald-500/20">
+              {/* Toggle de Activación */}
+              <div className="flex items-center justify-between bg-black/30 p-2 rounded-lg border border-emerald-500/20">
+                <div>
+                  <span className="text-[10px] font-bold text-zinc-200">Activar Porosidad y Mateado</span>
+                  <p className="text-[8.5px] text-zinc-400">Elimina el aspecto plástico/demasiado liso creando microcavidades y parches mates</p>
+                </div>
+                <input 
+                  type="checkbox"
+                  checked={Boolean(activeMaterial.porosity)}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    updateMaterial(activeMaterial.id, {
+                      porosity: enabled,
+                      porosityStrength: enabled ? (activeMaterial.porosityStrength || 0.65) : 0,
+                      porosityScale: activeMaterial.porosityScale ?? 18.0,
+                      porosityPatchiness: activeMaterial.porosityPatchiness ?? 0.65,
+                      porosityPatchScale: activeMaterial.porosityPatchScale ?? 3.0,
+                      porosityMatteBias: activeMaterial.porosityMatteBias ?? 0.8,
+                      porosityCavityDarkening: activeMaterial.porosityCavityDarkening ?? 0.25,
+                    });
+                  }}
+                  className="rounded accent-emerald-400 w-4 h-4 cursor-pointer"
+                />
+              </div>
+
+              {/* Presets Rápidos de Porosidad */}
+              <div className="space-y-1">
+                <span className="text-[8.5px] text-zinc-400 font-semibold uppercase">Presets Rápidos de Porosidad:</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { label: '🧽 Microcavidades', desc: 'Finas y sutiles', p: { porosity: true, porosityStrength: 0.5, porosityScale: 32, porosityPatchiness: 0.15, porosityPatchScale: 2, porosityMatteBias: 0.6, porosityCavityDarkening: 0.2 } },
+                    { label: '🪨 Piedra / Cemento', desc: 'Poros profundos', p: { porosity: true, porosityStrength: 0.95, porosityScale: 14, porosityPatchiness: 0.75, porosityPatchScale: 2.5, porosityMatteBias: 0.9, porosityCavityDarkening: 0.4 } },
+                    { label: '🧊 Hielo Escarchado', desc: 'Mateado & burbujas', p: { porosity: true, porosityStrength: 0.7, porosityScale: 24, porosityPatchiness: 0.85, porosityPatchScale: 4.0, porosityMatteBias: 0.85, porosityCavityDarkening: 0.1 } },
+                    { label: '🏺 Barro / Cerámica', desc: 'Áspero artesanal', p: { porosity: true, porosityStrength: 0.8, porosityScale: 18, porosityPatchiness: 0.55, porosityPatchScale: 3.0, porosityMatteBias: 0.8, porosityCavityDarkening: 0.3 } },
+                  ].map(preset => (
+                    <button
+                      key={preset.label}
+                      onClick={() => updateMaterial(activeMaterial.id, preset.p)}
+                      className="p-1.5 rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-emerald-500/20 hover:border-emerald-400/40 text-left transition-all cursor-pointer group"
+                    >
+                      <span className="text-[9.5px] font-bold text-zinc-200 group-hover:text-emerald-300 block truncate">{preset.label}</span>
+                      <span className="text-[8px] text-zinc-500 block truncate">{preset.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sliders de Configuración de Porosidad */}
+              <div className="space-y-2 pt-1">
+                {/* Fuerza / Profundidad */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Fuerza / Profundidad de Microcavidades</label>
+                    <span className="font-mono text-emerald-400 font-bold">
+                      {((activeMaterial.porosityStrength ?? (activeMaterial.porosity ? 0.65 : 0)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1.5" step="0.02"
+                    value={activeMaterial.porosityStrength ?? (activeMaterial.porosity ? 0.65 : 0)}
+                    onChange={e => {
+                      const val = parseFloat(e.target.value);
+                      updateMaterial(activeMaterial.id, {
+                        porosityStrength: val,
+                        porosity: val > 0,
+                      });
+                    }}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Densidad / Tamaño de Poros */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Densidad / Frecuencia Espacial (Frecuencia)</label>
+                    <span className="font-mono text-emerald-300 font-bold">
+                      {(activeMaterial.porosityScale ?? 18.0).toFixed(1)}
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="2.0" max="60.0" step="1.0"
+                    value={activeMaterial.porosityScale ?? 18.0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      porosityScale: parseFloat(e.target.value),
+                      porosity: true,
+                    })}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Distribución en Zonas / Parches */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Distribución en Zonas / Parches Desiguales</label>
+                    <span className="font-mono text-emerald-300 font-bold">
+                      {(((activeMaterial.porosityPatchiness ?? 0.65)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1.0" step="0.05"
+                    value={activeMaterial.porosityPatchiness ?? 0.65}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      porosityPatchiness: parseFloat(e.target.value),
+                      porosity: true,
+                    })}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                  <p className="text-[8px] text-zinc-500 leading-tight">
+                    * Al 0% toda la superficie es porosa uniforme; a valores altos solo afecta parches aleatorios orgánicos.
+                  </p>
+                </div>
+
+                {/* Escala de los Parches */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Escala de Zonas / Parches</label>
+                    <span className="font-mono text-zinc-300 font-bold">
+                      {(activeMaterial.porosityPatchScale ?? 3.0).toFixed(1)}
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0.5" max="15.0" step="0.5"
+                    value={activeMaterial.porosityPatchScale ?? 3.0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      porosityPatchScale: parseFloat(e.target.value),
+                      porosity: true,
+                    })}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Opacado / Mateado */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Opacado / Mateado de Poros (Eliminar Brillo Plástico)</label>
+                    <span className="font-mono text-emerald-300 font-bold">
+                      {(((activeMaterial.porosityMatteBias ?? 0.8)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1.0" step="0.05"
+                    value={activeMaterial.porosityMatteBias ?? 0.8}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      porosityMatteBias: parseFloat(e.target.value),
+                      porosity: true,
+                    })}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Oscurecimiento de Cavidades */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Sombreado / Oclusión en Fondo de Cavidades</label>
+                    <span className="font-mono text-zinc-300 font-bold">
+                      {(((activeMaterial.porosityCavityDarkening ?? 0.25)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="0.8" step="0.02"
+                    value={activeMaterial.porosityCavityDarkening ?? 0.25}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      porosityCavityDarkening: parseFloat(e.target.value),
+                      porosity: true,
+                    })}
+                    className="w-full accent-emerald-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* ── SECCIÓN 3: VIDRIO, TRANSMISIÓN Y GEMAS ── */}
         <div className="bg-zinc-900/40 rounded-xl border border-white/5 overflow-hidden">
           <button 
@@ -2143,9 +3400,10 @@ export const MaterialPanel: React.FC = () => {
                   onChange={e => updateMaterial(activeMaterial.id, { ior: parseFloat(e.target.value) })}
                   className="w-full accent-blue-500 h-1 bg-white/10 rounded-lg cursor-pointer"
                 />
-                <div className="grid grid-cols-4 gap-1 pt-1">
+                <div className="grid grid-cols-5 gap-1 pt-1">
                   {[
                     { label: 'Aire (1.0)', val: 1.0 },
+                    { label: 'Hielo (1.31)', val: 1.31 },
                     { label: 'Agua (1.33)', val: 1.333 },
                     { label: 'Vidrio (1.52)', val: 1.52 },
                     { label: 'Diamante (2.42)', val: 2.417 },
@@ -2153,7 +3411,7 @@ export const MaterialPanel: React.FC = () => {
                     <button
                       key={iorP.label}
                       onClick={() => updateMaterial(activeMaterial.id, { ior: iorP.val })}
-                      className={`py-1 rounded text-[8px] font-bold transition-all border ${
+                      className={`py-1 px-0.5 rounded text-[8px] font-bold transition-all border text-center ${
                         Math.abs((activeMaterial.ior ?? 1.5) - iorP.val) < 0.02
                           ? 'bg-blue-600/30 text-blue-200 border-blue-500'
                           : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:bg-zinc-800'
@@ -2179,7 +3437,7 @@ export const MaterialPanel: React.FC = () => {
                 />
               </div>
 
-              {/* Espesor y Atenuación Volumétrica */}
+              {/* Espesor y Atenuación Volumétrica (Ley de Beer-Lambert) */}
               <div className="space-y-2 bg-black/20 p-2.5 rounded-lg border border-white/5">
                 <div className="space-y-1">
                   <div className="flex justify-between items-center text-[10px]">
@@ -2210,16 +3468,228 @@ export const MaterialPanel: React.FC = () => {
 
                   <div className="space-y-1">
                     <div className="flex justify-between text-[9px]">
-                      <label className="text-zinc-500">Distancia</label>
+                      <label className="text-zinc-500">Distancia Atenuación</label>
                       <span className="font-mono text-zinc-400">{activeMaterial.attenuationDistance ?? 1.0}</span>
                     </div>
                     <input 
-                      type="range" min="0.1" max="10" step="0.1"
+                      type="range" min="0.1" max="10" step="0.05"
                       value={activeMaterial.attenuationDistance ?? 1.0}
                       onChange={e => updateMaterial(activeMaterial.id, { attenuationDistance: parseFloat(e.target.value) })}
                       className="w-full accent-blue-400 h-1 bg-white/10 rounded-lg cursor-pointer"
                     />
                   </div>
+                </div>
+
+                {/* Presets Beer-Lambert Rápidos */}
+                <div className="pt-1">
+                  <div className="text-[8px] text-zinc-500 uppercase tracking-wider mb-1">Presets Beer-Lambert:</div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {[
+                      { label: '🧊 Hielo (0.45m)', color: '#0284c7', dist: 0.45, thick: 2.0, ior: 1.31 },
+                      { label: '❄️ Glaciar (0.60m)', color: '#0ea5e9', dist: 0.60, thick: 2.2, ior: 1.31 },
+                      { label: '🪟 Vidrio (5.0m)', color: '#ffffff', dist: 5.0, thick: 0.5, ior: 1.52 },
+                    ].map(p => (
+                      <button
+                        key={p.label}
+                        onClick={() => updateMaterial(activeMaterial.id, {
+                          attenuationColor: p.color,
+                          attenuationDistance: p.dist,
+                          thickness: p.thick,
+                          ior: p.ior,
+                        })}
+                        className="py-1 px-1 rounded bg-zinc-800/60 hover:bg-blue-900/30 border border-white/5 hover:border-blue-500/40 text-[8px] text-zinc-300 transition-colors text-center truncate"
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Aviso HDRI para Refracción Física */}
+                <div className="mt-2 pt-2 border-t border-white/5 flex items-center justify-between gap-2">
+                  <div className="text-[8px] text-zinc-400 leading-tight">
+                    💡 <span className="text-zinc-300 font-semibold">Iluminación HDRI:</span> La refracción requiere un entorno 360° para reflejar el fondo.
+                  </div>
+                  <button
+                    onClick={() => {
+                      updateEnvironment({
+                        hdriUrl: 'synthetic_polar_arctic',
+                        backgroundMode: 'HDRI',
+                        backgroundVisible: true,
+                        intensity: 1.2,
+                      });
+                      setCopiedNotification('¡Entorno HDRI Polar Ártico activado para refracción física!');
+                      setTimeout(() => setCopiedNotification(null), 3000);
+                    }}
+                    className="flex-shrink-0 px-2 py-1 bg-sky-600/30 hover:bg-sky-600/50 border border-sky-500/50 rounded text-[8px] font-bold text-sky-200 transition-colors whitespace-nowrap"
+                  >
+                    🧊 Activar HDRI Ártico
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 3.5: NODOS PROCEDURALES DE HIELO 3D (BLENDER / SUBSTANCE ARCHITECTURE) ── */}
+        <div className="bg-sky-950/20 rounded-xl border border-sky-500/20 overflow-hidden">
+          <button 
+            onClick={() => toggleSection('ice_nodes')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-sky-500/10 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-sky-300">
+              <span className="text-sm">🧊</span>
+              <span>Hielo & Nieve Procedural (Nodos 3D)</span>
+              {(activeMaterial.isIce || (activeMaterial.iceConfig?.cloudDensity ?? 0) > 0) && (
+                <span className="text-[8px] bg-sky-500/20 text-sky-300 px-1 rounded border border-sky-500/30">ACTIVO</span>
+              )}
+            </div>
+            {openSections.ice_nodes ? <ChevronDown size={14} className="text-sky-400" /> : <ChevronRight size={14} className="text-sky-400" />}
+          </button>
+
+          {openSections.ice_nodes && (
+            <div className="p-3 pt-1 space-y-3 border-t border-sky-500/20">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] text-zinc-400">Activar Sombreador de Hielo 3D</span>
+                <input 
+                  type="checkbox"
+                  checked={Boolean(activeMaterial.isIce)}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    updateMaterial(activeMaterial.id, {
+                      isIce: enabled,
+                      transmission: enabled ? 1.0 : activeMaterial.transmission,
+                      ior: enabled ? 1.31 : activeMaterial.ior,
+                      roughness: enabled ? 0.12 : activeMaterial.roughness,
+                      attenuationColor: enabled ? (activeMaterial.attenuationColor || '#38bdf8') : activeMaterial.attenuationColor,
+                      attenuationDistance: enabled ? 1.2 : activeMaterial.attenuationDistance,
+                      thickness: enabled ? (activeMaterial.thickness || 2.8) : activeMaterial.thickness,
+                      iceConfig: {
+                        enabled,
+                        surfaceWarp: activeMaterial.iceConfig?.surfaceWarp ?? 0.05,
+                        cloudDensity: activeMaterial.iceConfig?.cloudDensity ?? 1.4,
+                        cloudColor: activeMaterial.iceConfig?.cloudColor ?? '#e0f2fe',
+                        cloudScale: activeMaterial.iceConfig?.cloudScale ?? 2.6,
+                        frostIntensity: activeMaterial.iceConfig?.frostIntensity ?? 0.85,
+                        crackIntensity: activeMaterial.iceConfig?.crackIntensity ?? 0.9,
+                      }
+                    });
+                  }}
+                  className="rounded accent-sky-400"
+                />
+              </div>
+
+              <p className="text-[9px] text-sky-200/70 leading-tight">
+                Simulación procedural por nodos: Deformación orgánica de caras, núcleo blanco denso Musgrave 3D y escarcha en esquinas/silueta (Fresnel).
+              </p>
+
+              {/* Slider 1: Deformación de Superficie */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-300 flex items-center gap-1">
+                    <span>Ondulación Orgánica de Caras</span>
+                  </label>
+                  <span className="font-mono text-sky-300 font-bold">
+                    {(((activeMaterial.iceConfig?.surfaceWarp ?? 0.05)) * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="0.2" step="0.005"
+                  value={activeMaterial.iceConfig?.surfaceWarp ?? 0.05}
+                  onChange={e => updateMaterial(activeMaterial.id, {
+                    isIce: true,
+                    iceConfig: {
+                      ...(activeMaterial.iceConfig || {}),
+                      surfaceWarp: parseFloat(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-sky-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Slider 2: Densidad Núcleo Musgrave 3D */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-300">Núcleo Blanco Musgrave 3D (Centro Congelado)</label>
+                  <span className="font-mono text-sky-300 font-bold">
+                    {(activeMaterial.iceConfig?.cloudDensity ?? 1.4).toFixed(1)}x
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="3.0" step="0.05"
+                  value={activeMaterial.iceConfig?.cloudDensity ?? 1.4}
+                  onChange={e => updateMaterial(activeMaterial.id, {
+                    isIce: true,
+                    iceConfig: {
+                      ...(activeMaterial.iceConfig || {}),
+                      cloudDensity: parseFloat(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-sky-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Slider 3: Escarcha en Silueta / Fresnel Facing */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-300">Escarcha en Bordes (Fresnel Facing)</label>
+                  <span className="font-mono text-sky-300 font-bold">
+                    {(((activeMaterial.iceConfig?.frostIntensity ?? 0.85)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="2.0" step="0.05"
+                  value={activeMaterial.iceConfig?.frostIntensity ?? 0.85}
+                  onChange={e => updateMaterial(activeMaterial.id, {
+                    isIce: true,
+                    iceConfig: {
+                      ...(activeMaterial.iceConfig || {}),
+                      frostIntensity: parseFloat(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-sky-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Slider 4: Grietas y Burbujas Internas Voronoi 3D */}
+              <div className="space-y-1">
+                <div className="flex justify-between items-center text-[10px]">
+                  <label className="text-zinc-300">Grietas Internas & Microburbujas</label>
+                  <span className="font-mono text-sky-300 font-bold">
+                    {(((activeMaterial.iceConfig?.crackIntensity ?? 0.9)) * 100).toFixed(0)}%
+                  </span>
+                </div>
+                <input 
+                  type="range" min="0" max="2.0" step="0.05"
+                  value={activeMaterial.iceConfig?.crackIntensity ?? 0.9}
+                  onChange={e => updateMaterial(activeMaterial.id, {
+                    isIce: true,
+                    iceConfig: {
+                      ...(activeMaterial.iceConfig || {}),
+                      crackIntensity: parseFloat(e.target.value)
+                    }
+                  })}
+                  className="w-full accent-sky-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                />
+              </div>
+
+              {/* Color del Núcleo Nuboso */}
+              <div className="flex items-center justify-between pt-1">
+                <label className="text-[10px] text-zinc-300">Color Dispersión Interna</label>
+                <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded border border-white/10">
+                  <input 
+                    type="color" 
+                    value={activeMaterial.iceConfig?.cloudColor || '#e0f2fe'}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isIce: true,
+                      iceConfig: {
+                        ...(activeMaterial.iceConfig || {}),
+                        cloudColor: e.target.value
+                      }
+                    })}
+                    className="w-4 h-4 rounded bg-transparent border-none cursor-pointer"
+                  />
+                  <span className="text-[9px] font-mono text-zinc-200">{activeMaterial.iceConfig?.cloudColor || '#e0f2fe'}</span>
                 </div>
               </div>
             </div>
@@ -2810,45 +4280,170 @@ export const MaterialPanel: React.FC = () => {
                 </div>
               </div>
 
-              {/* Tiling / Scale / Offset */}
-              <div className="grid grid-cols-3 gap-2">
-                <div className="flex flex-col gap-1">
-                  <span className="text-[9px] text-zinc-500 truncate" title="Repetición (Scale)">Repetición</span>
-                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                    <span className="text-[9px] text-zinc-600">U</span>
-                    <input 
-                      type="number" step="0.1"
-                      value={activeMaterial.mapRepeat?.[0] ?? 1}
-                      onChange={e => updateMaterial(activeMaterial.id, { mapRepeat: [parseFloat(e.target.value) || 1, activeMaterial.mapRepeat?.[1] ?? 1] })}
-                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                    />
+              {/* Tiling / Scale / Offset con enlace de relación de aspecto U & V */}
+              <div className="space-y-2 bg-black/20 p-2.5 rounded-xl border border-white/5">
+                <div className="flex items-center justify-between text-[10px] font-bold text-zinc-400">
+                  <span className="flex items-center gap-1">
+                    <SlidersHorizontal size={12} className="text-indigo-400" />
+                    <span>Transformación UV (Tiling & Offset)</span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleApplyTilingToAllMaps}
+                      className="px-2 py-0.5 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-300 hover:text-white rounded text-[9px] font-bold transition-colors border border-indigo-500/30 flex items-center gap-1 shadow-sm"
+                      title="Forzar esta escala, repetición y desplazamiento en todas las ranuras de mapas PBR"
+                    >
+                      <RefreshCw size={10} />
+                      <span>Sincronizar Todos</span>
+                    </button>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-1">
-                  <span className="text-[9px] text-zinc-500 truncate" title="Desplazamiento (Offset)">Desplazamiento</span>
-                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                    <span className="text-[9px] text-zinc-600">U</span>
-                    <input 
-                      type="number" step="0.05"
-                      value={activeMaterial.mapOffset?.[0] ?? 0}
-                      onChange={e => updateMaterial(activeMaterial.id, { mapOffset: [parseFloat(e.target.value) || 0, activeMaterial.mapOffset?.[1] ?? 0] })}
-                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                    />
+                <div className="grid grid-cols-3 gap-2">
+                  {/* Repetición U & V */}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] text-zinc-500 font-semibold truncate" title="Repetición (Scale)">Tiling UV</span>
+                      <button
+                        onClick={() => setIsTilingLinked(!isTilingLinked)}
+                        className={`p-0.5 rounded transition-colors ${isTilingLinked ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-600'}`}
+                        title={isTilingLinked ? 'Relación U/V Vinculada' : 'U/V Independientes'}
+                      >
+                        {isTilingLinked ? <LinkIcon size={10} /> : <Unlink size={10} />}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1 bg-black/30 px-1.5 py-1 h-7 rounded border border-white/5">
+                      <span className="text-[9px] text-zinc-500 font-mono">U:</span>
+                      <input 
+                        type="number" step="0.1"
+                        value={activeMaterial.mapRepeat?.[0] ?? 1}
+                        onChange={e => {
+                          const val = parseFloat(e.target.value) || 1;
+                          const currentV = activeMaterial.mapRepeat?.[1] ?? 1;
+                          updateMaterial(activeMaterial.id, { 
+                            mapRepeat: isTilingLinked ? [val, val] : [val, currentV] 
+                          });
+                        }}
+                        className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 bg-black/30 px-1.5 py-1 h-7 rounded border border-white/5">
+                      <span className="text-[9px] text-zinc-500 font-mono">V:</span>
+                      <input 
+                        type="number" step="0.1"
+                        value={activeMaterial.mapRepeat?.[1] ?? 1}
+                        onChange={e => {
+                          const val = parseFloat(e.target.value) || 1;
+                          const currentU = activeMaterial.mapRepeat?.[0] ?? 1;
+                          updateMaterial(activeMaterial.id, { 
+                            mapRepeat: isTilingLinked ? [val, val] : [currentU, val] 
+                          });
+                        }}
+                        className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Desplazamiento U & V */}
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] text-zinc-500 font-semibold truncate" title="Desplazamiento (Offset)">Offset UV</span>
+                      <button
+                        onClick={() => setIsOffsetLinked(!isOffsetLinked)}
+                        className={`p-0.5 rounded transition-colors ${isOffsetLinked ? 'text-indigo-400 bg-indigo-500/10' : 'text-zinc-600'}`}
+                        title={isOffsetLinked ? 'Offset Vinculado' : 'Offset Independiente'}
+                      >
+                        {isOffsetLinked ? <LinkIcon size={10} /> : <Unlink size={10} />}
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1 bg-black/30 px-1.5 py-1 h-7 rounded border border-white/5">
+                      <span className="text-[9px] text-zinc-500 font-mono">U:</span>
+                      <input 
+                        type="number" step="0.05"
+                        value={activeMaterial.mapOffset?.[0] ?? 0}
+                        onChange={e => {
+                          const val = parseFloat(e.target.value) || 0;
+                          const currentV = activeMaterial.mapOffset?.[1] ?? 0;
+                          updateMaterial(activeMaterial.id, { 
+                            mapOffset: isOffsetLinked ? [val, val] : [val, currentV] 
+                          });
+                        }}
+                        className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1 bg-black/30 px-1.5 py-1 h-7 rounded border border-white/5">
+                      <span className="text-[9px] text-zinc-500 font-mono">V:</span>
+                      <input 
+                        type="number" step="0.05"
+                        value={activeMaterial.mapOffset?.[1] ?? 0}
+                        onChange={e => {
+                          const val = parseFloat(e.target.value) || 0;
+                          const currentU = activeMaterial.mapOffset?.[0] ?? 0;
+                          updateMaterial(activeMaterial.id, { 
+                            mapOffset: isOffsetLinked ? [val, val] : [currentU, val] 
+                          });
+                        }}
+                        className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Rotación */}
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[9px] text-zinc-500 font-semibold truncate" title="Rotación (Grados)">Rotación</span>
+                    <div className="flex items-center gap-1 bg-black/30 px-1.5 py-1 h-7 rounded border border-white/5 mt-auto">
+                      <input 
+                        type="number" step="5"
+                        value={activeMaterial.mapRotation ?? 0}
+                        onChange={e => updateMaterial(activeMaterial.id, { mapRotation: parseFloat(e.target.value) || 0 })}
+                        className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
+                      />
+                      <span className="text-[9px] text-zinc-500">°</span>
+                    </div>
+                    <div className="flex gap-1 pt-1">
+                      <button
+                        onClick={() => updateMaterial(activeMaterial.id, { mapRotation: ((activeMaterial.mapRotation ?? 0) + 90) % 360 })}
+                        className="flex-1 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8px] font-bold rounded"
+                        title="Girar 90°"
+                      >
+                        +90°
+                      </button>
+                      <button
+                        onClick={() => updateMaterial(activeMaterial.id, { mapRotation: 0 })}
+                        className="py-1 px-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[8px] font-bold rounded"
+                        title="Restablecer Rotación a 0°"
+                      >
+                        0°
+                      </button>
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-1">
-                  <span className="text-[9px] text-zinc-500 truncate" title="Rotación (Grados)">Rotación</span>
-                  <div className="flex items-center gap-1 bg-black/20 px-1.5 py-1 h-7 rounded border border-white/5">
-                    <input 
-                      type="number" step="5"
-                      value={activeMaterial.mapRotation ?? 0}
-                      onChange={e => updateMaterial(activeMaterial.id, { mapRotation: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-transparent text-[11px] text-white text-right outline-none font-mono"
-                    />
-                    <span className="text-[9px] text-zinc-600">°</span>
-                  </div>
+                {/* Botones de acción masiva en mapas */}
+                <div className="flex items-center gap-1.5 pt-1 border-t border-white/5">
+                  <button
+                    onClick={handleApplyTilingToAllMaps}
+                    className="flex-1 py-1.5 px-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-bold transition-all flex items-center justify-center gap-1 shadow-sm"
+                  >
+                    <RefreshCw size={11} />
+                    <span>Cambiar en TODOS los mapas</span>
+                  </button>
+                  <button
+                    onClick={() => setShowPBRImport(true)}
+                    className="py-1.5 px-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-[9px] font-bold transition-colors flex items-center justify-center gap-1 border border-white/5"
+                    title="Importar juego completo de texturas PBR"
+                  >
+                    <FolderOpen size={11} className="text-indigo-400" />
+                    <span>Pack PBR</span>
+                  </button>
+                  <button
+                    onClick={handleClearAllMaps}
+                    className="py-1.5 px-2 bg-zinc-800 hover:bg-red-900/60 text-zinc-400 hover:text-red-200 rounded-lg text-[9px] font-bold transition-colors flex items-center justify-center gap-1 border border-white/5"
+                    title="Vaciar todas las ranuras de mapas de este material"
+                  >
+                    <Trash2 size={11} />
+                    <span>Limpiar Todo</span>
+                  </button>
                 </div>
               </div>
 
@@ -2865,14 +4460,24 @@ export const MaterialPanel: React.FC = () => {
               <div className="grid grid-cols-2 gap-2.5">
                 <TextureSlot 
                   label="Albedo / Base Color" 
+                  slotKey="Albedo"
                   texture={activeMaterial.map} 
                   onDrop={e => onDropTexture(e, 'map')}
+                  onSelectFile={f => onSelectTextureFile(f, 'map')}
+                  onOpenLibrary={() => { setTextureSlotTarget('map'); setActiveTab('textures'); }}
+                  onModify={() => handleModifyMap('Albedo / Base Color', 'map')}
+                  onGeneratePBRSet={() => handleGeneratePBRFromSource(activeMaterial.map)}
                   onClear={() => updateMaterial(activeMaterial.id, { map: undefined })}
                 />
                 <TextureSlot 
                   label={`Normal Map (${activeMaterial.normalFormat === 'DIRECTX' ? 'DirectX' : 'OpenGL'})`}
+                  slotKey="Normal Map"
                   texture={activeMaterial.normalMap} 
                   onDrop={e => onDropTexture(e, 'normalMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'normalMap')}
+                  onOpenLibrary={() => { setTextureSlotTarget('normalMap'); setActiveTab('textures'); }}
+                  onModify={() => handleModifyMap('Normal Map', 'normalMap')}
+                  onGeneratePBRSet={() => handleGeneratePBRFromSource(activeMaterial.normalMap)}
                   onClear={() => updateMaterial(activeMaterial.id, { normalMap: undefined })}
                 />
 
@@ -2880,8 +4485,11 @@ export const MaterialPanel: React.FC = () => {
                   <div className="col-span-2 space-y-2">
                     <TextureSlot 
                       label="ORM Map (R:AO, G:Rough, B:Metal)" 
+                      slotKey="ORM"
                       texture={activeMaterial.ormMap} 
                       onDrop={e => onDropTexture(e, 'ormMap')}
+                      onSelectFile={f => onSelectTextureFile(f, 'ormMap')}
+                      onModify={() => handleModifyMap('ORM Map', 'ormMap')}
                       onClear={() => updateMaterial(activeMaterial.id, { ormMap: undefined })}
                       isLarge
                     />
@@ -2907,26 +4515,45 @@ export const MaterialPanel: React.FC = () => {
                   <>
                     <TextureSlot 
                       label="Roughness" 
+                      slotKey="Roughness"
                       texture={activeMaterial.roughnessMap} 
                       onDrop={e => onDropTexture(e, 'roughnessMap')}
+                      onSelectFile={f => onSelectTextureFile(f, 'roughnessMap')}
+                      onOpenLibrary={() => { setTextureSlotTarget('roughnessMap'); setActiveTab('textures'); }}
+                      onModify={() => handleModifyMap('Roughness', 'roughnessMap')}
+                      onGeneratePBRSet={() => handleGeneratePBRFromSource(activeMaterial.roughnessMap)}
                       onClear={() => updateMaterial(activeMaterial.id, { roughnessMap: undefined })}
                     />
                     <TextureSlot 
                       label="Metalness" 
+                      slotKey="Metalness"
                       texture={activeMaterial.metalnessMap} 
                       onDrop={e => onDropTexture(e, 'metalnessMap')}
+                      onSelectFile={f => onSelectTextureFile(f, 'metalnessMap')}
+                      onOpenLibrary={() => { setTextureSlotTarget('metalnessMap'); setActiveTab('textures'); }}
+                      onModify={() => handleModifyMap('Metalness', 'metalnessMap')}
                       onClear={() => updateMaterial(activeMaterial.id, { metalnessMap: undefined })}
                     />
                     <TextureSlot 
                       label="Ambient Occlusion" 
+                      slotKey="AO"
                       texture={activeMaterial.aoMap} 
                       onDrop={e => onDropTexture(e, 'aoMap')}
+                      onSelectFile={f => onSelectTextureFile(f, 'aoMap')}
+                      onOpenLibrary={() => { setTextureSlotTarget('aoMap'); setActiveTab('textures'); }}
+                      onModify={() => handleModifyMap('Ambient Occlusion', 'aoMap')}
+                      onGeneratePBRSet={() => handleGeneratePBRFromSource(activeMaterial.aoMap)}
                       onClear={() => updateMaterial(activeMaterial.id, { aoMap: undefined })}
                     />
                     <TextureSlot 
                       label="Displacement / Height" 
+                      slotKey="Displacement"
                       texture={activeMaterial.displacementMap} 
                       onDrop={e => onDropTexture(e, 'displacementMap')}
+                      onSelectFile={f => onSelectTextureFile(f, 'displacementMap')}
+                      onOpenLibrary={() => { setTextureSlotTarget('displacementMap'); setActiveTab('textures'); }}
+                      onModify={() => handleModifyMap('Displacement / Height', 'displacementMap')}
+                      onGeneratePBRSet={() => handleGeneratePBRFromSource(activeMaterial.displacementMap)}
                       onClear={() => updateMaterial(activeMaterial.id, { displacementMap: undefined })}
                     />
                   </>
@@ -2934,26 +4561,38 @@ export const MaterialPanel: React.FC = () => {
 
                 <TextureSlot 
                   label="Emissive Map" 
+                  slotKey="Emissive"
                   texture={activeMaterial.emissiveMap} 
                   onDrop={e => onDropTexture(e, 'emissiveMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'emissiveMap')}
+                  onModify={() => handleModifyMap('Emissive Map', 'emissiveMap')}
                   onClear={() => updateMaterial(activeMaterial.id, { emissiveMap: undefined })}
                 />
                 <TextureSlot 
                   label="Alpha / Opacidad" 
+                  slotKey="Alpha"
                   texture={activeMaterial.alphaMap} 
                   onDrop={e => onDropTexture(e, 'alphaMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'alphaMap')}
+                  onModify={() => handleModifyMap('Alpha / Opacity', 'alphaMap')}
                   onClear={() => updateMaterial(activeMaterial.id, { alphaMap: undefined })}
                 />
                 <TextureSlot 
                   label="Transmission Map" 
+                  slotKey="Transmission"
                   texture={activeMaterial.transmissionMap} 
                   onDrop={e => onDropTexture(e, 'transmissionMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'transmissionMap')}
+                  onModify={() => handleModifyMap('Transmission Map', 'transmissionMap')}
                   onClear={() => updateMaterial(activeMaterial.id, { transmissionMap: undefined })}
                 />
                 <TextureSlot 
                   label="Anisotropy Map" 
+                  slotKey="Anisotropy"
                   texture={activeMaterial.anisotropyMap} 
                   onDrop={e => onDropTexture(e, 'anisotropyMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'anisotropyMap')}
+                  onModify={() => handleModifyMap('Anisotropy Map', 'anisotropyMap')}
                   onClear={() => updateMaterial(activeMaterial.id, { anisotropyMap: undefined })}
                 />
               </div>
@@ -2961,31 +4600,86 @@ export const MaterialPanel: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* MODALES DE EDICIÓN 2D Y PROCEDIMENTAL DE MAPAS */}
+      {activeMaterial && activeEditorMapKey && (
+        <MapEditorModal
+          title={activeEditorTitle || String(activeEditorMapKey)}
+          url={(activeMaterial[activeEditorMapKey] as string) || null}
+          repeat={activeMaterial.mapRepeat ? (Array.isArray(activeMaterial.mapRepeat) ? [activeMaterial.mapRepeat[0], activeMaterial.mapRepeat[1]] : [activeMaterial.mapRepeat, activeMaterial.mapRepeat]) : [1, 1]}
+          onRepeatChange={rep => updateMaterial(activeMaterial.id, { mapRepeat: rep })}
+          offset={activeMaterial.mapOffset ? (Array.isArray(activeMaterial.mapOffset) ? [activeMaterial.mapOffset[0], activeMaterial.mapOffset[1]] : [activeMaterial.mapOffset, activeMaterial.mapOffset]) : [0, 0]}
+          onOffsetChange={off => updateMaterial(activeMaterial.id, { mapOffset: off })}
+          rotation={activeMaterial.mapRotation ?? 0}
+          onRotationChange={rot => updateMaterial(activeMaterial.id, { mapRotation: rot })}
+          onApplyToAllMaps={(rep, off, rot) => {
+            updateMaterial(activeMaterial.id, {
+              mapRepeat: rep,
+              mapOffset: off,
+              mapRotation: rot,
+            });
+            setCopiedNotification('Transformaciones aplicadas a todos los mapas');
+            setTimeout(() => setCopiedNotification(null), 2500);
+          }}
+          onClose={() => setActiveEditorMapKey(null)}
+          onUpdate={newUrl => {
+            updateMaterial(activeMaterial.id, { [activeEditorMapKey]: newUrl || undefined });
+            setCopiedNotification(`Mapa ${activeEditorTitle} actualizado`);
+            setTimeout(() => setCopiedNotification(null), 2000);
+          }}
+        />
+      )}
+
+      {activeMaterial && proceduralModalConfig && (
+        <ProceduralMapModal
+          config={proceduralModalConfig}
+          onClose={() => setProceduralModalConfig(null)}
+          onApply={dataUrl => {
+            updateMaterial(activeMaterial.id, { [proceduralModalConfig.mapKey]: dataUrl });
+            setProceduralModalConfig(null);
+            setCopiedNotification('¡Mapa procedimental aplicado con éxito!');
+            setTimeout(() => setCopiedNotification(null), 2500);
+          }}
+        />
+      )}
     </div>
   );
 };
 
 const TextureSlot: React.FC<{ 
   label: string; 
+  slotKey?: string;
   texture?: string; 
   onDrop: (e: React.DragEvent) => void; 
   onDropFile?: (file: File) => void;
+  onSelectFile?: (file: File) => void;
   onClear: () => void;
+  onOpenLibrary?: () => void;
+  onModify?: () => void;
+  onGeneratePBRSet?: () => void;
   isLarge?: boolean;
-}> = ({ label, texture, onDrop, onDropFile, onClear, isLarge }) => {
+}> = ({ label, slotKey, texture, onDrop, onDropFile, onSelectFile, onClear, onOpenLibrary, onModify, onGeneratePBRSet, isLarge }) => {
   const [isOver, setIsOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleClick = () => {
-    inputRef.current?.click();
+  const triggerFileInput = (e?: React.MouseEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+    if (inputRef.current) {
+      inputRef.current.value = '';
+      inputRef.current.click();
+    }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file && onDropFile) {
+    if (!file) return;
+    if (onSelectFile) {
+      onSelectFile(file);
+    } else if (onDropFile) {
       onDropFile(file);
-    } else if (file) {
-      // Fallback if no specific handler provided, simulate drop (not ideal but works for our case if we modify onDrop logic, wait, we can just trigger a reader here)
+    } else {
       const reader = new FileReader();
       reader.onload = (ev) => {
         const dummyEvent = {
@@ -3000,41 +4694,137 @@ const TextureSlot: React.FC<{
       };
       reader.readAsDataURL(file);
     }
+    e.target.value = '';
   };
 
   return (
     <div className={`space-y-1.5 ${isLarge ? 'col-span-2' : ''}`}>
-      <label className="text-[9px] text-zinc-500 font-bold uppercase tracking-tighter truncate block" title={label}>{label}</label>
-      <input type="file" ref={inputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
+      <div className="flex items-center justify-between gap-1">
+        <label className="text-[9px] text-zinc-300 font-bold uppercase tracking-tighter truncate block flex-1" title={label}>
+          {label}
+        </label>
+        {texture && onGeneratePBRSet && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onGeneratePBRSet();
+            }}
+            className="text-[8px] font-bold text-amber-300 hover:text-amber-100 bg-amber-500/20 hover:bg-amber-500/35 px-1.5 py-0.5 rounded border border-amber-500/30 flex items-center gap-0.5 transition-all flex-shrink-0"
+            title="Generar resto de mapas PBR (Normal, Rugosidad, AO, Altura) a partir de este mapa"
+          >
+            <Sparkles size={8} className="text-amber-400" />
+            <span>⚡ Formar PBR</span>
+          </button>
+        )}
+      </div>
+
+      <input 
+        type="file" 
+        ref={inputRef} 
+        className="hidden" 
+        accept="image/*,.png,.jpg,.jpeg,.webp,.tga,.bmp" 
+        onChange={handleFileChange} 
+      />
+
       <div
-        onClick={handleClick}
+        onClick={() => triggerFileInput()}
         onDragOver={e => { e.preventDefault(); setIsOver(true); }}
         onDragLeave={() => setIsOver(false)}
         onDrop={e => { e.preventDefault(); e.stopPropagation(); onDrop(e); setIsOver(false); }}
         className={`relative group cursor-pointer aspect-square rounded-xl border-2 border-dashed transition-all flex flex-col items-center justify-center overflow-hidden ${
           texture 
-            ? 'border-indigo-500/50 bg-indigo-500/5' 
-            : isOver ? 'border-indigo-400 bg-indigo-400/10' : 'border-white/5 bg-white/5 hover:border-white/10'
+            ? 'border-indigo-500/50 bg-indigo-500/5 hover:border-indigo-400' 
+            : isOver ? 'border-indigo-400 bg-indigo-400/10' : 'border-white/10 bg-white/5 hover:border-indigo-500/40 hover:bg-white/[0.07]'
         } ${isLarge ? 'aspect-[2/1]' : ''}`}
       >
         {texture ? (
           <>
-            <img src={texture} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-40 transition-opacity" />
+            <img 
+              src={texture} 
+              alt={label}
+              className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-25 transition-opacity" 
+            />
+
+            {/* Botón de borrar en esquina superior derecha */}
             <button 
+              type="button"
               onClick={(e) => { e.stopPropagation(); onClear(); }}
-              className="absolute top-2 right-2 p-1 rounded-md bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500"
+              className="absolute top-1.5 right-1.5 p-1.5 rounded-lg bg-black/80 text-zinc-400 hover:text-white hover:bg-red-600 transition-all opacity-0 group-hover:opacity-100 z-30 shadow-md"
+              title="Quitar este mapa"
             >
-              <Trash2 size={12} />
+              <Trash2 size={11} />
             </button>
-            <div className="z-10 text-[8px] font-bold text-white bg-black/40 px-2 py-1 rounded-full backdrop-blur-sm">
-              CAMBIAR
+
+            {/* Botones de acción central con hover */}
+            <div className="z-20 flex flex-col items-center gap-1 px-2 w-full max-w-[140px]">
+              {/* Botón Cargar: carga desde archivo */}
+              <button
+                type="button"
+                onClick={triggerFileInput}
+                className="w-full py-1 px-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[9px] font-bold shadow-md transition-all flex items-center justify-center gap-1 active:scale-95 border border-indigo-400/30"
+                title="Cargar nuevo archivo de imagen desde tu ordenador"
+              >
+                <Upload size={10} />
+                <span>Cargar</span>
+              </button>
+
+              {/* Botón Modificar: abre herramientas de color/atributos */}
+              {onModify && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onModify(); }}
+                  className="w-full py-1 px-2 bg-zinc-800 hover:bg-zinc-700 text-cyan-300 hover:text-white rounded-lg text-[9px] font-bold shadow-md transition-all flex items-center justify-center gap-1 border border-cyan-500/30"
+                  title="Abrir herramientas para modificar atributos, colores, formas y filtros de este mapa"
+                >
+                  <Wand2 size={10} className="text-cyan-400" />
+                  <span>Modificar</span>
+                </button>
+              )}
+
+              {/* Botón Generar resto de mapas PBR */}
+              {onGeneratePBRSet && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onGeneratePBRSet(); }}
+                  className="w-full py-0.5 px-1.5 bg-amber-600/90 hover:bg-amber-500 text-white rounded text-[8px] font-bold shadow-sm transition-all flex items-center justify-center gap-1 border border-amber-400/30 opacity-0 group-hover:opacity-100"
+                  title="Generar Normal, Rugosidad, AO y Altura desde este mapa"
+                >
+                  <Sparkles size={9} />
+                  <span>⚡ Formar PBR</span>
+                </button>
+              )}
+
+              {onOpenLibrary && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onOpenLibrary(); }}
+                  className="w-full py-0.5 px-1.5 bg-black/60 hover:bg-zinc-800 text-zinc-300 hover:text-white rounded text-[8px] font-medium transition-all backdrop-blur-sm border border-white/10 flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100"
+                  title="Abrir galería de texturas PBR"
+                >
+                  <FolderOpen size={9} className="text-indigo-400" />
+                  <span>Galería</span>
+                </button>
+              )}
             </div>
           </>
         ) : (
-          <>
-            <Upload size={16} className={`mb-1 transition-colors ${isOver ? 'text-indigo-400' : 'text-zinc-700'}`} />
-            <span className="text-[8px] text-zinc-600 font-medium">DROP IMAGE</span>
-          </>
+          <div className="flex flex-col items-center justify-center p-2 text-center w-full">
+            <Upload size={18} className={`mb-1 transition-colors ${isOver ? 'text-indigo-400' : 'text-zinc-500 group-hover:text-indigo-400'}`} />
+            <span className="text-[9px] text-zinc-300 font-bold group-hover:text-white">Cargar</span>
+            <span className="text-[8px] text-zinc-500">Haz clic o arrastra</span>
+            {onOpenLibrary && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenLibrary(); }}
+                className="mt-1.5 py-0.5 px-2 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded text-[8px] font-medium transition-all border border-white/5 flex items-center gap-1"
+                title="Explorar texturas disponibles"
+              >
+                <FolderOpen size={9} className="text-indigo-400" />
+                <span>Galería</span>
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

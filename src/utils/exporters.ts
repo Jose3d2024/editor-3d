@@ -11,6 +11,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { CSGObject, Project, MaterialData } from '../types';
 import { createBaseGeometry } from './csg';
+import { createWireframeTubesGeometry, type WireframeOptions } from './wireframeMesh';
 
 /**
  * Utility to export the current project or selected objects to various formats.
@@ -19,7 +20,7 @@ export class Exporter {
   /**
    * Converts a CSGObject to a THREE.Object3D with its material and textures.
    */
-  static async objectToObject3D(obj: CSGObject, projectMaterials: MaterialData[] = []): Promise<THREE.Object3D> {
+  static async objectToObject3D(obj: CSGObject, projectMaterials: MaterialData[] = [], forceWireframeTubes: boolean = false, wireframeOptions?: WireframeOptions): Promise<THREE.Object3D> {
     // Resolve material: priority is inline material > materialId > default
     const referencedMaterial = obj.materialId ? projectMaterials.find(m => m.id === obj.materialId) : null;
     
@@ -33,7 +34,7 @@ export class Exporter {
     if (obj.materialId || Object.keys(obj.material || {}).length > 0 || (obj.color && obj.color !== '#ffffff') || (obj.opacity !== undefined && obj.opacity !== 1)) {
       const opacity = obj.opacity ?? 1;
       const matParams: any = {
-        color: new THREE.Color(m.color || obj.color || '#ffffff'),
+        color: new THREE.Color(m.color || obj.color || '#4ade80'),
         transparent: (m.transparent !== undefined ? m.transparent : (opacity < 1 || m.opacity < 1)),
         opacity: m.opacity !== undefined ? m.opacity : opacity,
         side: THREE.DoubleSide,
@@ -101,7 +102,13 @@ export class Exporter {
     let object3D: THREE.Object3D;
     let originalAnimations: THREE.AnimationClip[] = [];
 
-    if (obj.meshData) {
+    const isWireOnly = forceWireframeTubes || obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
+
+    if (isWireOnly && !obj.meshData) {
+      // Generar tubos 3D sólidos para que STL/OBJ/GLTF exporten la celosía con volumen real
+      const wireGeo = createWireframeTubesGeometry(obj, wireframeOptions || { radius: 0.035, radialSegments: 6, addJointSpheres: true });
+      object3D = new THREE.Mesh(wireGeo, customMaterial || new THREE.MeshStandardMaterial({ color: obj.color || '#4ade80', roughness: 0.3 }));
+    } else if (obj.meshData) {
       try {
         if (obj.meshData.type === 'gltf') {
           const loader = new GLTFLoader();
@@ -253,6 +260,50 @@ export class Exporter {
     const result = exporter.parse(scene, { binary: true });
     const blob = new Blob([result], { type: 'application/octet-stream' });
     this.saveBlob(blob, 'export.stl');
+  }
+
+  /**
+   * Exports objects explicitly as 3D Wireframe / Celosía Tubular in STL, OBJ or GLTF/GLB
+   */
+  static async exportWireframe(
+    objects: CSGObject[],
+    projectMaterials: MaterialData[],
+    format: 'STL' | 'OBJ' | 'GLTF' | 'GLB' = 'STL',
+    options?: WireframeOptions
+  ) {
+    const scene = new THREE.Scene();
+    for (const obj of objects) {
+      const object3D = await this.objectToObject3D(obj, projectMaterials, true, options);
+      scene.add(object3D);
+    }
+    scene.updateMatrixWorld(true);
+
+    if (format === 'STL') {
+      const exporter = new STLExporter();
+      const result = exporter.parse(scene, { binary: true });
+      const blob = new Blob([result], { type: 'application/octet-stream' });
+      this.saveBlob(blob, `wireframe_export.stl`);
+    } else if (format === 'OBJ') {
+      const exporter = new OBJExporter();
+      const result = exporter.parse(scene);
+      const blob = new Blob([result], { type: 'text/plain' });
+      this.saveBlob(blob, `wireframe_export.obj`);
+    } else if (format === 'GLTF' || format === 'GLB') {
+      const binary = format === 'GLB';
+      const exporter = new GLTFExporter();
+      exporter.parse(
+        scene,
+        (gltf) => {
+          const output = binary ? (gltf as ArrayBuffer) : JSON.stringify(gltf, null, 2);
+          const blob = new Blob([output], { type: binary ? 'application/octet-stream' : 'application/json' });
+          this.saveBlob(blob, `wireframe_export.${binary ? 'glb' : 'gltf'}`);
+        },
+        (error) => {
+          console.error('Error exporting Wireframe GLTF', error);
+        },
+        { binary }
+      );
+    }
   }
 
   /**

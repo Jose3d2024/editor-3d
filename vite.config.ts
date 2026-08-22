@@ -41,7 +41,6 @@ export default defineConfig(({ mode }) => {
         'three/examples/jsm/loaders/FontLoader',
         'three/examples/jsm/geometries/TextGeometry',
         'three/examples/jsm/environments/RoomEnvironment',
-        'three/examples/jsm/environments/RoomEnvironment',
         'three/examples/jsm/exporters/GLTFExporter',
         'three/examples/jsm/exporters/STLExporter',
         'three/examples/jsm/exporters/OBJExporter',
@@ -54,6 +53,8 @@ export default defineConfig(({ mode }) => {
       exclude: ['three-bvh-csg', 'three-csg-ts', 'three-mesh-bvh'],
     },
     server: {
+      host: '0.0.0.0',
+      port: 3000,
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };

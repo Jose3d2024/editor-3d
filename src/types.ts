@@ -24,19 +24,26 @@ export type PrimitiveType =
   | 'VOLUME_CLOUD'
   | 'NURBS_CURVE' | 'NURBS_SURFACE' | 'NURBS_CIRCLE' | 'NURBS_CYLINDER' | 'NURBS_CONE' | 'NURBS_SPHERE' | 'NURBS_TORUS';
 
+export type VolumetricMode = 'cloud' | 'fire' | 'explosion' | 'plasma' | 'smoke' | 'ice';
+
 export interface VolumetricConfig {
   enabled?: boolean;
+  mode?: VolumetricMode;   // 'cloud' | 'fire' | 'explosion' | 'plasma' | 'smoke' | 'ice'
   density?: number;        // uCloudDensity (e.g. 1.5)
   lightIntensity?: number; // uLightIntensity (e.g. 1.2)
   scale?: number;         // uCloudScale (e.g. 2.0)
-  color?: string;         // uCloudColor (e.g. '#ffffff')
+  color?: string;         // uCloudColor (e.g. '#ffffff' or primary flame color)
+  secondaryColor?: string; // Secondary flame / gas / ice tint (e.g. '#f59e0b')
+  emissiveIntensity?: number; // Self-illumination for fire/plasma (e.g. 2.5)
   threshold?: number;     // uThreshold (smoothstep min cutoff, e.g. 0.4)
   thresholdMax?: number;  // uThresholdMax (smoothstep max, e.g. 0.8)
   absorption?: number;    // uAbsorption (Beer-Lambert attenuation, e.g. 2.0)
-  steps?: number;         // Raymarch steps (e.g. 32)
+  steps?: number;         // Raymarch steps (e.g. 32 to 64)
   shadowSteps?: number;   // Shadow steps (e.g. 6)
   windSpeed?: number;     // Animation drift speed
   windDirection?: [number, number, number]; // Wind vector
+  blending?: 'normal' | 'additive'; // Additive blending for fire / plasma
+  turbulentFlame?: boolean; // Flame upward turbulence & heat dissipation
 }
 
 export interface ShapeParameters {
@@ -207,8 +214,33 @@ export interface MaterialData {
     scratches: number;
     dirt: number;
   };
+  // Porosidad y Micro-relieve superficial (rompe el acabado liso y brillo uniforme)
+  porosity?: number | boolean;   // 0.0 (Liso) a 1.0 (Muy poroso/rugoso) o boolean
+  porosityStrength?: number;     // Fuerza / Profundidad de microcavidades
+  porosityScale?: number;        // Escala/frecuencia espacial de los poros (ej: 4.0 a 60.0)
+  porosityRoughness?: number;    // Aumento de rugosidad en poros (matifica y rompe reflejos)
+  porosityCavityDepth?: number;  // Profundidad de micro-cavidades / oclusión
+  porosityCoverage?: number;     // Cobertura de la distribución porosa (0.1 a 1.0)
+  porosityPatchiness?: number;   // Distribución en zonas / parches desiguales (0.0 a 1.0)
+  porosityPatchScale?: number;   // Escala de los parches desiguales (0.5 a 15.0)
+  porosityMatteBias?: number;    // Opacado / mateado de poros para eliminar brillo plástico (0.0 a 1.0)
+  porosityCavityDarkening?: number; // Sombreado / oclusión en fondo de cavidades (0.0 a 0.8)
   isVolumetric?: boolean;
   volumetric?: VolumetricConfig;
+  isIce?: boolean;
+  iceConfig?: IceShaderConfig;
+}
+
+export interface IceShaderConfig {
+  enabled?: boolean;
+  surfaceWarp?: number;      // Deformación orgánica Voronoi/Perlin de caras (0.0 a 0.25)
+  cloudDensity?: number;     // Densidad del núcleo blanco interno Musgrave 3D (0.0 a 3.0)
+  cloudColor?: string;       // Color del núcleo nuboso interno (ej: #f0f9ff)
+  cloudScale?: number;       // Escala del ruido 3D interno
+  frostIntensity?: number;   // Escarcha en bordes/ángulo Fresnel Facing (0.0 a 1.0)
+  crackIntensity?: number;   // Grietas de tensión y fracturas internas Voronoi 3D
+  porosity?: number;         // Porosidad y micro-rugosidad de superficie glacial (0.0 a 1.0)
+  porosityScale?: number;    // Escala de microporos glaciales (ej: 10.0 a 40.0)
 }
 
 export type LightType = 'POINT' | 'DIRECTIONAL' | 'SPOT' | 'RECTAREA' | 'AMBIENT';
@@ -243,6 +275,8 @@ export interface CSGObject {
   vertices:       V3[];
   faces:          MeshFace[];
   vertexOffsets?: Record<number, V3>;
+  wireframeEdges?: [number, number][];
+  isWireframeOnly?: boolean;
 
   // Bézier cúbico: un handle por punto ancla (solo para SHAPE + shapeType=bezier)
   bezierHandles?: BezierHandle[];
@@ -364,7 +398,7 @@ export interface ViewportConfigState {
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
 export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
-export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED';
+export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'FACES_VERTICES';
 
 export interface SilhouetteState {
   front: SilhouetteContour | null;
@@ -430,6 +464,12 @@ export interface AppState {
   transformSpace: TransformSpace;
   drawMode:       'line' | 'rect' | 'bezier' | null;
   drawColor:      string;
+  orthoDrawMode:  boolean;
+  setOrthoDrawMode: (enabled: boolean) => void;
+  drawLockAxis:   'FREE' | 'ORTHO_90' | 'X' | 'Y' | 'Z';
+  setDrawLockAxis: (axis: 'FREE' | 'ORTHO_90' | 'X' | 'Y' | 'Z') => void;
+  insertVertexMode: boolean;
+  setInsertVertexMode: (enabled: boolean) => void;
   showCSG:        boolean;
   gridSnapEnabled: boolean;
   moveReferenceMode: boolean;

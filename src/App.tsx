@@ -6,6 +6,7 @@ import { MultiViewport } from './components/MultiViewport';
 import { MaterialStudioViewport } from './components/MaterialStudioViewport';
 import { MeshProgressModal } from './components/MeshProgressModal';
 import { BooleanStudioModal } from './components/BooleanStudioModal';
+import { BlueprintCarverModal } from './components/BlueprintCarverModal';
 import { useStore } from './store/useStore';
 import { PanelRightClose, PanelRightOpen, ChevronDown, ChevronUp, Film } from 'lucide-react';
 import { generateAllThumbnailsAsync } from './utils/proceduralTextures';
@@ -22,6 +23,8 @@ export default function App() {
     booleanModalTargetId,
     booleanModalToolId,
     isMaterialStudioOpen,
+    isBlueprintModalOpen,
+    closeBlueprintModal,
   } = useStore();
 
   useEffect(() => {
@@ -193,6 +196,12 @@ export default function App() {
         onClose={closeBooleanModal}
         initialTargetId={booleanModalTargetId}
         initialToolId={booleanModalToolId}
+      />
+
+      {/* ── Blueprint Carver Studio (3-View Sketch Modeling) ── */}
+      <BlueprintCarverModal
+        isOpen={isBlueprintModalOpen}
+        onClose={closeBlueprintModal}
       />
     </div>
   );

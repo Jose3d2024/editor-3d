@@ -3,6 +3,8 @@
 // generated procedurally. Normal/roughness/AO/displacement share a common
 // heightfield so they stay physically consistent.
 
+import type { VolumetricConfig } from '../types';
+
 // ── MOTOR DE CACHÉ PERSISTENTE INDUSTRIAL (INDEXEDDB) ────────────────────────
 const DB_NAME = 'Editor3D_Materials_DB';
 const DB_VERSION = 1;
@@ -444,6 +446,37 @@ function voronoi(px: number, py: number, scale: number, seed = 0): { d1: number;
   return { d1: Math.min(d1, 1), d2: Math.min(d2, 1), id };
 }
 
+/**
+ * Generador de Fisuras y Celdas Orgánicas con Domain Warping Multifrecuencia.
+ * Elimina líneas poligonales rígidas y cuadrículas geométricas antinaturales,
+ * produciendo curvas fractales, ramificaciones naturales y facetas orgánicas.
+ */
+export function organicVoronoiFissures(
+  nx: number,
+  ny: number,
+  px: number,
+  py: number,
+  w: number,
+  h: number,
+  scale: number,
+  warpIntensity = 0.4,
+  seed = 42
+): { d1: number; d2: number; crack: number; wnx: number; wny: number; id: number } {
+  const w1 = (getSeamlessFBM4D(px, py, w, h, 2.0, 3) - 0.5) * warpIntensity;
+  const w2 = (getSeamlessFBM4D((px + 179) % w, (py + 283) % h, w, h, 2.0, 3) - 0.5) * warpIntensity;
+  const microWarp = (vNoise(nx * 20, ny * 20, seed + 11) - 0.5) * (warpIntensity * 0.35);
+
+  const wnx = nx + w1 + microWarp;
+  const wny = ny + w2 + microWarp;
+
+  const { d1, d2, id } = voronoi(wnx * scale, wny * scale, Math.round(scale * 1.5), seed);
+  const crackRaw = d2 - d1;
+  const microNoise = (vNoise(wnx * scale * 5, wny * scale * 5, seed + 99) - 0.5) * 0.025;
+  const crack = Math.max(0, crackRaw + microNoise);
+
+  return { d1, d2, crack, wnx, wny, id };
+}
+
 function voronoiField(w: number, h: number, scale = 12, seed = 5): Float32Array {
   const f = new Float32Array(w * h);
   for (let py = 0; py < h; py++) {
@@ -543,6 +576,10 @@ function mapField(field:Float32Array,fn:(v:number)=>number):Float32Array{
 
 function clamp(v:number,lo=0,hi=1){return Math.min(hi,Math.max(lo,v));}
 function lerp(a:number,b:number,t:number){return a+(b-a)*t;}
+function smoothstep(min: number, max: number, value: number): number {
+  const x = Math.max(0, Math.min(1, (value - min) / (max - min)));
+  return x * x * (3 - 2 * x);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC TYPES & IMPERFECTION FILTERS
@@ -570,11 +607,16 @@ export interface GeneratedMaps {
 
 export interface ProceduralMaterial {
   id: string; name: string;
-  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent' | 'gaseous';
+  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent' | 'gaseous' | 'ice_snow';
   icon: string;
+  isVolumetric?: boolean;
+  volumetric?: VolumetricConfig;
   /** Suggested UV repeat — smaller = texture appears larger on mesh */
   defaults: {
     roughness: number; metalness: number;
+    color?: string;
+    emissive?: string;
+    emissiveIntensity?: number;
     normalScale?: number; displacementScale?: number; displacementBias?: number;
     /** UV repeat in X and Y — e.g. [2,2] or single number 4.0 */
     tiling?: [number, number] | number;
@@ -589,6 +631,9 @@ export interface ProceduralMaterial {
     transmission?: number;
     ior?: number;
     thickness?: number;
+    attenuationColor?: string;
+    attenuationDistance?: number;
+    dispersion?: number;
     anisotropy?: number;
     anisotropyRotation?: number;
   };
@@ -873,23 +918,27 @@ export function generateMaterialWithFilters(
   const mat = MATERIAL_LIBRARY.find(m => m.id === materialId);
   if (!mat) return null;
 
-  // 1. Generar los arrays binarios nativos sin costuras (Seamless) de tu material
-  const rawMaps = getRawBuffersForMaterial(mat, w, h); 
-
-  // 2. Inyectar el motor de imperfecciones procedimentales en caliente
-  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
-    applyProceduralFilters(
-      w, h, 
-      rawMaps.albedoArray, 
-      rawMaps.normalArray, 
-      rawMaps.roughnessArray, 
-      rawMaps.metallicArray, 
-      rawMaps.aoArray, 
-      filters
-    );
+  // 1. Generar los mapas base (esto llena la caché globalBufferCache con los buffers reales)
+  const baseMaps = mat.generate(w, h);
+  if (!filters || (filters.rust === 0 && filters.dirt === 0 && filters.scratches === 0)) {
+    return baseMaps;
   }
 
-  // 3. Empaquetar y devolver los mapas listos para Three.js como DataURLs limpios
+  // 2. Extraer buffers reales desde la caché o decodificar
+  const rawMaps = getRawBuffersForMaterial(mat, w, h); 
+
+  // 3. Inyectar el motor de imperfecciones procedimentales en caliente
+  applyProceduralFilters(
+    w, h, 
+    rawMaps.albedoArray, 
+    rawMaps.normalArray, 
+    rawMaps.roughnessArray, 
+    rawMaps.metallicArray, 
+    rawMaps.aoArray, 
+    filters
+  );
+
+  // 4. Empaquetar y devolver los mapas listos para Three.js como DataURLs limpios
   return {
     albedo: rgbaToDataURL(rawMaps.albedoArray, w, h),
     normal: rgbaToDataURL(rawMaps.normalArray, w, h),
@@ -898,6 +947,23 @@ export function generateMaterialWithFilters(
     ao: rgbaToDataURL(rawMaps.aoArray, w, h),
     displacement: rgbaToDataURL(rawMaps.displacementArray, w, h),
   };
+}
+
+/**
+ * Genera un material procedimental por ID, con soporte transparente para filtros.
+ */
+export function generateMaterial(
+  materialId: string, 
+  w = 512, 
+  h = 512, 
+  filters?: MaterialFilters
+): GeneratedMaps | null {
+  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
+    return generateMaterialWithFilters(materialId, w, h, filters);
+  }
+  const mat = MATERIAL_LIBRARY.find(m => m.id === materialId);
+  if (!mat) return null;
+  return mat.generate(w, h);
 }
 
 /** Default thumbnail: 128x128 albedo preview */
@@ -2724,24 +2790,798 @@ const pearlIridescent: ProceduralMaterial = {
   thumbnail() { return _thumb(this); }
 };
 
+// ── MATERIALES VOLUMÉTRICOS PROCEDIMENTALES (RAYMARCHING 3D PBR) ───────────────
+
+const fireVolumetric: ProceduralMaterial = {
+  id: 'fire_volumetric',
+  name: 'Fuego Volumétrico 3D (WebGPU Fire)',
+  category: 'gaseous',
+  icon: '🔥',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'fire',
+    density: 2.8,
+    scale: 2.4,
+    lightIntensity: 2.2,
+    color: '#ef4444',
+    secondaryColor: '#fbbf24',
+    emissiveIntensity: 3.2,
+    threshold: 0.22,
+    thresholdMax: 0.70,
+    absorption: 1.2,
+    steps: 42,
+    shadowSteps: 4,
+    windSpeed: 0.35,
+    windDirection: [0.0, 1.2, 0.0],
+    blending: 'additive',
+    turbulentFlame: true,
+  },
+  defaults: {
+    roughness: 0.1,
+    metalness: 0.0,
+    color: '#ef4444',
+    emissive: '#fbbf24',
+    emissiveIntensity: 3.2,
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const i = (py * w + px) * 4;
+        const nx = px / w, ny = py / h;
+        const n = fbm(nx * 4, ny * 4, 4, 15);
+        const heat = clamp((1.0 - ny) * 1.4 + (n - 0.5) * 0.8, 0, 1);
+        rgba[i]     = 255;
+        rgba[i + 1] = clamp(lerp(20, 240, Math.pow(heat, 1.5))) | 0;
+        rgba[i + 2] = clamp(lerp(0, 80, Math.pow(heat, 3.0))) | 0;
+        rgba[i + 3] = clamp(heat * 255);
+      }
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 30),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
 const plasmaGas: ProceduralMaterial = {
-  id: 'plasma_gas', name: 'Gas de Plasma Volumétrico', category: 'gaseous', icon: '🌌',
-  defaults: { roughness: 0.9, metalness: 0.0, transmission: 0.85, ior: 1.1 },
+  id: 'plasma_gas',
+  name: 'Gas de Plasma Volumétrico 3D',
+  category: 'gaseous',
+  icon: '⚡',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'plasma',
+    density: 2.6,
+    scale: 2.0,
+    lightIntensity: 2.0,
+    color: '#06b6d4',
+    secondaryColor: '#a855f7',
+    emissiveIntensity: 2.8,
+    threshold: 0.20,
+    thresholdMax: 0.72,
+    absorption: 1.0,
+    steps: 40,
+    shadowSteps: 4,
+    windSpeed: 0.12,
+    windDirection: [0.1, 0.05, 0.1],
+    blending: 'additive',
+  },
+  defaults: {
+    roughness: 0.1,
+    metalness: 0.0,
+    color: '#06b6d4',
+    emissive: '#a855f7',
+    emissiveIntensity: 2.8,
+    transmission: 0.85,
+    ior: 1.1,
+  },
   generate(w, h) {
     const rgba = new Uint8ClampedArray(w * h * 4);
     for (let i = 0; i < w * h; i++) {
       const f = fbm((i % w) / w * 8, Math.floor(i / w) / h * 8, 6, 12);
-      // GENERAR EN BASE BLANCO/GRIS NEUTRAL (Permite tintado por UI)
-      const v = lerp(150, 255, f);
-      rgba[i * 4] = v;     // R
-      rgba[i * 4 + 1] = v; // G
-      rgba[i * 4 + 2] = v; // B
-      rgba[i * 4 + 3] = f * 255; // Alfa dinámico para volumen
+      const v = lerp(120, 255, f);
+      rgba[i * 4]     = clamp(lerp(6, 168, f)) | 0;   // Cyan to purple R
+      rgba[i * 4 + 1] = clamp(lerp(182, 85, f)) | 0;  // G
+      rgba[i * 4 + 2] = clamp(lerp(212, 247, f)) | 0; // B
+      rgba[i * 4 + 3] = clamp(f * 255);
     }
     return {
-      albedo: rgbaToDataURL(rgba, w, h), normal: uniformMap(w, h, 128),
-      roughness: uniformMap(w, h, 240), metallic: uniformMap(w, h, 0),
-      ao: uniformMap(w, h, 255), displacement: uniformMap(w, h, 0)
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 30),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const cloudCumulus: ProceduralMaterial = {
+  id: 'cloud_cumulus',
+  name: 'Nube Cúmulo Volumétrica 3D',
+  category: 'gaseous',
+  icon: '☁️',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'cloud',
+    density: 2.5,
+    scale: 2.2,
+    lightIntensity: 1.5,
+    color: '#ffffff',
+    secondaryColor: '#cbd5e1',
+    emissiveIntensity: 0,
+    threshold: 0.20,
+    thresholdMax: 0.72,
+    absorption: 1.8,
+    steps: 36,
+    shadowSteps: 4,
+    windSpeed: 0.08,
+    windDirection: [0.1, 0.05, 0.0],
+    blending: 'normal',
+  },
+  defaults: {
+    roughness: 0.95,
+    metalness: 0.0,
+    color: '#ffffff',
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 5, Math.floor(i / w) / h * 5, 5, 20);
+      const c = clamp(lerp(220, 255, f)) | 0;
+      rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = c;
+      rgba[i * 4 + 3] = clamp(smoothstep(0.3, 0.7, f) * 255);
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 240),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const smokeDense: ProceduralMaterial = {
+  id: 'smoke_dense',
+  name: 'Humo Volumétrico Denso 3D',
+  category: 'gaseous',
+  icon: '💨',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'smoke',
+    density: 3.2,
+    scale: 3.2,
+    lightIntensity: 0.95,
+    color: '#334155',
+    secondaryColor: '#64748b',
+    emissiveIntensity: 0,
+    threshold: 0.22,
+    thresholdMax: 0.75,
+    absorption: 2.8,
+    steps: 36,
+    shadowSteps: 6,
+    windSpeed: 0.22,
+    windDirection: [0.0, 0.8, 0.1],
+    blending: 'normal',
+  },
+  defaults: {
+    roughness: 0.95,
+    metalness: 0.0,
+    color: '#334155',
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 6, Math.floor(i / w) / h * 6, 5, 20);
+      const c = clamp(lerp(45, 90, f)) | 0;
+      rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = c;
+      rgba[i * 4 + 3] = clamp(smoothstep(0.25, 0.75, f) * 255);
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 240),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// ── PAQUETE PROCEDIMENTAL DE HIELO Y NIEVE PBR (CGTrader / Substance Style) ───────────────
+
+const iceGlacial: ProceduralMaterial = {
+  id: 'ice_glacial',
+  name: 'Hielo Glacial Puro (IOR 1.31)',
+  category: 'ice_snow',
+  icon: '🧊',
+  isVolumetric: false,
+  defaults: {
+    roughness: 0.04,
+    metalness: 0.0,
+    color: '#ffffff',
+    transmission: 1.0,
+    ior: 1.31,
+    thickness: 2.0,
+    attenuationColor: '#0284c7',
+    attenuationDistance: 0.45,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.02,
+    dispersion: 0.035,
+  },
+  generate(w, h) {
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const heightField = new Float32Array(w * h);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const i = idx * 4;
+        const nx = px / w, ny = py / h;
+
+        // ── 1. Domain Warping Orgánico Multifrecuencia (Elimina rigidez poligonal) ──
+        const deformaX = vNoise(nx * 3.5, ny * 3.5, 77) * 0.28;
+        const deformaY = vNoise(nx * 3.5 + 4.0, ny * 3.5 + 2.0, 89) * 0.28;
+        const warpX = (getSeamlessFBM4D(px, py, w, h, 2.2, 4) - 0.5) * 0.45;
+        const warpY = (getSeamlessFBM4D((px + 137) % w, (py + 259) % h, w, h, 2.2, 4) - 0.5) * 0.45;
+        const fineWarp = (vNoise(nx * 18, ny * 18, 42) - 0.5) * 0.12;
+
+        const wnx = nx + warpX + fineWarp + deformaX;
+        const wny = ny + warpY + fineWarp + deformaY;
+
+        // ── 2. Ondulaciones Glaciales Esculpidas & Erosión Continua (FBM Multicapa) ──
+        // Sustitución de celdas Voronoi por ruido continuo fractal FBM sin patrones artificiales de panal
+        const n1 = getSeamlessFBM4D(px, py, w, h, 1.8, 4);
+        const n2 = getSeamlessFBM4D((px + 150) % w, (py + 270) % h, w, h, 3.8, 4) * 0.5;
+        const n3 = (vNoise((nx + deformaX) * 7.5, (ny + deformaY) * 7.5, 55) - 0.5) * 0.25;
+        const surfaceFacet = smoothstep(0.12, 0.88, n1 + n2 + n3);
+
+        const flowField = getSeamlessFBM4D((px + 80) % w, (py + 160) % h, w, h, 2.6, 3);
+        const glacialRipples = Math.sin((wny * 6.5 + flowField * 3.2) * Math.PI) * 0.12;
+
+        // ── 3. Fisuras Curvadas Naturales & Vetas de Tensión Orgánicas ────────────
+        const musgraveCore = getSeamlessFBM4D(px, py, w, h, 3.6, 5);
+        const fractureNoise = Math.abs(getSeamlessFBM4D(px, py, w, h, 4.2, 5) - 0.5) * 2.0;
+        const fineStrata = Math.abs(vNoise(wnx * 18.0, wny * 18.0, 93) - 0.5) * 2.0;
+        const naturalFissures = 1.0 - smoothstep(0.04, 0.24, fractureNoise * 0.65 + fineStrata * 0.35);
+
+        // Clúster no uniforme: zonas vítreas prístinas vs zonas densas de fractura
+        const clusterMask = smoothstep(0.35, 0.75, getSeamlessFBM4D(px, py, w, h, 1.3, 3));
+        const activeCracks = naturalFissures * clusterMask;
+
+        // Micro-inclusiones de aire / burbujas fluidas continuas
+        const bubbleNoise = vNoise(wnx * 28.0, wny * 28.0, 29);
+        const bubbles = smoothstep(0.80, 0.96, bubbleNoise) * clusterMask;
+
+        // ── 4. Micro-desconchado & Escarcha Orgánica ─────────────────────────────
+        const fineFrost = vNoise(nx * 38.0, ny * 38.0, 4);
+
+        // Relieve y Normal Map Orgánicos y Fluidos
+        const totalHeight = n1 * 0.38 + surfaceFacet * 0.24 + glacialRipples * 0.16 + activeCracks * 0.16 + bubbles * 0.06;
+        heightField[idx] = clamp(totalHeight);
+
+        // Rugosidad: Especular vítreo (~0.04) con zonas fracturadas semi-mates (~0.35)
+        const roughVal = clamp(lerp(10, 95, activeCracks * 0.7 + fineFrost * 0.3)) | 0;
+        roughness[i] = roughness[i + 1] = roughness[i + 2] = roughVal;
+        roughness[i + 3] = 255;
+
+        // ── 5. Gradiente Dinámico Multitonos en Albedo (Fin del azul plano) ───────
+        const colProfundo = { r: 11, g: 45, b: 82 };    // Azul noche compacto (#0b2d52)
+        const colGlacial  = { r: 56, g: 189, b: 248 };  // Azul ártico (#38bdf8)
+        const colBurbujas = { r: 241, g: 248, b: 255 }; // Blanco escarcha/aire (#f1f8ff)
+
+        const factorDensidad = clamp(musgraveCore * 0.7 + (1.0 - surfaceFacet) * 0.3);
+
+        let r = colProfundo.r, g = colProfundo.g, b = colProfundo.b;
+        r = lerp(r, colGlacial.r, factorDensidad);
+        g = lerp(g, colGlacial.g, factorDensidad);
+        b = lerp(b, colGlacial.b, factorDensidad);
+
+        const factorGrieta = smoothstep(0.55, 0.85, clusterMask);
+        r = lerp(r, colBurbujas.r, factorGrieta);
+        g = lerp(g, colBurbujas.g, factorGrieta);
+        b = lerp(b, colBurbujas.b, factorGrieta);
+
+        albedo[i]     = r | 0;
+        albedo[i + 1] = g | 0;
+        albedo[i + 2] = b | 0;
+        albedo[i + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 2.8), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.85 + v * 0.15)), w, h),
+      displacement: grayField(heightField, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const iceFrosted: ProceduralMaterial = {
+  id: 'ice_frosted',
+  name: 'Hielo con Escarcha (Rime Ice)',
+  category: 'ice_snow',
+  icon: '❄️',
+  isVolumetric: false,
+  defaults: {
+    roughness: 0.16,
+    metalness: 0.0,
+    color: '#ffffff',
+    transmission: 0.94,
+    ior: 1.31,
+    thickness: 2.0,
+    attenuationColor: '#0284c7',
+    attenuationDistance: 0.60,
+    clearcoat: 0.85,
+    clearcoatRoughness: 0.08,
+  },
+  generate(w, h) {
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const heightField = new Float32Array(w * h);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const i = idx * 4;
+        const nx = px / w, ny = py / h;
+
+        // Domain warping orgánico para dendritas cristalinas ramificadas
+        const warpX = (getSeamlessFBM4D(px, py, w, h, 2.4, 3) - 0.5) * 0.35;
+        const warpY = (getSeamlessFBM4D((px + 99) % w, (py + 188) % h, w, h, 2.4, 3) - 0.5) * 0.35;
+        const wnx = nx + warpX, wny = ny + warpY;
+
+        // Patrón dendrítico de escarcha (FBM + modulación orgánica)
+        const frostFBM = fbm(wnx * 7.5, wny * 7.5, 5, 53);
+        const frostDetail = fbm(wnx * 16.0, wny * 16.0, 4, 88);
+        const frostCells = smoothstep(0.15, 0.85, frostDetail);
+        const frostMask = clamp(frostFBM * 0.65 + frostCells * 0.35);
+
+        // Relieve de la corteza de escarcha
+        heightField[idx] = frostMask * 0.55;
+
+        // Rugosidad: Zonas pulidas cristalinas (12/255) vs cristales de escarcha mate (135/255)
+        const roughVal = clamp(lerp(12, 135, frostMask)) | 0;
+        roughness[i] = roughness[i + 1] = roughness[i + 2] = roughVal;
+        roughness[i + 3] = 255;
+
+        // Albedo: Escarcha blanquecina sobre hielo cristalino
+        const frostWhiteness = clamp(lerp(242, 255, frostMask)) | 0;
+        albedo[i] = albedo[i + 1] = albedo[i + 2] = frostWhiteness;
+        albedo[i + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 2.4), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.85 + v * 0.15)), w, h),
+      displacement: grayField(heightField, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const iceCracked: ProceduralMaterial = {
+  id: 'ice_cracked',
+  name: 'Hielo de Lago Fisurado',
+  category: 'ice_snow',
+  icon: '💎',
+  isVolumetric: false,
+  defaults: {
+    roughness: 0.05,
+    metalness: 0.0,
+    color: '#ffffff',
+    transmission: 0.98,
+    ior: 1.31,
+    thickness: 2.5,
+    attenuationColor: '#0284c7',
+    attenuationDistance: 0.40,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.02,
+  },
+  generate(w, h) {
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const heightField = new Float32Array(w * h);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const i = idx * 4;
+        const nx = px / w, ny = py / h;
+
+        // Domain warping orgánico profundo (fracturas curvilíneas de lago helado)
+        const warpX = (getSeamlessFBM4D(px, py, w, h, 2.0, 4) - 0.5) * 0.50;
+        const warpY = (getSeamlessFBM4D((px + 211) % w, (py + 317) % h, w, h, 2.0, 4) - 0.5) * 0.50;
+        const wnx = nx + warpX, wny = ny + warpY;
+
+        // Red profunda de fracturas orgánicas por tensión
+        const { d1: c1, d2: c2 } = voronoi(wnx * 2.2, wny * 2.2, 4, 19);
+        const deepCracks = 1.0 - smoothstep(0.008, 0.045, c2 - c1);
+
+        const { d1: s1, d2: s2 } = voronoi(wnx * 5.5, wny * 5.5, 7, 92);
+        const fineCracks = 1.0 - smoothstep(0.012, 0.065, s2 - s1);
+
+        // Burbujas subsuperficiales atrapadas
+        const bub = voronoi(wnx * 7.5, wny * 7.5, 10, 101).d1;
+        const bubbles = 1.0 - smoothstep(0.02, 0.08, bub);
+
+        const crackWeb = clamp(deepCracks * 0.65 + fineCracks * 0.35 + bubbles * 0.25);
+        heightField[idx] = crackWeb;
+
+        // Superficie lisa de espejo con ligeras rugosidades en grietas
+        const roughVal = clamp(lerp(8, 60, crackWeb)) | 0;
+        roughness[i] = roughness[i + 1] = roughness[i + 2] = roughVal;
+        roughness[i + 3] = 255;
+
+        // Albedo: fracturas brillantes blancas dentro de hielo transparente azulado
+        albedo[i] = albedo[i + 1] = albedo[i + 2] = 255;
+        albedo[i + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 3.0), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: grayField(heightField, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const snowPowder: ProceduralMaterial = {
+  id: 'snow_powder',
+  name: 'Nieve Fresca / Polvo',
+  category: 'ice_snow',
+  icon: '🌨️',
+  isVolumetric: false,
+  defaults: {
+    roughness: 0.85,
+    metalness: 0.0,
+    color: '#f8fafc',
+    transmission: 0.0,
+    sheen: 0.95,
+    sheenColor: '#e0f2fe',
+    sheenRoughness: 0.35,
+    clearcoat: 0.0,
+  },
+  generate(w, h) {
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const heightField = new Float32Array(w * h);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const i = idx * 4;
+        const nx = px / w, ny = py / h;
+
+        // Dunas de ventisca suaves + grano de nieve cristalina
+        const duneNoise = fbm(nx * 3.5, ny * 3.5, 4, 33);
+        const microGrain = vNoise(nx * 55, ny * 55, 2);
+        const snowHeight = duneNoise * 0.8 + microGrain * 0.2;
+        heightField[idx] = snowHeight;
+
+        // Rugosidad suave difusa con micro-destellos
+        const roughVal = clamp(lerp(200, 235, duneNoise) + (microGrain > 0.8 ? -40 : 0)) | 0;
+        roughness[i] = roughness[i + 1] = roughness[i + 2] = roughVal;
+        roughness[i + 3] = 255;
+
+        const c = clamp(lerp(242, 255, snowHeight)) | 0;
+        albedo[i]     = c;
+        albedo[i + 1] = clamp(c + 1) | 0;
+        albedo[i + 2] = 255;
+        albedo[i + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 1.6), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.75 + v * 0.25)), w, h),
+      displacement: grayField(heightField, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const snowIceMelt: ProceduralMaterial = {
+  id: 'snow_ice_melt',
+  name: 'Nieve y Hielo Descongelado',
+  category: 'ice_snow',
+  icon: '🏔️',
+  isVolumetric: false,
+  defaults: {
+    roughness: 0.30,
+    metalness: 0.0,
+    color: '#ffffff',
+    transmission: 0.60,
+    ior: 1.31,
+    thickness: 1.8,
+    attenuationColor: '#38bdf8',
+    attenuationDistance: 1.2,
+    clearcoat: 0.9,
+    clearcoatRoughness: 0.04,
+  },
+  generate(w, h) {
+    const albedo = new Uint8ClampedArray(w * h * 4);
+    const roughness = new Uint8ClampedArray(w * h * 4);
+    const heightField = new Float32Array(w * h);
+
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const idx = py * w + px;
+        const i = idx * 4;
+        const nx = px / w, ny = py / h;
+
+        // Mezcla orgánica suave: charcos de hielo cristalino y costra de nieve
+        const blendMask = smoothstep(0.35, 0.65, getSeamlessFBM4D(px, py, w, h, 2.5, 4));
+        const warpX = (getSeamlessFBM4D(px, py, w, h, 2.0, 3) - 0.5) * 0.35;
+        const warpY = (getSeamlessFBM4D((px + 80) % w, (py + 160) % h, w, h, 2.0, 3) - 0.5) * 0.35;
+        const iceCracks = 1.0 - smoothstep(0.012, 0.065, voronoi((nx + warpX) * 3.5, (ny + warpY) * 3.5, 5, 80).d1);
+
+        heightField[idx] = blendMask * 0.7 + (1.0 - blendMask) * iceCracks * 0.3;
+
+        // Nieve rugosa (220), charcos de hielo pulido (12)
+        const roughVal = clamp(lerp(12, 220, blendMask)) | 0;
+        roughness[i] = roughness[i + 1] = roughness[i + 2] = roughVal;
+        roughness[i + 3] = 255;
+
+        // Albedo: nieve blanca vs hielo transparente
+        const c = clamp(lerp(230, 255, blendMask)) | 0;
+        albedo[i] = albedo[i + 1] = albedo[i + 2] = c;
+        albedo[i + 3] = 255;
+      }
+    }
+
+    return {
+      albedo: rgbaToDataURL(albedo, w, h),
+      normal: rgbaToDataURL(heightToNormalSeamless(heightField, w, h, 2.4), w, h),
+      roughness: rgbaToDataURL(roughness, w, h),
+      metallic: uniformMap(w, h, 0),
+      ao: grayField(mapField(heightField, v => clamp(0.8 + v * 0.2)), w, h),
+      displacement: grayField(heightField, w, h),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+// Backward compatibility alias
+const iceCrystal = iceGlacial;
+
+const darkStorm: ProceduralMaterial = {
+  id: 'dark_storm',
+  name: 'Nube de Tormenta Oscura 3D',
+  category: 'gaseous',
+  icon: '🌩️',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'cloud',
+    density: 5.5,
+    scale: 5.8,
+    lightIntensity: 1.5,
+    color: '#475569',
+    secondaryColor: '#2d3748',
+    emissiveIntensity: 0,
+    threshold: 0.34,
+    thresholdMax: 0.86,
+    absorption: 3.2,
+    steps: 24,
+    shadowSteps: 5,
+    windSpeed: 0.12,
+    windDirection: [0.15, 0.05, 0.0],
+    blending: 'normal',
+  },
+  defaults: {
+    roughness: 0.95,
+    metalness: 0.0,
+    color: '#475569',
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 6, Math.floor(i / w) / h * 6, 6, 20);
+      const c = clamp(lerp(60, 110, f)) | 0;
+      rgba[i * 4] = rgba[i * 4 + 1] = c;
+      rgba[i * 4 + 2] = clamp(c + 15);
+      rgba[i * 4 + 3] = clamp(smoothstep(0.2, 0.8, f) * 255);
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 240),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const cosmicNebula: ProceduralMaterial = {
+  id: 'cosmic_nebula',
+  name: 'Nebulosa Cósmica Volumétrica 3D',
+  category: 'gaseous',
+  icon: '🌌',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'plasma',
+    density: 2.2,
+    scale: 1.6,
+    lightIntensity: 1.8,
+    color: '#c084fc',
+    secondaryColor: '#f43f5e',
+    emissiveIntensity: 2.4,
+    threshold: 0.22,
+    thresholdMax: 0.72,
+    absorption: 1.2,
+    steps: 36,
+    shadowSteps: 4,
+    windSpeed: 0.05,
+    windDirection: [0.05, 0.02, 0.08],
+    blending: 'additive',
+  },
+  defaults: {
+    roughness: 0.1,
+    metalness: 0.0,
+    color: '#c084fc',
+    emissive: '#f43f5e',
+    emissiveIntensity: 2.4,
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 5, Math.floor(i / w) / h * 5, 5, 25);
+      rgba[i * 4]     = clamp(lerp(192, 244, f)) | 0; // R
+      rgba[i * 4 + 1] = clamp(lerp(132, 63, f)) | 0;  // G
+      rgba[i * 4 + 2] = clamp(lerp(252, 94, f)) | 0;  // B
+      rgba[i * 4 + 3] = clamp(f * 255);
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 30),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const auroraBoreal: ProceduralMaterial = {
+  id: 'aurora_borealis',
+  name: 'Aurora Boreal Volumétrica 3D',
+  category: 'gaseous',
+  icon: '✨',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'plasma',
+    density: 2.0,
+    scale: 1.8,
+    lightIntensity: 1.8,
+    color: '#10b981',
+    secondaryColor: '#06b6d4',
+    emissiveIntensity: 2.2,
+    threshold: 0.25,
+    thresholdMax: 0.78,
+    absorption: 1.0,
+    steps: 36,
+    shadowSteps: 4,
+    windSpeed: 0.08,
+    windDirection: [0.1, 0.0, 0.1],
+    blending: 'additive',
+  },
+  defaults: {
+    roughness: 0.1,
+    metalness: 0.0,
+    color: '#10b981',
+    emissive: '#06b6d4',
+    emissiveIntensity: 2.2,
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const f = fbm((i % w) / w * 6, Math.floor(i / w) / h * 6, 5, 18);
+      rgba[i * 4]     = clamp(lerp(16, 6, f)) | 0;
+      rgba[i * 4 + 1] = clamp(lerp(185, 182, f)) | 0;
+      rgba[i * 4 + 2] = clamp(lerp(129, 212, f)) | 0;
+      rgba[i * 4 + 3] = clamp(f * 255);
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 30),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
+    };
+  },
+  thumbnail() { return _thumb(this); }
+};
+
+const liquidWaterVolume: ProceduralMaterial = {
+  id: 'liquid_water_volume',
+  name: 'Agua / Fluido Volumétrico 3D',
+  category: 'gaseous',
+  icon: '💧',
+  isVolumetric: true,
+  volumetric: {
+    enabled: true,
+    mode: 'ice',
+    density: 2.2,
+    scale: 2.4,
+    lightIntensity: 1.6,
+    color: '#38bdf8',
+    secondaryColor: '#0284c7',
+    emissiveIntensity: 0.2,
+    threshold: 0.22,
+    thresholdMax: 0.72,
+    absorption: 1.5,
+    steps: 38,
+    shadowSteps: 4,
+    windSpeed: 0.06,
+    windDirection: [0.05, 0.02, 0.0],
+    blending: 'normal',
+  },
+  defaults: {
+    roughness: 0.05,
+    metalness: 0.0,
+    color: '#38bdf8',
+    transmission: 0.95,
+    ior: 1.333,
+  },
+  generate(w, h) {
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const i = (py * w + px) * 4;
+        const nx = px / w, ny = py / h;
+        const wave = fbm(nx * 8, ny * 8, 4, 15);
+        rgba[i]     = clamp(lerp(14, 56, wave)) | 0;
+        rgba[i + 1] = clamp(lerp(165, 189, wave)) | 0;
+        rgba[i + 2] = clamp(lerp(233, 248, wave)) | 0;
+        rgba[i + 3] = 255;
+      }
+    }
+    return {
+      albedo: rgbaToDataURL(rgba, w, h),
+      normal: uniformMap(w, h, 128),
+      roughness: uniformMap(w, h, 10),
+      metallic: uniformMap(w, h, 0),
+      ao: uniformMap(w, h, 255),
+      displacement: uniformMap(w, h, 0),
     };
   },
   thumbnail() { return _thumb(this); }
@@ -3916,37 +4756,29 @@ export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
   carbonFiber, goldCarbonFiber, rubber, plasticGlossy, ceramicGlazed, naturalSponge,
   kintsugiCeramic, zelligeTiles, tacticalPolymer,
   
-  // Gaseous, Plasma & Elements
-  plasmaGas, activeMagmaCrust,
+  // Ice & Snow Procedural PBR Collection (CGTrader / Natural)
+  iceGlacial, iceFrosted, iceCracked, snowPowder, snowIceMelt,
+
+  // Gaseous, Plasma, Fluids & Volumetric Elements (Raymarching 3D PBR)
+  fireVolumetric, plasmaGas, cloudCumulus, smokeDense,
+  darkStorm, cosmicNebula, auroraBoreal, liquidWaterVolume, activeMagmaCrust,
 
   // Ground & Terrain
   gravel, sand, asphalt, dirt, rockyGroundMoss,
 ];
 
 export const MATERIAL_CATEGORIES = [
+  { id: 'ice_snow', label: 'Hielo & Nieve', icon: '❄️' },
   { id: 'wood', label: 'Madera', icon: '🪵' },
   { id: 'stone', label: 'Piedra / Orgánico', icon: '🪨' },
   { id: 'metal', label: 'Metal', icon: '⚙️' },
   { id: 'paint', label: 'Pintura', icon: '🎨' },
   { id: 'textile', label: 'Textiles / Telas', icon: '🧣' },
   { id: 'iridescent', label: 'Iridiscentes', icon: '💿' },
-  { id: 'synthetic', label: 'Sintético / Fluidos', icon: '🔬' },
-  { id: 'gaseous', label: 'Gaseoso / Plasma', icon: '🌌' },
+  { id: 'synthetic', label: 'Sintético / Vidrio', icon: '🔬' },
+  { id: 'gaseous', label: 'Volumétricos / Gases & Fuego', icon: '🔥' },
   { id: 'ground', label: 'Suelo', icon: '🌍' },
 ] as const;
-
-export function generateMaterial(
-  id: string, 
-  width = 512, 
-  height = 512, 
-  filters?: MaterialFilters
-): GeneratedMaps | null {
-  if (filters && (filters.rust > 0 || filters.dirt > 0 || filters.scratches > 0)) {
-    return generateMaterialWithFilters(id, width, height, filters);
-  }
-  const mat = MATERIAL_LIBRARY.find(m => m.id === id);
-  return mat ? mat.generate(width, height) : null;
-}
 
 const THUMBNAIL_CACHE = new Map<string, string>();
 

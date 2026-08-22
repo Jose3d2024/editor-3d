@@ -81,6 +81,7 @@ function toThreeGeometry(obj: { vertices: V3[]; faces: MeshFace[] }): THREE.Buff
 
   if (hasUVs) {
     obj.faces.forEach(face => {
+      if (!face || !face.indices || face.indices.length < 3) return;
       const faceIndices: number[] = [];
       face.indices.forEach((posIdx, i) => {
         const uv = face.uvs?.[i] || [0, 0];
@@ -89,9 +90,9 @@ function toThreeGeometry(obj: { vertices: V3[]; faces: MeshFace[] }): THREE.Buff
           faceIndices.push(vertMap.get(key)!);
         } else {
           const newIdx = finalPositions.length / 3;
-          const v = obj.vertices[posIdx];
-          finalPositions.push(...v);
-          finalUvs.push(...uv);
+          const v = obj.vertices[posIdx] || [0, 0, 0];
+          finalPositions.push(v[0], v[1], v[2]);
+          finalUvs.push(uv[0], uv[1]);
           vertMap.set(key, newIdx);
           faceIndices.push(newIdx);
         }
@@ -102,8 +103,11 @@ function toThreeGeometry(obj: { vertices: V3[]; faces: MeshFace[] }): THREE.Buff
     });
   } else {
     const positions: number[] = [];
-    for (const [x, y, z] of obj.vertices) positions.push(x, y, z);
+    for (const v of obj.vertices) {
+      if (v) positions.push(v[0], v[1], v[2]);
+    }
     obj.faces.forEach(face => {
+      if (!face || !face.indices || face.indices.length < 3) return;
       for (let i = 1; i < face.indices.length - 1; i++) {
         indices.push(face.indices[0], face.indices[i], face.indices[i + 1]);
       }
@@ -395,7 +399,7 @@ export function smoothMesh(
  *     updateObject(id, { vertexOffsets: {} });
  */
 export function subdivideMesh(
-  obj: CSGObject,
+  obj: { vertices: V3[]; faces: MeshFace[] },
 ): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = obj.vertices.map(v => [...v] as V3);
   const faces = obj.faces;
@@ -836,12 +840,13 @@ export function validateMesh(obj: CSGObject): ValidationResult {
  */
 export function generateUVs(obj: { vertices: V3[]; faces: MeshFace[] }): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = obj.vertices;
-  if (vertices.length === 0) return obj;
+  if (!vertices || vertices.length === 0 || !obj.faces) return obj;
 
   // Calculate bounding box for normalization
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   vertices.forEach(v => {
+    if (!v) return;
     for (let i = 0; i < 3; i++) {
       if (v[i] < min[i]) min[i] = v[i];
       if (v[i] > max[i]) max[i] = v[i];
@@ -857,34 +862,48 @@ export function generateUVs(obj: { vertices: V3[]; faces: MeshFace[] }): { verti
   const maxSize = Math.max(size[0], size[1], size[2]) || 1;
 
   const faces = obj.faces.map(face => {
-    // Calculate normal once per face
-    const v0 = new THREE.Vector3(...vertices[face.indices[0]]);
-    const v1 = new THREE.Vector3(...vertices[face.indices[1]]);
-    const v2 = new THREE.Vector3(...vertices[face.indices[2]]);
-    const normal = new THREE.Vector3().crossVectors(
-      v1.clone().sub(v0),
-      v2.clone().sub(v0)
-    ).normalize();
+    if (!face || !face.indices) return face;
 
-    const absX = Math.abs(normal.x);
-    const absY = Math.abs(normal.y);
-    const absZ = Math.abs(normal.z);
+    const i0 = face.indices[0];
+    const i1 = face.indices[1];
+    const i2 = face.indices[2];
+    const vert0 = i0 !== undefined ? vertices[i0] : null;
+    const vert1 = i1 !== undefined ? vertices[i1] : null;
+    const vert2 = i2 !== undefined ? vertices[i2] : null;
+
+    let absX = 0, absY = 1, absZ = 0;
+    if (vert0 && vert1 && vert2) {
+      const v0 = new THREE.Vector3(...vert0);
+      const v1 = new THREE.Vector3(...vert1);
+      const v2 = new THREE.Vector3(...vert2);
+      const normal = new THREE.Vector3().crossVectors(
+        v1.clone().sub(v0),
+        v2.clone().sub(v0)
+      ).normalize();
+
+      if (normal.lengthSq() > 1e-6) {
+        absX = Math.abs(normal.x);
+        absY = Math.abs(normal.y);
+        absZ = Math.abs(normal.z);
+      }
+    }
 
     const uvs: [number, number][] = face.indices.map(vIdx => {
-      const [x, y, z] = vertices[vIdx];
+      const v = vertices[vIdx] || [0, 0, 0];
+      const [x, y, z] = v;
       
-      let u = 0, v = 0;
+      let u = 0, uvY = 0;
       if (absY >= absX && absY >= absZ) {
         u = (x - min[0]) / maxSize;
-        v = (z - min[2]) / maxSize;
+        uvY = (z - min[2]) / maxSize;
       } else if (absX >= absY && absX >= absZ) {
         u = (z - min[2]) / maxSize;
-        v = (y - min[1]) / maxSize;
+        uvY = (y - min[1]) / maxSize;
       } else {
         u = (x - min[0]) / maxSize;
-        v = (y - min[1]) / maxSize;
+        uvY = (y - min[1]) / maxSize;
       }
-      return [u, v] as [number, number];
+      return [u, uvY] as [number, number];
     });
 
     return { ...face, uvs };
@@ -903,7 +922,7 @@ export function applyUVWMapping(
   options?: { angleThresholdDeg?: number; islandMargin?: number; relaxIterations?: number }
 ): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = obj.vertices;
-  if (vertices.length === 0) return obj;
+  if (!vertices || vertices.length === 0 || !obj.faces) return obj;
 
   if (type === 'SMART_UV' || type === 'UV' || type === 'SMART') {
     return smartUVProject(obj, {
@@ -929,6 +948,7 @@ export function applyUVWMapping(
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   vertices.forEach(v => {
+    if (!v) return;
     for (let i = 0; i < 3; i++) {
       if (v[i] < min[i]) min[i] = v[i];
       if (v[i] > max[i]) max[i] = v[i];
@@ -942,11 +962,13 @@ export function applyUVWMapping(
   ];
 
   const faces = obj.faces.map(face => {
+    if (!face || !face.indices) return face;
     const uvs: [number, number][] = face.indices.map(vIdx => {
-      const [x, y] = vertices[vIdx];
+      const v = vertices[vIdx] || [0, 0, 0];
+      const [x, y] = v;
       const u = (x - min[0]) / size[0];
-      const v = (y - min[1]) / size[1];
-      return [u, v] as [number, number];
+      const uvY = (y - min[1]) / size[1];
+      return [u, uvY] as [number, number];
     });
     return { ...face, uvs };
   });

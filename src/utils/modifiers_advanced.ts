@@ -180,15 +180,22 @@ export function chamfer3DEdges(
 
   // ── Normales por cara ──────────────────────────────────────────────────────
   const faceNormals: THREE.Vector3[] = obj.faces.map(face => {
-    const v0 = new THREE.Vector3(...obj.vertices[face.indices[0]]);
-    const v1 = new THREE.Vector3(...obj.vertices[face.indices[1]]);
-    const v2 = new THREE.Vector3(...obj.vertices[face.indices[2]]);
-    return new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0)).normalize();
+    if (!face || !face.indices || face.indices.length < 3) return new THREE.Vector3(0, 1, 0);
+    const vert0 = obj.vertices[face.indices[0]];
+    const vert1 = obj.vertices[face.indices[1]];
+    const vert2 = obj.vertices[face.indices[2]];
+    if (!vert0 || !vert1 || !vert2) return new THREE.Vector3(0, 1, 0);
+    const v0 = new THREE.Vector3(...vert0);
+    const v1 = new THREE.Vector3(...vert1);
+    const v2 = new THREE.Vector3(...vert2);
+    const norm = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
+    return norm.lengthSq() > 1e-8 ? norm.normalize() : new THREE.Vector3(0, 1, 0);
   });
 
   // ── Mapa arista → caras adyacentes ────────────────────────────────────────
   const edgeToFaces = new Map<string, number[]>();
   obj.faces.forEach((face, fi) => {
+    if (!face || !face.indices) return;
     const n = face.indices.length;
     for (let i = 0; i < n; i++) {
       const a = face.indices[i], b = face.indices[(i+1)%n];
@@ -205,10 +212,14 @@ export function chamfer3DEdges(
   const getRetracted = (fi: number, vi: number, normal: THREE.Vector3): number => {
     const key = `${fi}:${vi}`;
     if (retracted.has(key)) return retracted.get(key)!;
-    const base = new THREE.Vector3(...obj.vertices[vi]);
+    const baseVert = obj.vertices[vi] || [0, 0, 0];
+    const base = new THREE.Vector3(...baseVert);
     // Retrae el vértice a lo largo de la normal de cara y hacia el centroide
     const face = obj.faces[fi];
-    const centroid = face.indices.reduce((acc, i) => acc.add(new THREE.Vector3(...obj.vertices[i])), new THREE.Vector3()).divideScalar(face.indices.length);
+    const centroid = (face.indices || []).reduce((acc, i) => {
+      const v = obj.vertices[i] || [0, 0, 0];
+      return acc.add(new THREE.Vector3(...v));
+    }, new THREE.Vector3()).divideScalar(Math.max(1, (face.indices || []).length));
     const toCenter = centroid.clone().sub(base).normalize();
     const newPos = base.clone().addScaledVector(toCenter, dist);
     const newIdx = verts.length;
@@ -224,17 +235,19 @@ export function chamfer3DEdges(
     processedEdges.add(edgeKey);
 
     const [fi1, fi2] = adjFaces;
-    const dot = faceNormals[fi1].dot(faceNormals[fi2]);
+    const n1 = faceNormals[fi1] || new THREE.Vector3(0, 1, 0);
+    const n2 = faceNormals[fi2] || new THREE.Vector3(0, 1, 0);
+    const dot = n1.dot(n2);
     if (dot >= threshold) return; // arista suave, sin chaflán
 
     const [aStr, bStr] = edgeKey.split(':');
     const ai = parseInt(aStr), bi = parseInt(bStr);
 
     // Crear 4 vértices retraídos (2 en cada cara)
-    const a1 = getRetracted(fi1, ai, faceNormals[fi1]);
-    const b1 = getRetracted(fi1, bi, faceNormals[fi1]);
-    const a2 = getRetracted(fi2, ai, faceNormals[fi2]);
-    const b2 = getRetracted(fi2, bi, faceNormals[fi2]);
+    const a1 = getRetracted(fi1, ai, n1);
+    const b1 = getRetracted(fi1, bi, n1);
+    const a2 = getRetracted(fi2, ai, n2);
+    const b2 = getRetracted(fi2, bi, n2);
 
     // Quad de chaflán (cara plana entre las dos caras adyacentes)
     facesOut.push({ indices: [a1, b1, b2, a2] });
@@ -242,6 +255,7 @@ export function chamfer3DEdges(
 
   // ── Caras originales con vértices retraídos ────────────────────────────────
   obj.faces.forEach((face, fi) => {
+    if (!face || !face.indices) return;
     const newIndices = face.indices.map(vi => {
       const key = `${fi}:${vi}`;
       return retracted.get(key) ?? vi;
@@ -269,14 +283,22 @@ export function offsetMesh(
   const normals: THREE.Vector3[] = obj.vertices.map(() => new THREE.Vector3());
 
   obj.faces.forEach(face => {
+    if (!face || !face.indices || face.indices.length < 3) return;
     const n = face.indices.length;
+    const vert0 = obj.vertices[face.indices[0]];
+    if (!vert0) return;
+    const v0 = new THREE.Vector3(...vert0);
     for (let i = 1; i < n - 1; i++) {
-      const v0 = new THREE.Vector3(...obj.vertices[face.indices[0]]);
-      const v1 = new THREE.Vector3(...obj.vertices[face.indices[i]]);
-      const v2 = new THREE.Vector3(...obj.vertices[face.indices[i+1]]);
+      const vert1 = obj.vertices[face.indices[i]];
+      const vert2 = obj.vertices[face.indices[i+1]];
+      if (!vert1 || !vert2) continue;
+      const v1 = new THREE.Vector3(...vert1);
+      const v2 = new THREE.Vector3(...vert2);
       const faceNormal = new THREE.Vector3().crossVectors(v1.clone().sub(v0), v2.clone().sub(v0));
       // La longitud de crossVectors = 2×área → normal ponderada por área
-      face.indices.forEach(vi => normals[vi].add(faceNormal));
+      face.indices.forEach(vi => {
+        if (normals[vi]) normals[vi].add(faceNormal);
+      });
     }
   });
 

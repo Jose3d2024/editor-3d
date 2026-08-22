@@ -9,6 +9,7 @@
  */
 
 import React, { useState } from 'react';
+import { Sparkles, Layers, Sliders } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import {
   extractSilhouetteFromImage,
@@ -108,11 +109,35 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
 
   return (
     <div className="space-y-4">
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <div>
-        <p className="text-[12px] font-bold text-zinc-100">✏️ Del Plano a la Realidad</p>
-        <p className="text-[9px] text-zinc-500 leading-tight mt-0.5">
-          Dibuja en los visores Frontal, Lateral y Superior. Los bordes de los visores se iluminarán cuando la herramienta esté activa.
+      {/* ── Banner: Estudio Automático 3 Vistas (Blueprint Carver) ── */}
+      <div className="p-3 bg-gradient-to-br from-indigo-950/60 via-purple-950/40 to-zinc-900 border border-indigo-500/40 rounded-xl space-y-2 shadow-lg">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 bg-indigo-600 rounded-lg text-white shadow">
+            <Sparkles size={14} className="text-amber-300" />
+          </div>
+          <div>
+            <p className="text-[11px] font-bold text-white leading-tight">Tallado 3D por Bocetos (3 Vistas)</p>
+            <p className="text-[8.5px] text-indigo-300/80">Visual Hull & Intersección Booleana CSG</p>
+          </div>
+        </div>
+        <p className="text-[8.5px] text-zinc-300 leading-snug">
+          Carga 3 imágenes (Frontal, Planta, Perfil) para reconstruir automáticamente volúmenes 3D completos mediante intersección y Marching Cubes.
+        </p>
+        <button
+          type="button"
+          onClick={() => useStore.getState().openBlueprintModal()}
+          className="w-full py-2 px-3 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white rounded-lg text-[10px] font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98 cursor-pointer"
+        >
+          <Sparkles size={12} className="text-amber-300" />
+          <span>Abrir Estudio de Tallado 3D</span>
+        </button>
+      </div>
+
+      {/* ── Header Manual ───────────────────────────────────────────────────────── */}
+      <div className="pt-1 border-t border-zinc-800/80">
+        <p className="text-[11px] font-bold text-zinc-200">✏️ Editor Manual por Planos</p>
+        <p className="text-[8.5px] text-zinc-400 leading-tight mt-0.5">
+          Dibuja directamente en los visores Frontal, Lateral y Superior con el ratón.
         </p>
       </div>
 
