@@ -667,8 +667,13 @@ export const MaterialStudioViewport: React.FC = () => {
 
       // Volumetric Shader updates
       if (refs.currentMaterial && (refs.currentMaterial as any).isShaderMaterial) {
-        const sm = refs.currentMaterial as THREE.ShaderMaterial;
+        const sm = refs.currentMaterial as any;
         if (sm.uniforms?.uTime) sm.uniforms.uTime.value = elapsedTime;
+        if (sm.userData?.shader?.uniforms) {
+          const sh = sm.userData.shader.uniforms;
+          if (sh.uTime) sh.uTime.value = elapsedTime;
+          if (sh.uGlassTime) sh.uGlassTime.value = elapsedTime;
+        }
         if (sm.uniforms?.uLightPosition && refs.keyLight) {
           sm.uniforms.uLightPosition.value.copy(refs.keyLight.position);
         }

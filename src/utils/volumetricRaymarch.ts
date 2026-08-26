@@ -4,21 +4,29 @@ import { VolumetricConfig, VolumetricMode } from '../types';
 export const DEFAULT_VOLUMETRIC_CONFIG: Required<VolumetricConfig> = {
   enabled: true,
   mode: 'cloud',
+  cloudType: 'cumulus',
   density: 2.4,
   scale: 2.2,
   lightIntensity: 1.5,
   color: '#ffffff',
-  secondaryColor: '#f59e0b',
-  emissiveIntensity: 1.5,
+  secondaryColor: '#cbd5e1',
+  emissiveIntensity: 0.0,
   threshold: 0.22,
   thresholdMax: 0.75,
   absorption: 1.6,
-  steps: 36,
-  shadowSteps: 4,
+  steps: 40,
+  shadowSteps: 5,
   windSpeed: 0.12,
-  windDirection: [0.0, 1.0, 0.0],
+  windDirection: [0.1, 0.05, 0.0],
   blending: 'normal',
   turbulentFlame: false,
+  silverLining: 1.4,
+  anisotropy: 0.60,
+  anisotropyG: 0.60,
+  coverage: 0.68,
+  ambientBoost: 0.40,
+  detailOctaves: 4,
+  altitudeFade: [0.15, 0.20],
 };
 
 // 1. Vertex Shader (Passes local and world positions for bounding-box raymarching)
@@ -55,6 +63,13 @@ export const volumetricFragmentShader = `
   uniform int uShadowSteps;
   uniform vec3 uWind;
   uniform int uAdditive;
+
+  // 2026 Advanced Atmospheric Scattering & Cloud Shaping
+  uniform float uSilverLining;
+  uniform float uAnisotropy;
+  uniform float uCoverage;
+  uniform float uAmbientBoost;
+  uniform vec2 uAltitudeFade;
 
   // --- 3D Analytic Perlin / Simplex style Hash Noise ---
   float hash(vec3 p) {
@@ -95,7 +110,7 @@ export const volumetricFragmentShader = `
     return v;
   }
 
-  // --- Voronoi / Cellular 3D Noise for Ice, Crystals, and Plasma Tendrils ---
+  // --- Voronoi / Cellular 3D Noise for Worley Billowy Cloud Lobes ---
   float voronoi(vec3 p) {
     vec3 g = floor(p);
     vec3 f = fract(p);
@@ -115,10 +130,24 @@ export const volumetricFragmentShader = `
     return sqrt(minDist);
   }
 
+  // --- Worley-Perlin Hybrid FBM for Fluffy Billowy Clouds ---
+  float cloudFBM(vec3 p) {
+    float perlin = fbm(p);
+    float worley1 = 1.0 - voronoi(p * 1.5);
+    float worley2 = 1.0 - voronoi(p * 3.0);
+    float worley = worley1 * 0.65 + worley2 * 0.35;
+    return mix(perlin, worley, 0.45);
+  }
+
+  // --- Henyey-Greenstein Phase Function (Forward Mie & Silver Lining Scattering) ---
+  float henyeyGreenstein(float cosTheta, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5));
+  }
+
   // --- Internal Light Transmittance & Beer-Lambert Law Calculation ---
   float getLightTransmittance(vec3 localPos, vec3 lightDirLocal) {
     if (uMode == 1 || uMode == 2 || uMode == 5) {
-      // Fire, plasma and explosions are self-luminous emitter volumes
       return 1.0;
     }
     float shadowDensity = 0.0;
@@ -138,27 +167,25 @@ export const volumetricFragmentShader = `
       float rFade = smoothstep(0.70, 0.15, length(currentPos));
       
       vec3 sampleCoord = (currentPos * uCloudScale) + (uWind * uTime);
-      float d = fbm(sampleCoord);
+      float d = cloudFBM(sampleCoord);
       shadowDensity += smoothstep(uThreshold, uThresholdMax, d) * (bFade * rFade) * uCloudDensity * shadowStepLength;
     }
-    return exp(-shadowDensity * uAbsorption); // Beer-Lambert exponential shadow attenuation
+    float beer = exp(-shadowDensity * uAbsorption);
+    float powderSugar = 1.0 - exp(-shadowDensity * uAbsorption * 2.0);
+    return mix(beer, beer * powderSugar * 1.5 + 0.1, uAmbientBoost * 0.5);
   }
 
   void main() {
-    // Check if camera is inside local volume bounds
     vec3 camLocalPos = (uModelInverse * vec4(cameraPosition, 1.0)).xyz;
     bool isCameraInside = abs(camLocalPos.x) <= 0.49 && abs(camLocalPos.y) <= 0.49 && abs(camLocalPos.z) <= 0.49;
 
-    // If outside, only render front faces to avoid double-rendering back faces
     if (!isCameraInside && !gl_FrontFacing) {
       discard;
     }
 
-    // Ray direction in world space
     vec3 rayDirWorld = normalize(vWorldPosition - cameraPosition);
     vec3 lightDirWorld = normalize(uLightPosition - vWorldPosition);
 
-    // Transform directions to local object space
     mat3 invMat3 = mat3(uModelInverse);
     vec3 rayDirLocal = normalize(invMat3 * rayDirWorld);
     vec3 lightDirLocal = normalize(invMat3 * lightDirWorld);
@@ -167,9 +194,11 @@ export const volumetricFragmentShader = `
     float accumDensity = 0.0;
     vec3 accumColor = vec3(0.0);
     
-    // Adaptive step length based on step count
     float stepLength = 2.4 / float(max(uSteps, 16));
     vec3 stepVector = rayDirLocal * stepLength;
+
+    float cosTheta = dot(rayDirLocal, lightDirLocal);
+    float hgPhase = henyeyGreenstein(cosTheta, clamp(uAnisotropy, 0.1, 0.9));
 
     for (int i = 0; i < 64; i++) {
       if (i >= uSteps) break;
@@ -177,7 +206,6 @@ export const volumetricFragmentShader = `
       float distFromCenter = length(currentLocalPos);
       if (distFromCenter > 1.5) break;
 
-      // Soft container boundary falloff: smoothly fades density to 0.0 at box boundaries [-0.5, 0.5]
       vec3 bDist = abs(currentLocalPos);
       if (bDist.x >= 0.49 || bDist.y >= 0.49 || bDist.z >= 0.49) {
         currentLocalPos += stepVector;
@@ -187,50 +215,46 @@ export const volumetricFragmentShader = `
       float boxFade = smoothstep(0.48, 0.22, bDist.x) * 
                       smoothstep(0.48, 0.22, bDist.y) * 
                       smoothstep(0.48, 0.22, bDist.z);
-      float boundaryFade = boxFade * smoothstep(0.70, 0.15, distFromCenter);
+      
+      float yNorm = currentLocalPos.y + 0.5;
+      float altitudeShape = smoothstep(0.0, max(0.05, uAltitudeFade.x), yNorm) *
+                            smoothstep(1.0, 1.0 - max(0.05, uAltitudeFade.y), yNorm);
+
+      float boundaryFade = boxFade * smoothstep(0.70, 0.15, distFromCenter) * altitudeShape;
 
       float d = 0.0;
       vec3 samplePos = currentLocalPos;
 
-      // MODE 0: CUMULUS / GAS / STORM CLOUDS (Distintos grises con relieves y crestas plateadas)
+      // MODE 0: CUMULUS & ATMOSPHERIC CLOUDS
       if (uMode == 0) {
         vec3 sampleCoord = (samplePos * uCloudScale) + (uWind * uTime);
-        float n = fbm(sampleCoord);
-        d = smoothstep(uThreshold, uThresholdMax, n) * boundaryFade * uCloudDensity;
+        float n = cloudFBM(sampleCoord);
+        d = smoothstep(uThreshold * (1.1 - uCoverage * 0.3), uThresholdMax, n) * boundaryFade * uCloudDensity;
 
         if (d > 0.002) {
           float transmittance = exp(-accumDensity * uAbsorption);
           float directLight = getLightTransmittance(currentLocalPos, lightDirLocal);
-          // Multiple scattering approximation: allows soft light diffusion through dense/storm clouds
-          float multiScattering = exp(-accumDensity * uAbsorption * 0.28) * 0.42;
-          float totalLight = max(directLight + multiScattering, 0.22);
+          float multiScattering = exp(-accumDensity * uAbsorption * 0.28) * (0.42 + uAmbientBoost * 0.5);
+          float totalLight = max(directLight + multiScattering, 0.20 + uAmbientBoost * 0.25);
           
           accumDensity += d * stepLength * 1.6;
 
-          // Storm cloud & cumulus multi-tonal gray shading:
-          // 1. Highlight / silver crest along sun direction
-          vec3 silverHighlight = mix(uCloudColor, vec3(0.92, 0.95, 0.98), 0.5);
-          // 2. Midtone gray body
-          vec3 midToneGray = uCloudColor;
-          // 3. Deep storm underbelly / ambient shade
-          vec3 shadowToneGray = mix(uSecondaryColor, uCloudColor * 0.5, 0.5);
+          vec3 silverHighlight = mix(uCloudColor, vec3(0.96, 0.98, 1.0), 0.6);
+          vec3 midToneCloud = uCloudColor;
+          vec3 shadowToneCloud = mix(uSecondaryColor, uCloudColor * 0.45, 0.5);
 
-          // Dynamic blending across internal shadow & light penetration
-          vec3 cloudTone = mix(shadowToneGray, midToneGray, clamp(totalLight * 1.35, 0.0, 1.0));
-          cloudTone = mix(cloudTone, silverHighlight, clamp(pow(directLight, 2.2) * 0.7, 0.0, 1.0));
+          vec3 cloudTone = mix(shadowToneCloud, midToneCloud, clamp(totalLight * 1.35, 0.0, 1.0));
+          cloudTone = mix(cloudTone, silverHighlight, clamp(pow(directLight, 2.0) * 0.75, 0.0, 1.0));
 
-          // Forward Mie scattering silver rim
-          float sunDot = max(dot(rayDirLocal, lightDirLocal), 0.0);
-          float mieSilver = pow(sunDot, 5.0) * directLight * 0.45;
-          cloudTone += vec3(0.9, 0.94, 1.0) * mieSilver;
+          float silverPeak = (hgPhase * 2.0 + pow(max(cosTheta, 0.0), 6.0)) * uSilverLining * directLight * 0.45;
+          cloudTone += vec3(0.92, 0.96, 1.0) * silverPeak;
 
-          vec3 litColor = cloudTone * (uLightIntensity * (0.35 + totalLight * 0.9));
-          accumColor += transmittance * d * litColor * stepLength * 2.1;
+          vec3 litColor = cloudTone * (uLightIntensity * (0.35 + totalLight * 0.95));
+          accumColor += transmittance * d * litColor * stepLength * 2.2;
         }
       }
-      // MODE 1: FIRE / FLAME COLUMN (WebGPU Volume Fire style with heat core & turbulence)
+      // MODE 1: FIRE / FLAME COLUMN
       else if (uMode == 1) {
-        // Flame buoyancy: rise upward over time with swirl turbulence
         vec3 flameCoord = samplePos;
         flameCoord.y -= uTime * length(uWind) * 1.6;
         flameCoord.xz += vec2(
@@ -242,15 +266,13 @@ export const volumetricFragmentShader = `
         float n2 = fbm((flameCoord + vec3(3.2, 1.5, -2.1)) * (uCloudScale * 1.8));
         float combinedNoise = n1 * 0.65 + n2 * 0.35;
 
-        // Shape fire: tapered cone from bottom to top
-        float flameHeight = (samplePos.y + 0.5); // 0 at base, 1 at top
+        float flameHeight = (samplePos.y + 0.5);
         float radiusLimit = mix(0.55, 0.15, clamp(flameHeight, 0.0, 1.0));
         float horizDist = length(samplePos.xz);
         float shapeMask = smoothstep(radiusLimit, radiusLimit * 0.3, horizDist) * smoothstep(1.1, 0.15, flameHeight) * smoothstep(-0.55, -0.4, samplePos.y);
         d = smoothstep(uThreshold, uThresholdMax, combinedNoise) * shapeMask * uCloudDensity;
 
         if (d > 0.002) {
-          // Temperature gradient: White/Yellow core -> Vibrant Orange -> Crimson Red -> Dark Smoke Tip
           float temp = clamp(d * 1.5 - flameHeight * 0.5, 0.0, 1.0);
           vec3 flameCol = mix(vec3(0.12, 0.01, 0.01), uCloudColor, smoothstep(0.0, 0.35, temp));
           flameCol = mix(flameCol, uSecondaryColor, smoothstep(0.25, 0.68, temp));
@@ -278,7 +300,6 @@ export const volumetricFragmentShader = `
         d = smoothstep(uThreshold, uThresholdMax, combinedVal) * boundaryFade * uCloudDensity;
 
         if (d > 0.002) {
-          // Electric filament / plasma core color gradient
           float intensity = smoothstep(0.15, 0.85, d);
           vec3 plasmaCol = mix(uCloudColor, uSecondaryColor, intensity);
           vec3 coreCol = mix(plasmaCol, vec3(1.0, 1.0, 1.0), pow(intensity, 2.2));
@@ -294,171 +315,83 @@ export const volumetricFragmentShader = `
           }
         }
       }
-      // MODE 3: SMOKE / VOLUMETRIC PLUME (Definido con remolinos curl, tonos ceniza y menos oscuro)
+      // MODE 3: SMOKE / VOLUMETRIC PLUME
       else if (uMode == 3) {
         vec3 smokeCoord = (samplePos * uCloudScale) + (uWind * uTime);
-        // Domain warping curl turbulence for crisp, swirling smoke puffs & wisps
-        vec3 curlWarp = vec3(
-          fbm(smokeCoord * 1.4 + vec3(2.1, 0.5, 1.3)),
-          fbm(smokeCoord * 1.4 + vec3(0.7, 3.4, 0.2)),
-          fbm(smokeCoord * 1.4 + vec3(1.5, 0.9, 4.2))
-        ) * 0.38;
-        
-        float n = fbm(smokeCoord + curlWarp);
-        // High frequency fine-curl detail
-        float microDetail = noise((smokeCoord + curlWarp) * 3.8) * 0.12;
-        float combinedNoise = clamp(n + microDetail, 0.0, 1.0);
-
-        d = smoothstep(uThreshold, uThresholdMax, combinedNoise) * boundaryFade * uCloudDensity;
+        vec3 curl = vec3(
+          sin(smokeCoord.y * 3.2 + uTime * 1.2),
+          cos(smokeCoord.z * 3.2 + uTime * 1.0),
+          sin(smokeCoord.x * 3.2 + uTime * 1.4)
+        ) * 0.22;
+        float n = fbm(smokeCoord + curl);
+        d = smoothstep(uThreshold, uThresholdMax, n) * boundaryFade * uCloudDensity;
 
         if (d > 0.002) {
           float transmittance = exp(-accumDensity * uAbsorption);
-          float lightTrans = getLightTransmittance(currentLocalPos, lightDirLocal);
-          // Forward scattering (Mie) for realistic photographic smoke translucency
-          float mieScatter = pow(max(dot(rayDirLocal, lightDirLocal), 0.0), 3.2) * 0.45;
-          float diffuseLight = max(lightTrans + mieScatter, 0.32);
+          float directLight = getLightTransmittance(currentLocalPos, lightDirLocal);
+          float multiScattering = exp(-accumDensity * uAbsorption * 0.35) * 0.45;
+          float totalLight = max(directLight + multiScattering, 0.25);
 
-          accumDensity += d * stepLength * 1.35;
+          accumDensity += d * stepLength * 1.4;
 
-          // Photographic ash/graphite multi-layer smoke coloring:
-          vec3 ashHighlight = mix(uSecondaryColor, vec3(0.88, 0.90, 0.94), 0.35);
-          vec3 smokeBody = uCloudColor;
-          vec3 smokeColor = mix(smokeBody, ashHighlight, clamp(diffuseLight * 1.15, 0.0, 1.0));
-
-          vec3 litColor = smokeColor * (uLightIntensity * (0.42 + diffuseLight * 0.85));
+          vec3 smokeShade = mix(uSecondaryColor, uCloudColor, clamp(totalLight * 1.2, 0.0, 1.0));
+          vec3 litColor = smokeShade * (uLightIntensity * (0.35 + totalLight * 0.85));
           accumColor += transmittance * d * litColor * stepLength * 2.0;
         }
       }
-      // MODE 4: ICE / CRYSTAL (Transparent Outer Shell + Translucent Frost/Bubble Internal Core)
+      // MODE 4: ICE / CRYSTAL
       else if (uMode == 4) {
-        // Compute distance from object boundary to center (box/spherical core metric)
-        float maxComp = max(abs(samplePos.x), max(abs(samplePos.y), abs(samplePos.z)));
-        float radDist = length(samplePos);
-        float boundaryDist = max(maxComp, radDist * 0.85);
+        vec3 iceCoord = samplePos * uCloudScale;
+        float v1 = voronoi(iceCoord * 2.5);
+        float v2 = voronoi(iceCoord * 5.0 + vec3(1.2, 3.4, 5.6));
+        float crackPattern = smoothstep(0.08, 0.0, abs(v1 - 0.5)) + smoothstep(0.06, 0.0, abs(v2 - 0.5)) * 0.5;
+        float f = fbm(iceCoord * 1.8);
+        float iceDensity = mix(f, crackPattern, 0.35);
 
-        // Core mask: 0.0 at exterior shell (boundaryDist >= 0.38) -> 100% transparent exterior!
-        // Smoothly transitions to 1.0 deep inside the core (boundaryDist <= 0.20) -> translucent interior!
-        float coreMask = smoothstep(0.40, 0.16, boundaryDist);
-
-        if (coreMask > 0.001) {
-          vec3 iceCoord = samplePos * uCloudScale;
-          
-          // 1. Voronoi internal fracture planes in the core
-          float vCell = voronoi(iceCoord * 2.5);
-          float cracks = 1.0 - smoothstep(0.01, 0.06, abs(vCell - 0.5));
-          
-          // 2. Trapped internal micro-bubbles (high-frequency cellular noise)
-          float bubbleNoise = voronoi(iceCoord * 8.0);
-          float bubbles = 1.0 - smoothstep(0.02, 0.07, bubbleNoise);
-          
-          // 3. Frost / cloudy core structure
-          float frost = fbm(iceCoord * 1.8);
-          float combinedCore = (frost * 0.5 + cracks * 0.35 + bubbles * 0.35) * coreMask;
-
-          d = smoothstep(uThreshold, uThresholdMax, combinedCore) * coreMask * uCloudDensity;
-
-          if (d > 0.001) {
-            // Beer-Lambert wavelength-dependent absorption (cyan depth)
-            vec3 iceAbsorptionVec = vec3(1.8, 0.5, 0.1) * uAbsorption;
-            vec3 transmittance = exp(-accumDensity * iceAbsorptionVec);
-            float lightTrans = getLightTransmittance(currentLocalPos, lightDirLocal);
-            accumDensity += d * stepLength * 1.0;
-
-            // Specular glint on internal fracture facets
-            vec3 halfVec = normalize(lightDirLocal - rayDirLocal);
-            float crackGlint = pow(max(dot(normalize(currentLocalPos + vec3(0.001)), halfVec), 0.0), 24.0) * cracks * 1.5;
-
-            // Translucent core color: milky white frost transitioning to vibrant glacial cyan
-            vec3 coreCol = mix(uSecondaryColor, uCloudColor, clamp(frost * 0.8 + bubbles * 0.5, 0.0, 1.0));
-            vec3 litColor = coreCol * (uLightIntensity * (0.4 + lightTrans * 0.8)) + vec3(0.85, 0.95, 1.0) * (crackGlint + bubbles * 0.4);
-
-            accumColor += transmittance * d * litColor * stepLength * 2.0;
-          }
-        }
-      }
-      // MODE 5: EXPLOSION / FIREBALL (Detonación, núcleo incandescente, bola de fuego y hollín turbulento)
-      else if (uMode == 5) {
-        vec3 expCoord = samplePos;
-        expCoord.y -= uTime * length(uWind) * 1.8;
-        
-        float r = length(samplePos);
-        vec3 radialWarp = normalize(samplePos + vec3(0.001)) * sin(r * 7.0 - uTime * 4.0) * 0.08;
-        
-        vec3 warp = vec3(
-          fbm((expCoord + radialWarp) * uCloudScale + vec3(1.1, 0.0, 2.2)),
-          fbm((expCoord + radialWarp) * uCloudScale + vec3(0.0, 3.1, 0.5)),
-          fbm((expCoord + radialWarp) * uCloudScale + vec3(2.5, 1.2, 0.0))
-        ) * 0.42;
-
-        float n1 = fbm((expCoord + warp) * uCloudScale);
-        float n2 = fbm((expCoord + warp) * (uCloudScale * 2.2) + vec3(4.2, 1.1, -1.5));
-        float combinedNoise = n1 * 0.6 + n2 * 0.4;
-
-        // Expanding fireball shockwave shape mask
-        float fireballRadius = mix(0.68, 0.38, clamp((samplePos.y + 0.5) * 0.65, 0.0, 1.0));
-        float shapeMask = smoothstep(fireballRadius, fireballRadius * 0.22, r) * smoothstep(1.2, 0.1, samplePos.y + 0.5);
-        d = smoothstep(uThreshold, uThresholdMax, combinedNoise) * shapeMask * uCloudDensity;
+        d = smoothstep(uThreshold, uThresholdMax, iceDensity) * boundaryFade * uCloudDensity;
 
         if (d > 0.002) {
-          float coreDist = clamp(1.0 - (r / 0.68), 0.0, 1.0);
-          float heat = clamp(d * 1.45 + coreDist * 0.65, 0.0, 1.0);
+          float transmittance = exp(-accumDensity * uAbsorption);
+          float directLight = getLightTransmittance(currentLocalPos, lightDirLocal);
+          accumDensity += d * stepLength * 1.3;
 
-          // Color stages:
-          // heat 0.0 - 0.22: Dark charred soot / billowing explosion smoke
-          // heat 0.22 - 0.52: Crimson Red flame
-          // heat 0.52 - 0.82: Fiery Blazing Orange / Amber
-          // heat 0.82 - 1.00: Incandescent White-Hot blast core
-          vec3 sootColor = vec3(0.12, 0.10, 0.11);
-          vec3 flameRed = uCloudColor; // e.g. #ef4444
-          vec3 flameOrange = uSecondaryColor; // e.g. #fbbf24
-          vec3 whiteCore = vec3(1.0, 0.98, 0.90);
+          vec3 iceCol = mix(uCloudColor, uSecondaryColor, clamp(d * 1.2, 0.0, 1.0));
+          vec3 litColor = iceCol * (uLightIntensity * (0.5 + directLight * 0.8));
+          accumColor += transmittance * d * litColor * stepLength * 1.8;
+        }
+      }
+      // MODE 5: EXPLOSION
+      else if (uMode == 5) {
+        float r = length(samplePos);
+        vec3 expCoord = samplePos * uCloudScale - normalize(samplePos + vec3(0.001)) * (uTime * 0.6);
+        float n = fbm(expCoord);
+        float shockwave = smoothstep(0.5, 0.25, r) * smoothstep(0.0, 0.15, r);
+        d = smoothstep(uThreshold, uThresholdMax, n) * shockwave * boundaryFade * uCloudDensity;
 
-          vec3 expColor = mix(sootColor, flameRed, smoothstep(0.12, 0.32, heat));
-          expColor = mix(expColor, flameOrange, smoothstep(0.32, 0.68, heat));
-          expColor = mix(expColor, whiteCore, smoothstep(0.68, 0.94, heat));
-
-          float glow = uEmissiveIntensity * (1.2 + heat * 3.6);
-          vec3 emitted = expColor * glow * uLightIntensity;
+        if (d > 0.002) {
+          float coreFactor = smoothstep(0.35, 0.0, r);
+          vec3 expColor = mix(uCloudColor, uSecondaryColor, coreFactor);
+          expColor = mix(expColor, vec3(1.0, 0.98, 0.8), pow(coreFactor, 2.0));
+          vec3 emitted = expColor * (uEmissiveIntensity * uLightIntensity * (1.5 + coreFactor * 3.0));
 
           if (uAdditive == 1) {
             accumColor += d * emitted * stepLength * 2.2;
-            accumDensity += d * stepLength * 0.75;
+            accumDensity += d * stepLength * 0.7;
           } else {
             float transmittance = exp(-accumDensity * 1.1);
-            accumColor += transmittance * d * emitted * stepLength * 2.2;
-            accumDensity += d * stepLength * 1.15;
+            accumColor += transmittance * d * emitted * stepLength * 2.0;
+            accumDensity += d * stepLength * 1.1;
           }
         }
       }
 
-      // Early break when opacity saturates
-      if (accumDensity >= 0.98 && uAdditive == 0) {
-        accumDensity = 1.0;
-        break;
-      }
-
       currentLocalPos += stepVector;
+      if (accumDensity >= 0.99) break;
     }
 
-    if (accumDensity <= 0.001 && length(accumColor) <= 0.001) {
-      discard;
-    }
+    if (accumDensity <= 0.001) discard;
 
-    if (uMode == 4) {
-      // Outer crystal ice surface Fresnel reflection (IOR 1.31) & subtle sun specular glint
-      vec3 normalLocal = normalize(vLocalPosition);
-      float cosThetaOuter = clamp(dot(-rayDirLocal, normalLocal), 0.0, 1.0);
-      float fresnelOuter = 0.018 + (1.0 - 0.018) * pow(1.0 - cosThetaOuter, 4.0);
-      vec3 halfVecOuter = normalize(lightDirLocal - rayDirLocal);
-      float specOuter = pow(max(dot(normalLocal, halfVecOuter), 0.0), 48.0) * 1.2;
-
-      accumColor += vec3(0.9, 0.96, 1.0) * (specOuter * 0.8 + fresnelOuter * 0.35) * uLightIntensity;
-      float finalAlpha = clamp(fresnelOuter * 0.45 + accumDensity * 0.65 + specOuter * 0.5, 0.08, 0.88);
-      gl_FragColor = vec4(accumColor, finalAlpha);
-      return;
-    }
-
-    float finalAlpha = (uAdditive == 1) ? clamp(length(accumColor) * 0.9, 0.0, 1.0) : clamp(accumDensity, 0.0, 1.0);
+    float finalAlpha = clamp(accumDensity, 0.0, 1.0);
     gl_FragColor = vec4(accumColor, finalAlpha);
   }
 `;
@@ -491,8 +424,8 @@ export function createRaymarchedCloudMaterial(config?: Partial<VolumetricConfig>
     uLightIntensity: { value: cfg.lightIntensity },
     uCloudScale: { value: cfg.scale },
     uCloudColor: { value: new THREE.Color(cfg.color) },
-    uSecondaryColor: { value: new THREE.Color(cfg.secondaryColor || '#f59e0b') },
-    uEmissiveIntensity: { value: cfg.emissiveIntensity ?? 1.5 },
+    uSecondaryColor: { value: new THREE.Color(cfg.secondaryColor || '#cbd5e1') },
+    uEmissiveIntensity: { value: cfg.emissiveIntensity ?? 0.0 },
     uLightPosition: { value: new THREE.Vector3(5, 10, 5) },
     uThreshold: { value: cfg.threshold },
     uThresholdMax: { value: cfg.thresholdMax ?? 0.8 },
@@ -503,11 +436,16 @@ export function createRaymarchedCloudMaterial(config?: Partial<VolumetricConfig>
     uAdditive: { value: isAdditive ? 1 : 0 },
     uWind: {
       value: new THREE.Vector3(
-        cfg.windDirection[0] * cfg.windSpeed,
-        cfg.windDirection[1] * cfg.windSpeed,
-        cfg.windDirection[2] * cfg.windSpeed
+        (cfg.windDirection?.[0] ?? 0.1) * (cfg.windSpeed ?? 0.1),
+        (cfg.windDirection?.[1] ?? 0.05) * (cfg.windSpeed ?? 0.1),
+        (cfg.windDirection?.[2] ?? 0.0) * (cfg.windSpeed ?? 0.1)
       ),
     },
+    uSilverLining: { value: cfg.silverLining ?? 1.4 },
+    uAnisotropy: { value: cfg.anisotropy ?? 0.60 },
+    uCoverage: { value: cfg.coverage ?? 0.68 },
+    uAmbientBoost: { value: cfg.ambientBoost ?? 0.40 },
+    uAltitudeFade: { value: new THREE.Vector2(cfg.altitudeFade?.[0] ?? 0.15, cfg.altitudeFade?.[1] ?? 0.20) },
   };
 
   const mat = new THREE.ShaderMaterial({
@@ -583,6 +521,21 @@ export function updateVolumetricUniforms(
   if (config.shadowSteps !== undefined && u.uShadowSteps) {
     u.uShadowSteps.value = config.shadowSteps;
   }
+  if (config.silverLining !== undefined && u.uSilverLining) {
+    u.uSilverLining.value = config.silverLining;
+  }
+  if (config.anisotropy !== undefined && u.uAnisotropy) {
+    u.uAnisotropy.value = config.anisotropy;
+  }
+  if (config.coverage !== undefined && u.uCoverage) {
+    u.uCoverage.value = config.coverage;
+  }
+  if (config.ambientBoost !== undefined && u.uAmbientBoost) {
+    u.uAmbientBoost.value = config.ambientBoost;
+  }
+  if (config.altitudeFade && u.uAltitudeFade) {
+    u.uAltitudeFade.value.set(config.altitudeFade[0], config.altitudeFade[1]);
+  }
   if (config.blending !== undefined && u.uAdditive) {
     const isAdd = config.blending === 'additive' || config.mode === 'fire' || config.mode === 'plasma';
     u.uAdditive.value = isAdd ? 1 : 0;
@@ -609,14 +562,15 @@ export interface VolumetricPreset {
 export const VOLUMETRIC_PRESETS: VolumetricPreset[] = [
   {
     id: 'cumulus',
-    name: 'Nube Cúmulo 3D',
-    desc: 'Nube algodonosa blanca con absorción Beer-Lambert y relieve suave',
+    name: 'Nube Cúmulo 2026',
+    desc: 'Cúmulo algodonoso blanco con crestas plateadas Mie, dispersión dual y relieve Worley',
     icon: '☁️',
     color: '#ffffff',
     config: {
       enabled: true,
       mode: 'cloud',
-      density: 2.5,
+      cloudType: 'cumulus',
+      density: 2.6,
       scale: 2.2,
       lightIntensity: 1.5,
       color: '#ffffff',
@@ -625,36 +579,109 @@ export const VOLUMETRIC_PRESETS: VolumetricPreset[] = [
       threshold: 0.20,
       thresholdMax: 0.72,
       absorption: 1.6,
-      steps: 36,
-      shadowSteps: 4,
+      steps: 40,
+      shadowSteps: 5,
       windSpeed: 0.08,
       windDirection: [0.1, 0.05, 0.0],
       blending: 'normal',
+      silverLining: 1.4,
+      anisotropy: 0.6,
+      coverage: 0.7,
+      ambientBoost: 0.4,
+      altitudeFade: [0.15, 0.20],
     },
   },
   {
-    id: 'storm',
-    name: 'Nube de Tormenta 3D',
-    desc: 'Nube tormentosa con relieves en distintos grises, crestas plateadas y base oscura',
-    icon: '🌩️',
-    color: '#718096',
+    id: 'stratocumulus',
+    name: 'Estratocúmulo Ondulado',
+    desc: 'Manto de nubes estratificadas horizontales densas con suave absorción difusa',
+    icon: '🌥️',
+    color: '#e2e8f0',
     config: {
       enabled: true,
       mode: 'cloud',
-      density: 5.5,
-      scale: 5.8,
-      lightIntensity: 1.5,
-      color: '#718096',
-      secondaryColor: '#2d3748',
+      cloudType: 'stratocumulus',
+      density: 3.2,
+      scale: 1.6,
+      lightIntensity: 1.4,
+      color: '#f8fafc',
+      secondaryColor: '#94a3b8',
       emissiveIntensity: 0,
-      threshold: 0.34,
-      thresholdMax: 0.86,
-      absorption: 3.2,
-      steps: 24,
+      threshold: 0.18,
+      thresholdMax: 0.75,
+      absorption: 2.0,
+      steps: 36,
       shadowSteps: 5,
-      windSpeed: 0.12,
-      windDirection: [0.15, 0.05, 0.0],
+      windSpeed: 0.06,
+      windDirection: [0.15, 0.0, 0.05],
       blending: 'normal',
+      silverLining: 1.0,
+      anisotropy: 0.45,
+      coverage: 0.85,
+      ambientBoost: 0.35,
+      altitudeFade: [0.25, 0.25],
+    },
+  },
+  {
+    id: 'cumulonimbus',
+    name: 'Cumulonimbus / Tormenta',
+    desc: 'Torre de tormenta imponente con base oscura, yunque superior y dispersión interna',
+    icon: '🌩️',
+    color: '#64748b',
+    config: {
+      enabled: true,
+      mode: 'cloud',
+      cloudType: 'cumulonimbus',
+      density: 5.5,
+      scale: 3.8,
+      lightIntensity: 1.6,
+      color: '#64748b',
+      secondaryColor: '#1e293b',
+      emissiveIntensity: 0,
+      threshold: 0.28,
+      thresholdMax: 0.82,
+      absorption: 3.4,
+      steps: 32,
+      shadowSteps: 6,
+      windSpeed: 0.14,
+      windDirection: [0.2, 0.05, 0.0],
+      blending: 'normal',
+      silverLining: 1.8,
+      anisotropy: 0.7,
+      coverage: 0.8,
+      ambientBoost: 0.25,
+      altitudeFade: [0.1, 0.15],
+    },
+  },
+  {
+    id: 'cirrus',
+    name: 'Cirros Filamentosos',
+    desc: 'Velo de nubes de hielo etéreas, finas y traslúcidas a gran altitud',
+    icon: '🌤️',
+    color: '#ffffff',
+    config: {
+      enabled: true,
+      mode: 'cloud',
+      cloudType: 'cirrus',
+      density: 1.4,
+      scale: 3.2,
+      lightIntensity: 1.8,
+      color: '#ffffff',
+      secondaryColor: '#e0f2fe',
+      emissiveIntensity: 0,
+      threshold: 0.12,
+      thresholdMax: 0.65,
+      absorption: 0.7,
+      steps: 32,
+      shadowSteps: 3,
+      windSpeed: 0.18,
+      windDirection: [0.25, 0.02, 0.0],
+      blending: 'normal',
+      silverLining: 2.0,
+      anisotropy: 0.8,
+      coverage: 0.45,
+      ambientBoost: 0.5,
+      altitudeFade: [0.4, 0.1],
     },
   },
   {
@@ -760,31 +787,6 @@ export const VOLUMETRIC_PRESETS: VolumetricPreset[] = [
     },
   },
   {
-    id: 'fog_dense',
-    name: 'Niebla / Bruma Densa',
-    desc: 'Capa de niebla volumétrica con dispersión suave de luz ambiental',
-    icon: '🌫️',
-    color: '#e2e8f0',
-    config: {
-      enabled: true,
-      mode: 'cloud',
-      density: 1.8,
-      scale: 1.4,
-      lightIntensity: 1.2,
-      color: '#f1f5f9',
-      secondaryColor: '#cbd5e1',
-      emissiveIntensity: 0,
-      threshold: 0.12,
-      thresholdMax: 0.85,
-      absorption: 0.8,
-      steps: 32,
-      shadowSteps: 4,
-      windSpeed: 0.05,
-      windDirection: [0.1, 0.0, 0.05],
-      blending: 'normal',
-    },
-  },
-  {
     id: 'nebula_cosmic',
     name: 'Nebulosa Cósmica 3D',
     desc: 'Gas estelar profundo con tonalidades púrpura y magenta',
@@ -806,31 +808,6 @@ export const VOLUMETRIC_PRESETS: VolumetricPreset[] = [
       shadowSteps: 4,
       windSpeed: 0.05,
       windDirection: [0.05, 0.02, 0.08],
-      blending: 'additive',
-    },
-  },
-  {
-    id: 'aurora_borealis',
-    name: 'Aurora Boreal Volumétrica',
-    desc: 'Cortina de luz fluorescente ondulante en esmeralda y cian',
-    icon: '✨',
-    color: '#34d399',
-    config: {
-      enabled: true,
-      mode: 'plasma',
-      density: 2.0,
-      scale: 1.8,
-      lightIntensity: 1.8,
-      color: '#10b981',
-      secondaryColor: '#06b6d4',
-      emissiveIntensity: 2.2,
-      threshold: 0.25,
-      thresholdMax: 0.78,
-      absorption: 1.0,
-      steps: 36,
-      shadowSteps: 4,
-      windSpeed: 0.08,
-      windDirection: [0.1, 0.0, 0.1],
       blending: 'additive',
     },
   },

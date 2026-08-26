@@ -39,20 +39,24 @@ import {
   Palette, Settings, Plus, X, MousePointer2, Info, Globe, Sun, ArrowLeft, Camera, Split, Grid,
   ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route,
   Spline, Waves, Orbit, Sparkles, RefreshCw, RotateCcw, ArrowRightLeft, GitMerge, FileDigit,
-  SlidersHorizontal, Keyboard, Scissors, Combine, ArrowLeftRight, Cloud, Wind, Flame, Zap
+  SlidersHorizontal, Keyboard, Scissors, Combine, ArrowLeftRight, Cloud, Wind, Flame, Zap,
+  Activity, Shield, Magnet, Disc, Droplets
 } from 'lucide-react';
 import { UnifiedBooleanOp } from '../utils/booleanOperations';
 import { VOLUMETRIC_PRESETS, DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
-import type { VolumetricConfig } from '../types';
+import { DEFAULT_PARTICLE_CONFIG, DEFAULT_SPACE_WARP_CONFIG, PARTICLE_PRESETS, SPACE_WARP_PRESETS } from '../utils/particleSystem';
+import { DEFAULT_GPGPU_SWARM_CONFIG, GPGPU_SWARM_PRESETS } from '../utils/gpgpuSwarm';
+import type { VolumetricConfig, ParticleSystemConfig, SpaceWarpConfig, GpgpuSwarmConfig } from '../types';
 import { fileToDataURL } from '../utils/silhouettes';
 import { Exporter } from '../utils/exporters';
+import { extractUniqueEdges } from '../utils/wireframeMesh';
 import { hasChildrenOrSubObjects } from '../utils/ungroup';
 import { createNoiseTexture, createCheckerTexture, createWoodTexture, createOakPlanksTexture, createOakPlanksRoughnessMap, createOakPlanksAOMap, MATERIAL_LIBRARY, MATERIAL_CATEGORIES, generateMaterial } from '../utils/proceduralTextures';
 
 // ─── Tipos de label por categoría ────────────────────────────────────────────
 
 const TYPE_LABELS: Record<string, string> = {
-  CUBE: 'Cubo', SPHERE: 'Esfera', CYLINDER: 'Cilindro', CONE: 'Cono',
+  CUBE: 'Cubo', SPHERE: 'Esfera UV', GEOSPHERE: 'GeoEsfera', CYLINDER: 'Cilindro', CONE: 'Cono',
   TORUS: 'Toroide', ICOSAHEDRON: 'Icosaedro', DODECAHEDRON: 'Dodecaedro',
   PYRAMID: 'Pirámide', PRISM: 'Prisma', CAPSULE: 'Cápsula',
   TETRAHEDRON: 'Tetraedro', OCTAHEDRON: 'Octaedro', TUBE: 'Tubo 3D',
@@ -60,6 +64,9 @@ const TYPE_LABELS: Record<string, string> = {
   WEDGE: 'Cuña', HEMISPHERE: 'Hemisferio',
   PLANE: 'Plano', CIRCLE: 'Círculo', RING: 'Anillo',
   SHAPE: 'Forma 2D', MESH: 'Malla',
+  VOLUME_CLOUD: 'Nube Volumétrica 3D',
+  PARTICLE_SYSTEM: 'Sistema de Partículas (PF Source)',
+  SPACE_WARP: 'Deformador Espacial (Space Warp)',
   NURBS_CURVE: 'Curva NURBS',
   NURBS_CIRCLE: 'Círculo NURBS',
   NURBS_SURFACE: 'Superficie NURBS',
@@ -1271,27 +1278,115 @@ const ParametersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             min={1} max={128} step={1} slider/>
         </Section>
       );
-    case 'SPHERE':
+    case 'GEOSPHERE':
       return (
-        <Section title="Parámetros">
+        <Section title="Parámetros GeoEsfera (3ds Max)">
+          <NumRow label="Radio" value={p.radius ?? 0.5} onChange={v => up({ radius: Math.max(0.01, v) })}
+            min={0.01} max={50} step={0.05} slider/>
+          <NumRow label="Segmentos (Frecuencia)" value={p.geodesicFrequency ?? 4} onChange={v => up({ geodesicFrequency: Math.max(1, Math.min(16, Math.round(v))) })}
+            min={1} max={16} step={1} slider/>
           <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
-            <span>Tipo de Esfera</span>
+            <span>Tipo Base Geodésica</span>
             <select
-              value={p.sphereType || 'UV'}
-              onChange={e => up({ sphereType: e.target.value as 'UV' | 'ICO' })}
+              value={p.geodesicBaseType || 'ICOSAHEDRON'}
+              onChange={e => up({ geodesicBaseType: e.target.value as any })}
               className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-indigo-500"
             >
-              <option value="UV">Esfera UV (UVSphere)</option>
-              <option value="ICO">Icoesfera (IcoSphere)</option>
+              <option value="TETRAHEDRON">Tetra (4 caras)</option>
+              <option value="OCTAHEDRON">Octa (8 caras)</option>
+              <option value="ICOSAHEDRON">Icosa (20 caras)</option>
             </select>
           </div>
-          {(p.sphereType || 'UV') === 'UV' ? (
-            <NumRow label="Segmentos" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
-              min={3} max={256} step={1} slider/>
-          ) : (
-            <NumRow label="Subdivisiones (Detalle)" value={p.detail ?? 2} onChange={v => up({ detail: Math.max(0, Math.min(5, Math.round(v))) })}
-              min={0} max={5} step={1} slider/>
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Hemisferio (Cúpula)</span>
+            <input
+              type="checkbox"
+              checked={!!p.geodesicHemisphere}
+              onChange={e => up({ geodesicHemisphere: e.target.checked })}
+              className="rounded bg-zinc-800 border-zinc-700 text-indigo-500"
+            />
+          </div>
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Base a Pivote (Base to Pivot)</span>
+            <input
+              type="checkbox"
+              checked={!!p.baseToPivot}
+              onChange={e => up({ baseToPivot: e.target.checked })}
+              className="rounded bg-zinc-800 border-zinc-700 text-indigo-500"
+            />
+          </div>
+        </Section>
+      );
+    case 'SPHERE':
+      return (
+        <Section title="Parámetros Esfera (3ds Max)">
+          <NumRow label="Radio" value={p.radius ?? 0.5} onChange={v => up({ radius: Math.max(0.01, v) })}
+            min={0.01} max={50} step={0.05} slider/>
+          <NumRow label="Segmentos (Longitud)" value={p.segments ?? 32} onChange={v => up({ segments: Math.max(3, Math.round(v)) })}
+            min={3} max={256} step={1} slider/>
+          <NumRow label="Segmentos Altura (Latitud)" value={p.heightSegments ?? 16} onChange={v => up({ heightSegments: Math.max(2, Math.round(v)) })}
+            min={2} max={128} step={1} slider/>
+          
+          {/* Hemisphere */}
+          <NumRow label="Hemisferio (0 = Total)" value={p.hemisphere ?? 0.0} onChange={v => up({ hemisphere: Math.max(0, Math.min(1, v)) })}
+            min={0.0} max={1.0} step={0.05} slider/>
+          {(p.hemisphere ?? 0) > 0 && (
+            <div className="flex items-center justify-between text-xs my-1 text-zinc-300 pl-2 border-l-2 border-indigo-500/50">
+              <span>Modo Hemisferio</span>
+              <div className="flex gap-2 text-[10px]">
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input
+                    type="radio"
+                    name={`chopSquash_${obj.id}`}
+                    value="chop"
+                    checked={(p.chopSquash || 'chop') === 'chop'}
+                    onChange={() => up({ chopSquash: 'chop' })}
+                  />
+                  Chop (Corte)
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input
+                    type="radio"
+                    name={`chopSquash_${obj.id}`}
+                    value="squash"
+                    checked={p.chopSquash === 'squash'}
+                    onChange={() => up({ chopSquash: 'squash' })}
+                  />
+                  Squash (Comprimir)
+                </label>
+              </div>
+            </div>
           )}
+
+          {/* Slice */}
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Rebanar (Slice On)</span>
+            <input
+              type="checkbox"
+              checked={!!p.sliceOn}
+              onChange={e => up({ sliceOn: e.target.checked })}
+              className="rounded bg-zinc-800 border-zinc-700 text-indigo-500"
+            />
+          </div>
+          {p.sliceOn && (
+            <div className="space-y-1 pl-2 border-l-2 border-indigo-500/50">
+              <NumRow label="Rebanar Desde (°)" value={p.sliceFrom ?? 0} onChange={v => up({ sliceFrom: v })}
+                min={0} max={360} step={5} slider/>
+              <NumRow label="Rebanar Hasta (°)" value={p.sliceTo ?? 360} onChange={v => up({ sliceTo: v })}
+                min={0} max={360} step={5} slider/>
+            </div>
+          )}
+
+          {/* Base to Pivot */}
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Base a Pivote (Base to Pivot)</span>
+            <input
+              type="checkbox"
+              checked={!!p.baseToPivot}
+              onChange={e => up({ baseToPivot: e.target.checked })}
+              className="rounded bg-zinc-800 border-zinc-700 text-indigo-500"
+            />
+          </div>
         </Section>
       );
     case 'CYLINDER':
@@ -3959,6 +4054,533 @@ const BooleanOperationsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   );
 };
 
+const ParticleSystemSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const { updateObject, saveHistory, project } = useStore();
+  const isParticle = obj.type === 'PARTICLE_SYSTEM' || !!obj.isParticleSystem || !!obj.parameters?.isParticleSystem;
+  const pConfig: ParticleSystemConfig = {
+    ...DEFAULT_PARTICLE_CONFIG,
+    ...(obj.particleConfig || {}),
+    ...(obj.parameters?.particleConfig || {}),
+  };
+
+  const updateParticle = (patch: Partial<ParticleSystemConfig>) => {
+    const updated = { ...pConfig, ...patch };
+    updateObject(obj.id, {
+      isParticleSystem: true,
+      particleConfig: updated,
+      parameters: {
+        ...(obj.parameters || {}),
+        isParticleSystem: true,
+        particleConfig: updated,
+      }
+    });
+    saveHistory();
+  };
+
+  const spaceWarpObjects = project.objects.filter(o => o.isSpaceWarp || o.type === 'SPACE_WARP');
+
+  return (
+    <Section 
+      title="Sistema de Partículas (Particle Flow / Spray)" 
+      icon={<Sparkles size={12} className={isParticle ? "text-purple-400" : "text-zinc-400"} />}
+    >
+      <div className="space-y-3">
+        {/* Presets */}
+        <div className="space-y-1.5">
+          <span className="text-[9px] font-bold text-purple-400 uppercase tracking-wider block">Presets de Partículas (3ds Max)</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {PARTICLE_PRESETS.map((p, idx) => (
+              <button
+                key={idx}
+                onClick={() => updateParticle({ ...p.config })}
+                className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700/90 border border-zinc-700/60 hover:border-purple-500/60 rounded-lg text-[9px] font-medium text-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer text-left group"
+                title={p.desc}
+              >
+                <span className="text-base flex-shrink-0">{p.icon}</span>
+                <div className="min-w-0">
+                  <span className="truncate block font-bold text-[9px] text-zinc-200 group-hover:text-white">{p.name}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Emitter Setup */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Emisor & Generación</span>
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Tipo de Emisor</span>
+            <select
+              value={pConfig.emitterType || 'POINT'}
+              onChange={e => updateParticle({ emitterType: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-purple-500"
+            >
+              <option value="POINT">Punto (Point)</option>
+              <option value="BOX">Caja (Box)</option>
+              <option value="SPHERE">Esfera (Sphere)</option>
+              <option value="CIRCLE">Círculo (Circle)</option>
+              <option value="RING">Anillo (Ring)</option>
+            </select>
+          </div>
+          <NumRow label="Cantidad Total (Max)" value={pConfig.count ?? 400} onChange={v => updateParticle({ count: Math.round(v) })} min={10} max={2000} step={20} slider/>
+          <NumRow label="Tasa de Nacimiento / seg" value={pConfig.birthRate ?? 60} onChange={v => updateParticle({ birthRate: Math.round(v) })} min={1} max={300} step={5} slider/>
+          <NumRow label="Vida Útil (segundos)" value={pConfig.life ?? 3.5} onChange={v => updateParticle({ life: v })} min={0.2} max={15.0} step={0.1} slider/>
+          <NumRow label="Velocidad Inicial" value={pConfig.speed ?? 2.2} onChange={v => updateParticle({ speed: v })} min={0.0} max={15.0} step={0.1} slider/>
+          <NumRow label="Ángulo de Dispersión (°)" value={pConfig.spread ?? 25} onChange={v => updateParticle({ spread: v })} min={0} max={180} step={5} slider/>
+        </div>
+
+        {/* Appearance & Physics */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Dimensiones & Color</span>
+          <NumRow label="Tamaño Partícula" value={pConfig.particleSize ?? 0.18} onChange={v => updateParticle({ particleSize: v })} min={0.02} max={2.0} step={0.02} slider/>
+          <NumRow label="Crecimiento / Expansión" value={pConfig.growth ?? 0.5} onChange={v => updateParticle({ growth: v })} min={-1.0} max={3.0} step={0.1} slider/>
+          <NumRow label="Giro / Rotación" value={pConfig.spin ?? 1.5} onChange={v => updateParticle({ spin: v })} min={0.0} max={8.0} step={0.2} slider/>
+          
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Modo de Mezcla</span>
+            <select
+              value={pConfig.blending || 'additive'}
+              onChange={e => updateParticle({ blending: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-purple-500"
+            >
+              <option value="additive">Aditivo (Brillo / Fuego / Magia)</option>
+              <option value="normal">Normal (Nieve / Humo / Sólido)</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <div className="space-y-1">
+              <span className="text-[8px] text-zinc-400 font-bold uppercase block">Color Inicio</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={pConfig.colorStart || '#60a5fa'}
+                  onChange={e => updateParticle({ colorStart: e.target.value })}
+                  className="w-5 h-5 rounded bg-transparent cursor-pointer border border-zinc-700"
+                />
+                <span className="text-[8px] font-mono text-zinc-300">{pConfig.colorStart}</span>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <span className="text-[8px] text-zinc-400 font-bold uppercase block">Color Fin</span>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="color"
+                  value={pConfig.colorEnd || '#f43f5e'}
+                  onChange={e => updateParticle({ colorEnd: e.target.value })}
+                  className="w-5 h-5 rounded bg-transparent cursor-pointer border border-zinc-700"
+                />
+                <span className="text-[8px] font-mono text-zinc-300">{pConfig.colorEnd}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Space Warps Binding */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] font-bold text-amber-400 uppercase tracking-wider">Afectado por Space Warps</span>
+            <input
+              type="checkbox"
+              checked={pConfig.affectedBySpaceWarps ?? true}
+              onChange={e => updateParticle({ affectedBySpaceWarps: e.target.checked })}
+              className="rounded bg-zinc-800 border-zinc-700 text-amber-500"
+            />
+          </div>
+          <p className="text-[8px] text-zinc-400 leading-tight">
+            Vincula fuerzas de gravedad, viento, turbulencia, vórtices y reflectores activos en la escena.
+          </p>
+          {spaceWarpObjects.length > 0 && (
+            <div className="text-[8px] text-zinc-400 bg-zinc-900/60 p-1.5 rounded border border-zinc-800">
+              <span className="font-semibold text-zinc-300">Deformadores detectados: </span>
+              {spaceWarpObjects.map(w => w.name).join(', ')}
+            </div>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+};
+
+const SpaceWarpSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const { updateObject, saveHistory } = useStore();
+  const isWarp = obj.type === 'SPACE_WARP' || !!obj.isSpaceWarp || !!obj.parameters?.isSpaceWarp;
+  const wConfig: SpaceWarpConfig = {
+    ...DEFAULT_SPACE_WARP_CONFIG,
+    ...(obj.warpConfig || {}),
+    ...(obj.parameters?.warpConfig || {}),
+  };
+
+  const updateWarp = (patch: Partial<SpaceWarpConfig>) => {
+    const updated = { ...wConfig, ...patch };
+    updateObject(obj.id, {
+      isSpaceWarp: true,
+      warpConfig: updated,
+      parameters: {
+        ...(obj.parameters || {}),
+        isSpaceWarp: true,
+        warpConfig: updated,
+      }
+    });
+    saveHistory();
+  };
+
+  return (
+    <Section 
+      title="Deformador Espacial (Space Warp 3ds Max)" 
+      icon={<Compass size={12} className={isWarp ? "text-amber-400" : "text-zinc-400"} />}
+    >
+      <div className="space-y-3">
+        {/* Presets */}
+        <div className="space-y-1.5">
+          <span className="text-[9px] font-bold text-amber-400 uppercase tracking-wider block">Presets de Fuerza Espacial</span>
+          <div className="grid grid-cols-2 gap-1.5">
+            {SPACE_WARP_PRESETS.map((w, idx) => (
+              <button
+                key={idx}
+                onClick={() => updateWarp({ ...w.config })}
+                className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700/90 border border-zinc-700/60 hover:border-amber-500/60 rounded-lg text-[9px] font-medium text-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer text-left group"
+                title={w.desc}
+              >
+                <span className="text-base flex-shrink-0">{w.icon}</span>
+                <div className="min-w-0">
+                  <span className="truncate block font-bold text-[9px] text-zinc-200 group-hover:text-white">{w.name}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Warp Controls */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Tipo de Deformador</span>
+            <select
+              value={wConfig.warpType || 'WIND'}
+              onChange={e => updateWarp({ warpType: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-amber-500"
+            >
+              <option value="WIND">Viento (Wind)</option>
+              <option value="GRAVITY">Gravedad (Gravity)</option>
+              <option value="VORTEX">Vórtice / Tornado (Vortex)</option>
+              <option value="PUSH">Empuje / Atractor (Push)</option>
+              <option value="DEFLECTOR">Deflector / Rebote (Deflector)</option>
+              <option value="WAVE">Ondas Lineales (Wave)</option>
+              <option value="RIPPLE">Ondas Radiales (Ripple)</option>
+              <option value="MOTOR">Motor Rotacional (Motor)</option>
+              <option value="DRAG">Fricción de Aire (Drag)</option>
+              <option value="PBOMB">Bomba Expansiva (PBomb)</option>
+            </select>
+          </div>
+
+          <NumRow label="Fuerza (Strength)" value={wConfig.strength ?? 1.5} onChange={v => updateWarp({ strength: v })} min={-20.0} max={20.0} step={0.2} slider/>
+          <NumRow label="Alcance de Efecto (Range)" value={wConfig.range ?? 15.0} onChange={v => updateWarp({ range: v })} min={1.0} max={60.0} step={1.0} slider/>
+          <NumRow label="Atenuación con Distancia (Decay)" value={wConfig.decay ?? 0.0} onChange={v => updateWarp({ decay: v })} min={0.0} max={3.0} step={0.1} slider/>
+
+          {wConfig.warpType === 'WIND' && (
+            <>
+              <NumRow label="Turbulencia del Viento" value={wConfig.windTurbulence ?? 0.6} onChange={v => updateWarp({ windTurbulence: v })} min={0.0} max={3.0} step={0.1} slider/>
+              <NumRow label="Frecuencia de Ráfagas" value={wConfig.windFrequency ?? 1.2} onChange={v => updateWarp({ windFrequency: v })} min={0.1} max={5.0} step={0.1} slider/>
+            </>
+          )}
+
+          {wConfig.warpType === 'VORTEX' && (
+            <>
+              <NumRow label="Fuerza Espiral Radial" value={wConfig.vortexRadial ?? 2.0} onChange={v => updateWarp({ vortexRadial: v })} min={0.0} max={8.0} step={0.2} slider/>
+              <NumRow label="Elevación Axial" value={wConfig.vortexAxial ?? 1.2} onChange={v => updateWarp({ vortexAxial: v })} min={0.0} max={8.0} step={0.2} slider/>
+            </>
+          )}
+
+          {(wConfig.warpType === 'WAVE' || wConfig.warpType === 'RIPPLE') && (
+            <>
+              <NumRow label="Amplitud de Onda" value={wConfig.waveAmplitude ?? 0.4} onChange={v => updateWarp({ waveAmplitude: v })} min={0.05} max={3.0} step={0.05} slider/>
+              <NumRow label="Longitud de Onda" value={wConfig.waveLength ?? 1.5} onChange={v => updateWarp({ waveLength: v })} min={0.2} max={6.0} step={0.1} slider/>
+              <NumRow label="Velocidad de Propagación" value={wConfig.waveSpeed ?? 2.0} onChange={v => updateWarp({ waveSpeed: v })} min={0.1} max={10.0} step={0.2} slider/>
+            </>
+          )}
+
+          {wConfig.warpType === 'DEFLECTOR' && (
+            <>
+              <NumRow label="Elasticidad de Rebote (Bounce)" value={wConfig.deflectorBounce ?? 0.75} onChange={v => updateWarp({ deflectorBounce: v })} min={0.0} max={1.0} step={0.05} slider/>
+              <NumRow label="Fricción de Superficie" value={wConfig.deflectorFriction ?? 0.1} onChange={v => updateWarp({ deflectorFriction: v })} min={0.0} max={1.0} step={0.05} slider/>
+            </>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+};
+
+const GpgpuSwarmSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
+  const { updateObject, saveHistory, project } = useStore();
+  const isGpgpu = obj.type === 'GPGPU_SWARM' || !!obj.isGpgpuSwarm || !!obj.parameters?.isGpgpuSwarm;
+  const sCfg: GpgpuSwarmConfig = {
+    ...DEFAULT_GPGPU_SWARM_CONFIG,
+    ...(obj.gpgpuSwarmConfig || {}),
+    ...(obj.parameters?.gpgpuSwarmConfig || {}),
+  };
+
+  const updateSwarm = (patch: Partial<GpgpuSwarmConfig>) => {
+    const updated = { ...sCfg, ...patch };
+    updateObject(obj.id, {
+      isGpgpuSwarm: true,
+      gpgpuSwarmConfig: updated,
+      parameters: {
+        ...(obj.parameters || {}),
+        isGpgpuSwarm: true,
+        gpgpuSwarmConfig: updated,
+      }
+    });
+    saveHistory();
+  };
+
+  return (
+    <Section
+      title="Enjambre de Partículas GPGPU (Flow Field Particles)"
+      icon={<Zap size={12} className={isGpgpu ? "text-cyan-400" : "text-zinc-400"} />}
+      defaultOpen={isGpgpu}
+    >
+      <div className="space-y-3">
+        {/* Presets */}
+        <div className="space-y-1.5">
+          <span className="text-[9px] font-bold text-cyan-400 uppercase tracking-wider block">Presets de Simulación GPU</span>
+          <div className="grid grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+            {GPGPU_SWARM_PRESETS.map((p, idx) => (
+              <button
+                key={idx}
+                onClick={() => updateSwarm({ ...p.config })}
+                className="p-1.5 bg-zinc-800/80 hover:bg-zinc-700/90 border border-zinc-700/60 hover:border-cyan-500/60 rounded-lg text-[9px] font-medium text-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer text-left group"
+                title={p.desc}
+              >
+                <span className="text-base flex-shrink-0">{p.icon}</span>
+                <div className="min-w-0">
+                  <span className="truncate block font-bold text-[9px] text-zinc-200 group-hover:text-cyan-300">{p.name}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Core Mode & Particles */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Modo & Cantidad de Partículas</span>
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Algoritmo de Simulación</span>
+            <select
+              value={sCfg.mode || 'curl_noise'}
+              onChange={e => updateSwarm({ mode: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-cyan-300 font-medium rounded px-2 py-1 focus:outline-none focus:border-cyan-500"
+            >
+              <option value="curl_noise">Nebulosa Curl Noise</option>
+              <option value="mesh_surface">Morfosis a Malla 3D (Base Model)</option>
+              <option value="vortex_blackhole">Vórtice Agujero Negro</option>
+              <option value="lorenz_attractor">Atractor de Lorenz</option>
+              <option value="magnetic_dipole">Líneas de Campo Magnético</option>
+              <option value="galaxy_spiral">Galaxia Espiral 3D</option>
+              <option value="double_helix">Doble Hélice (ADN)</option>
+              <option value="torus_knot">Nudo Toroidal (Trefoil)</option>
+              <option value="spherical_flow">Capa Esférica Vibrante</option>
+              <option value="cyber_neon">Cyberpunk Matrix Vortex</option>
+              <option value="harmonic_wave">Ondas Armónicas Estacionarias</option>
+            </select>
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-xs text-zinc-300">
+              <span>Cantidad de Partículas GPU</span>
+              <span className="font-mono text-cyan-400 font-bold text-xs">{(sCfg.count || 65536).toLocaleString()}</span>
+            </div>
+            <div className="grid grid-cols-4 gap-1 pt-1">
+              {[16384, 32768, 65536, 131072].map((count) => (
+                <button
+                  key={count}
+                  onClick={() => updateSwarm({ count })}
+                  className={`py-1 text-[9px] font-mono rounded border transition-colors cursor-pointer ${
+                    (sCfg.count || 65536) === count
+                      ? 'bg-cyan-500/20 border-cyan-500 text-cyan-300 font-bold'
+                      : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {count >= 1000 ? `${Math.round(count / 1000)}k` : count}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* 3D Base Model Target Morphing */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <div className="flex items-center justify-between text-xs text-zinc-300">
+            <span className="font-bold text-[9px] text-fuchsia-400 uppercase tracking-wider">Malla 3D Base / Morfosis</span>
+            <select
+              value={sCfg.meshTarget || 'none'}
+              onChange={e => updateSwarm({ meshTarget: e.target.value as any, mode: e.target.value !== 'none' ? 'mesh_surface' : sCfg.mode })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-fuchsia-300 font-medium rounded px-2 py-1 focus:outline-none focus:border-fuchsia-500"
+            >
+              <option value="none">Sin Malla (Espacio Libre)</option>
+              <option value="suzanne">Suzanne Monkey (Mono 3D)</option>
+              <option value="stanford_bunny">Stanford Bunny (Conejo 3D)</option>
+              <option value="torus_knot">Nudo Toroidal Trefoil</option>
+              <option value="skull">Cráneo / Cabeza 3D</option>
+              <option value="human_torso">Busto / Torso Humano</option>
+              <option value="sphere">Esfera Smooth</option>
+              <option value="cube">Cubo / Caja Bounding</option>
+            </select>
+          </div>
+          {sCfg.meshTarget && sCfg.meshTarget !== 'none' && (
+            <>
+              <NumRow label="Atracción a Superficie" value={sCfg.surfaceAttraction ?? 0.85} onChange={v => updateSwarm({ surfaceAttraction: v })} min={0.0} max={1.0} step={0.02} slider/>
+              <NumRow label="Dispersión Turbulenta" value={sCfg.surfaceDispersion ?? 0.35} onChange={v => updateSwarm({ surfaceDispersion: v })} min={0.0} max={2.0} step={0.05} slider/>
+              <p className="text-[8px] text-zinc-400">Las partículas se adhieren dinámicamente a la superficie del modelo 3D y fluyen en turbulencia.</p>
+            </>
+          )}
+        </div>
+
+        {/* Physics & Flow Dynamics */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Dinámica & Fuerzas GPU</span>
+          <NumRow label="Velocidad Simulación" value={sCfg.speed ?? 1.0} onChange={v => updateSwarm({ speed: v })} min={0.0} max={4.0} step={0.05} slider/>
+          <NumRow label="Frecuencia de Ruido" value={sCfg.noiseFrequency ?? 0.35} onChange={v => updateSwarm({ noiseFrequency: v })} min={0.05} max={2.0} step={0.02} slider/>
+          <NumRow label="Velocidad de Turbulencia" value={sCfg.noiseSpeed ?? 0.7} onChange={v => updateSwarm({ noiseSpeed: v })} min={0.0} max={3.0} step={0.05} slider/>
+          <NumRow label="Fuerza de Remolino (Swirl)" value={sCfg.swirlForce ?? 1.8} onChange={v => updateSwarm({ swirlForce: v })} min={0.0} max={6.0} step={0.1} slider/>
+          <NumRow label="Atracción al Centro" value={sCfg.attractionStrength ?? 0.8} onChange={v => updateSwarm({ attractionStrength: v })} min={-5.0} max={8.0} step={0.1} slider/>
+          <NumRow label="Amortiguación (Damping)" value={sCfg.damping ?? 0.96} onChange={v => updateSwarm({ damping: v })} min={0.7} max={0.99} step={0.01} slider/>
+          <NumRow label="Radio Delimitador" value={sCfg.boundingRadius ?? 6.5} onChange={v => updateSwarm({ boundingRadius: v })} min={1.0} max={20.0} step={0.5} slider/>
+
+          {sCfg.mode === 'lorenz_attractor' && (
+            <div className="pt-2 border-t border-zinc-800 space-y-1">
+              <span className="text-[9px] font-bold text-amber-400 block">Parámetros del Atractor de Lorenz</span>
+              <NumRow label="Sigma (σ)" value={sCfg.lorenzSigma ?? 10.0} onChange={v => updateSwarm({ lorenzSigma: v })} min={1.0} max={30.0} step={0.5} slider/>
+              <NumRow label="Rho (ρ)" value={sCfg.lorenzRho ?? 28.0} onChange={v => updateSwarm({ lorenzRho: v })} min={1.0} max={60.0} step={0.5} slider/>
+              <NumRow label="Beta (β)" value={sCfg.lorenzBeta ?? 2.666} onChange={v => updateSwarm({ lorenzBeta: v })} min={0.5} max={10.0} step={0.1} slider/>
+            </div>
+          )}
+
+          {sCfg.mode === 'harmonic_wave' && (
+            <div className="pt-2 border-t border-zinc-800 space-y-1">
+              <span className="text-[9px] font-bold text-purple-400 block">Pulso Armónico & Reactividad de Ritmo</span>
+              <NumRow label="Frecuencia del Pulso" value={sCfg.pulseSpeed ?? 1.2} onChange={v => updateSwarm({ pulseSpeed: v })} min={0.1} max={5.0} step={0.1} slider/>
+              <NumRow label="Amplitud de Onda" value={sCfg.pulseAmplitude ?? 0.2} onChange={v => updateSwarm({ pulseAmplitude: v })} min={0.0} max={1.0} step={0.02} slider/>
+            </div>
+          )}
+        </div>
+
+        {/* Visual Styling, Shapes & 3D Lighting */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Apariencia, Iluminación 3D & Shading</span>
+          <NumRow label="Tamaño de Partícula (px)" value={sCfg.particleSize ?? 6.0} onChange={v => updateSwarm({ particleSize: v })} min={1.0} max={32.0} step={0.5} slider/>
+          
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Forma de Partícula</span>
+            <select
+              value={sCfg.particleShape || 'glow_disc'}
+              onChange={e => updateSwarm({ particleShape: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-cyan-500"
+            >
+              <option value="glow_disc">Esfera con Brillo Suave (Glow Disc)</option>
+              <option value="point">Punto Nítido</option>
+              <option value="lit_sphere">Esfera con Iluminación 3D & Especular</option>
+              <option value="star">Destello Estelar (Star)</option>
+              <option value="sparkle">Chispa Diamante (Sparkle)</option>
+              <option value="ring">Anillo Holográfico (Ring)</option>
+              <option value="square">Píxel Cuadrado Matrix</option>
+              <option value="streak">Estela de Flujo (Velocity Streak)</option>
+            </select>
+          </div>
+
+          <NumRow label="Estiramiento por Velocidad (Streak)" value={sCfg.velocityStretch ?? 0.2} onChange={v => updateSwarm({ velocityStretch: v })} min={0.0} max={2.0} step={0.05} slider/>
+          <NumRow label="Reactividad a Luces 3D (Shading)" value={sCfg.lightReactivity ?? 0.5} onChange={v => updateSwarm({ lightReactivity: v })} min={0.0} max={1.0} step={0.05} slider/>
+
+          <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+            <span>Modo de Color / Paleta</span>
+            <select
+              value={sCfg.colorMode || 'velocity'}
+              onChange={e => updateSwarm({ colorMode: e.target.value as any })}
+              className="bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 rounded px-2 py-1 focus:outline-none focus:border-cyan-500"
+            >
+              <option value="velocity">Gradiente por Velocidad</option>
+              <option value="position">Paleta por Posición 3D</option>
+              <option value="radial">Gradiente por Distancia Radial</option>
+              <option value="monochrome">Color Sólido</option>
+              <option value="rainbow">Ciclo Cromático Arcoíris</option>
+              <option value="temperature">Gradiente Térmico / Plasma</option>
+              <option value="cyber_neon">Cyberpunk Neón (Cian/Magenta)</option>
+              <option value="aurora">Aurora Boreal (Esmeralda/Violeta)</option>
+              <option value="sunset">Atardecer Twilight (Ámbar/Índigo)</option>
+              <option value="ocean">Océano Eléctrico (Aguamarina/Azul)</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-zinc-400">Color Primario</span>
+              <input
+                type="color"
+                value={sCfg.colorStart || '#00f0ff'}
+                onChange={e => updateSwarm({ colorStart: e.target.value })}
+                className="w-7 h-7 rounded border border-zinc-700 bg-transparent cursor-pointer"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-zinc-400">Color Secundario</span>
+              <input
+                type="color"
+                value={sCfg.colorEnd || '#ff0077'}
+                onChange={e => updateSwarm({ colorEnd: e.target.value })}
+                className="w-7 h-7 rounded border border-zinc-700 bg-transparent cursor-pointer"
+              />
+            </div>
+          </div>
+
+          <NumRow label="Opacidad" value={sCfg.opacity ?? 0.88} onChange={v => updateSwarm({ opacity: v })} min={0.05} max={1.0} step={0.02} slider/>
+
+          <div className="flex items-center justify-between text-xs pt-1 text-zinc-300">
+            <span>Mezcla Aditiva (Glow Luminoso)</span>
+            <input
+              type="checkbox"
+              checked={sCfg.blending !== 'normal'}
+              onChange={e => updateSwarm({ blending: e.target.checked ? 'additive' : 'normal' })}
+              className="accent-cyan-500 cursor-pointer w-4 h-4"
+            />
+          </div>
+        </div>
+
+        {/* 3D Mouse Interaction */}
+        <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+          <div className="flex items-center justify-between text-xs text-zinc-300">
+            <span className="font-bold text-[9px] text-emerald-400 uppercase tracking-wider">Interacción con Cursor / Ratón 3D</span>
+            <input
+              type="checkbox"
+              checked={sCfg.interactiveMouse !== false}
+              onChange={e => updateSwarm({ interactiveMouse: e.target.checked })}
+              className="accent-emerald-500 cursor-pointer w-4 h-4"
+            />
+          </div>
+          {sCfg.interactiveMouse !== false && (
+            <>
+              <div className="flex items-center justify-between text-xs my-1 text-zinc-300">
+                <span>Comportamiento del Cursor</span>
+                <select
+                  value={sCfg.mouseMode || 'attract'}
+                  onChange={e => updateSwarm({ mouseMode: e.target.value as any })}
+                  className="bg-zinc-800 border border-zinc-700 text-xs text-emerald-300 font-medium rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="attract">Atracción Magnética</option>
+                  <option value="repel">Repulsión / Onda Expansiva</option>
+                  <option value="vortex">Vórtice Giratorio (Tornado)</option>
+                  <option value="wave">Onda de Choque Ondulante</option>
+                </select>
+              </div>
+              <NumRow label="Fuerza del Cursor" value={sCfg.mouseForce ?? 4.5} onChange={v => updateSwarm({ mouseForce: v })} min={-15.0} max={15.0} step={0.5} slider/>
+              <NumRow label="Radio de Influencia" value={sCfg.mouseRadius ?? 4.0} onChange={v => updateSwarm({ mouseRadius: v })} min={0.5} max={12.0} step={0.2} slider/>
+            </>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+};
+
 const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const { updateObject, saveHistory } = useStore();
   const isVol = obj.type === 'VOLUME_CLOUD' || !!obj.isVolumetric || !!obj.parameters?.isVolumetric;
@@ -4001,14 +4623,14 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
   return (
     <Section 
-      title="Nube Volumétrica 3D (Raymarching)" 
+      title="Nube Volumétrica 3D & Dispersión 2026" 
       icon={<Cloud size={12} className={isVol ? "text-sky-400" : "text-zinc-400"} />}
     >
       <div className="space-y-3">
         <div className="flex items-center justify-between p-2 bg-zinc-950/60 rounded-lg border border-zinc-800">
           <div className="flex flex-col">
-            <span className="text-[10px] font-bold text-zinc-200">Shader Raymarching 3D</span>
-            <span className="text-[8px] text-zinc-400">Calcula densidad de gas FBM en cubo contenedor</span>
+            <span className="text-[10px] font-bold text-zinc-200">Shader Atmosférico 2026</span>
+            <span className="text-[8px] text-zinc-400">Raymarching con Mie Henyey-Greenstein y Silver Lining</span>
           </div>
           <label className="relative inline-flex items-center cursor-pointer">
             <input 
@@ -4025,7 +4647,7 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           <div className="space-y-3 pt-1">
             {/* Presets */}
             <div className="space-y-1.5">
-              <span className="text-[9px] font-bold text-sky-400 uppercase tracking-wider block">Presets de Gas / Nube / Fuego</span>
+              <span className="text-[9px] font-bold text-sky-400 uppercase tracking-wider block">Presets de Nubes y Atmósfera</span>
               <div className="grid grid-cols-2 gap-1.5">
                 {VOLUMETRIC_PRESETS.map((p, idx) => (
                   <button
@@ -4043,8 +4665,59 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               </div>
             </div>
 
+            {/* 2026 Atmospheric Scattering Parameters */}
+            <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-sky-800/40">
+              <span className="text-[9px] font-bold text-sky-300 uppercase tracking-wider block">Dispersión Atmosférica & Silver Lining</span>
+              <NumRow
+                label="Crestas Plateadas (Silver Lining)"
+                value={volConfig.silverLining ?? 0.8}
+                onChange={v => updateVol({ silverLining: v })}
+                min={0.0}
+                max={3.0}
+                step={0.1}
+                slider
+              />
+              <NumRow
+                label="Anisotropía Mie (g Forward)"
+                value={volConfig.anisotropyG ?? 0.6}
+                onChange={v => updateVol({ anisotropyG: v })}
+                min={0.0}
+                max={0.95}
+                step={0.05}
+                slider
+              />
+              <NumRow
+                label="Cobertura de Nube"
+                value={volConfig.coverage ?? 0.0}
+                onChange={v => updateVol({ coverage: v })}
+                min={-0.6}
+                max={0.8}
+                step={0.05}
+                slider
+              />
+              <NumRow
+                label="Luz Ambiental Interna"
+                value={volConfig.ambientBoost ?? 0.3}
+                onChange={v => updateVol({ ambientBoost: v })}
+                min={0.0}
+                max={2.0}
+                step={0.05}
+                slider
+              />
+              <NumRow
+                label="Desvanecimiento por Altitud"
+                value={volConfig.altitudeFade ?? 0.15}
+                onChange={v => updateVol({ altitudeFade: v })}
+                min={0.0}
+                max={1.0}
+                step={0.05}
+                slider
+              />
+            </div>
+
             {/* Sliders */}
             <div className="space-y-2 bg-zinc-950/40 p-2 rounded-lg border border-zinc-800/60">
+              <span className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider block">Densidad & Raymarching</span>
               <NumRow
                 label="Densidad de Nube"
                 value={volConfig.density ?? 1.5}
@@ -4277,7 +4950,7 @@ export const PropertiesPanel: React.FC = () => {
         <button 
           onClick={() => {
             setActiveTab('EDIT_MESH');
-            if (editMode === 'OBJECT') setEditMode('VERTEX');
+            setEditMode('OBJECT');
           }}
           className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
             activeTab === 'EDIT_MESH' ? 'text-emerald-400 border-b-2 border-emerald-500 bg-emerald-500/5' : 'text-zinc-500 hover:text-zinc-300'
@@ -4430,6 +5103,9 @@ export const PropertiesPanel: React.FC = () => {
                 <SubElementEditSection obj={obj}/>
                 <ParametersSection obj={obj}/>
                 <GeneratedSection obj={obj}/>
+                <GpgpuSwarmSection obj={obj}/>
+                <ParticleSystemSection obj={obj}/>
+                <SpaceWarpSection obj={obj}/>
                 <AlignSection obj={obj}/>
                 <BooleanOperationsSection obj={obj}/>
                 <VolumetricSection obj={obj}/>
@@ -4439,14 +5115,18 @@ export const PropertiesPanel: React.FC = () => {
                 <ValidationSection obj={obj}/>
 
                 <Section title="Estadísticas" defaultOpen={false}>
-                  <div className="grid grid-cols-2 gap-1">
+                  <div className="grid grid-cols-3 gap-1">
                     <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
                       <p className="text-[9px] text-zinc-300 uppercase">Vértices</p>
-                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.vertices ?? obj.vertices.length}</p>
+                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.vertices ?? obj.vertices?.length ?? 0}</p>
+                    </div>
+                    <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
+                      <p className="text-[9px] text-emerald-400 uppercase font-semibold">Aristas</p>
+                      <p className="text-[13px] font-bold font-mono text-emerald-300">{extractUniqueEdges(obj).length}</p>
                     </div>
                     <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
                       <p className="text-[9px] text-zinc-300 uppercase">Caras</p>
-                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.faces ?? obj.faces.length}</p>
+                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.faces ?? obj.faces?.length ?? 0}</p>
                     </div>
                   </div>
                 </Section>

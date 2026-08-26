@@ -11,20 +11,23 @@ export interface WireframeOptions {
   addJointSpheres?: boolean;  // Uniones esféricas en las esquinas/vértices
   sphereSegments?: number;    // Resolución de las esferas de unión (ej: 8)
   asNewObject?: boolean;      // Crear como duplicado o reemplazar
+  dissolveCoplanars?: boolean;// Disolver automáticamente aristas diagonales entre triángulos/caras coplanares (default true)
+  coplanarAngleDeg?: number;  // Tolerancia angular en grados (default 3.5°)
 }
 
 /**
- * Extrae todas las aristas únicas de un objeto o geometría
+ * Extrae todas las aristas únicas de un objeto o geometría,
+ * filtrando automáticamente aristas diagonales interiores entre caras coplanares.
  */
-export function extractUniqueEdges(obj: {
-  vertices?: V3[];
-  faces?: MeshFace[];
-  wireframeEdges?: [number, number][];
-  parameters?: any;
-}): Array<[number, number]> {
-  const edgeSet = new Set<string>();
-  const result: Array<[number, number]> = [];
-
+export function extractUniqueEdges(
+  obj: {
+    vertices?: V3[];
+    faces?: MeshFace[];
+    wireframeEdges?: [number, number][];
+    parameters?: any;
+  },
+  options?: { dissolveCoplanars?: boolean; coplanarAngleDeg?: number }
+): Array<[number, number]> {
   // Si ya tiene aristas explícitas guardadas
   if (obj.wireframeEdges && obj.wireframeEdges.length > 0) {
     return obj.wireframeEdges;
@@ -33,9 +36,17 @@ export function extractUniqueEdges(obj: {
     return obj.parameters.wireframeEdges;
   }
 
-  // Extraer desde las caras
-  if (obj.faces && obj.faces.length > 0) {
-    for (const face of obj.faces) {
+  const dissolveCoplanars = options?.dissolveCoplanars ?? false;
+  const coplanarAngleDeg = options?.coplanarAngleDeg ?? 3.5;
+  const cosTol = Math.cos((coplanarAngleDeg * Math.PI) / 180);
+
+  const edgeToFaces = new Map<string, { fIdx: number; vA: number; vB: number }[]>();
+  const faces = obj.faces || [];
+  const verts = obj.vertices || [];
+
+  if (faces.length > 0) {
+    for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+      const face = faces[fIdx];
       const idxs = face.indices || [];
       const len = idxs.length;
       for (let i = 0; i < len; i++) {
@@ -45,21 +56,68 @@ export function extractUniqueEdges(obj: {
         const min = Math.min(a, b);
         const max = Math.max(a, b);
         const key = `${min}_${max}`;
-        if (!edgeSet.has(key)) {
-          edgeSet.add(key);
-          result.push([min, max]);
+        let list = edgeToFaces.get(key);
+        if (!list) {
+          list = [];
+          edgeToFaces.set(key, list);
         }
+        list.push({ fIdx, vA: min, vB: max });
       }
     }
+
+    // Filtrar aristas diagonales coplanares interiores
+    if (dissolveCoplanars && verts.length > 0) {
+      // Precalcular normales de caras
+      const faceNormals: (THREE.Vector3 | null)[] = faces.map(f => {
+        const idxs = f.indices || [];
+        if (idxs.length < 3) return null;
+        const p0 = verts[idxs[0]], p1 = verts[idxs[1]], p2 = verts[idxs[2]];
+        if (!p0 || !p1 || !p2) return null;
+        const v0 = new THREE.Vector3(...p0);
+        const v1 = new THREE.Vector3(...p1);
+        const v2 = new THREE.Vector3(...p2);
+        const cb = new THREE.Vector3().subVectors(v2, v1);
+        const ab = new THREE.Vector3().subVectors(v0, v1);
+        const cross = new THREE.Vector3().crossVectors(cb, ab);
+        if (cross.lengthSq() < 1e-12) return null;
+        return cross.normalize();
+      });
+
+      const result: Array<[number, number]> = [];
+      edgeToFaces.forEach((sharedList) => {
+        const { vA, vB } = sharedList[0];
+        // Si la arista es compartida por exactamente 2 caras interiores:
+        if (sharedList.length === 2) {
+          const n0 = faceNormals[sharedList[0].fIdx];
+          const n1 = faceNormals[sharedList[1].fIdx];
+          if (n0 && n1) {
+            const dot = n0.dot(n1);
+            // Si ambas caras son coplanares (paralelas en el mismo plano), es una diagonal interna
+            if (dot >= cosTol) {
+              return; // Omitir arista diagonal redundante
+            }
+          }
+        }
+        result.push([vA, vB]);
+      });
+      return result;
+    }
+
+    const result: Array<[number, number]> = [];
+    edgeToFaces.forEach(list => {
+      result.push([list[0].vA, list[0].vB]);
+    });
+    return result;
   }
 
   // Si no hay caras pero hay vértices (por ejemplo, una curva o línea abierta)
-  if (result.length === 0 && obj.vertices && obj.vertices.length > 1) {
-    for (let i = 0; i < obj.vertices.length - 1; i++) {
+  const result: Array<[number, number]> = [];
+  if (verts.length > 1) {
+    for (let i = 0; i < verts.length - 1; i++) {
       result.push([i, i + 1]);
     }
     if (obj.parameters?.closed) {
-      result.push([obj.vertices.length - 1, 0]);
+      result.push([verts.length - 1, 0]);
     }
   }
 
@@ -106,7 +164,7 @@ export function createWireframeTubesGeometry(
     faces: obj.faces,
     wireframeEdges: obj.wireframeEdges,
     parameters: obj.parameters,
-  });
+  }, options);
 
   if (edges.length === 0) {
     return new THREE.BufferGeometry();
@@ -201,7 +259,7 @@ export function convertToWireframeModel(
     faces: obj.faces,
     wireframeEdges: obj.wireframeEdges,
     parameters: obj.parameters,
-  });
+  }, options);
 
   if (mode === 'REMOVE_FACES' || mode === 'LINES') {
     return {

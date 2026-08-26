@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { MaterialData } from '../types';
 import { createRaymarchedCloudMaterial } from './volumetricRaymarch';
+import { createCustomShaderMaterial, updateCSMUniforms } from './customShaderMaterial';
+import { injectWebGPUGlassShader, updateWebGPUGlassUniforms } from './webgpuGlassMaterial';
 
 /**
  * Safely converts a Three.js Texture to a base64 PNG Data URL so it can be stored,
@@ -342,6 +344,18 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
     (data.name && (data.name.toLowerCase().includes('hielo') || data.name.toLowerCase().includes('glacial') || data.name.toLowerCase().includes('ice')))
   );
 
+  const isGlassMat = Boolean(
+    data.isGlass === true ||
+    data.glassConfig?.enabled === true ||
+    (data.id && (data.id.startsWith('glass_') || data.id.includes('glass_dispersion') || data.id.includes('prism_spectral'))) ||
+    (data.name && (data.name.toLowerCase().includes('cristal webgpu') || data.name.toLowerCase().includes('prisma')))
+  );
+
+  const isCSMMat = Boolean(
+    data.isCSM === true ||
+    data.csmConfig?.enabled === true
+  );
+
   const isPhysical = 
     (data.transmission ?? 0) > 0 || 
     (data.clearcoat ?? 0) > 0 || 
@@ -350,6 +364,7 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
     (data.dispersion ?? 0) > 0 ||
     isVelvet ||
     isIceMat ||
+    isGlassMat ||
     (data.iridescence ?? 0) > 0 ||
     (data.specularIntensity !== undefined && data.specularIntensity !== 1) ||
     (data.ior !== undefined && data.ior !== 1.5) ||
@@ -495,7 +510,20 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
 
   injectSeamlessDisplacement(material);
 
-  if (isIceMat && material instanceof THREE.MeshPhysicalMaterial) {
+  if (isCSMMat && data.csmConfig) {
+    return createCustomShaderMaterial(data.csmConfig, data, {
+      map: material.map,
+      normalMap: material.normalMap,
+      roughnessMap: material.roughnessMap,
+      metalnessMap: material.metalnessMap,
+      aoMap: material.aoMap,
+      emissiveMap: material.emissiveMap
+    });
+  }
+
+  if (isGlassMat && material instanceof THREE.MeshPhysicalMaterial) {
+    injectWebGPUGlassShader(material, data.glassConfig || { enabled: true });
+  } else if (isIceMat && material instanceof THREE.MeshPhysicalMaterial) {
     injectProceduralIceShader(material, data);
   } else if (
     (typeof data.porosity === 'number' ? data.porosity > 0.001 : Boolean(data.porosity)) ||
@@ -505,6 +533,23 @@ export function createPBRMaterial(data: MaterialData): THREE.Material {
   }
 
   return material;
+}
+
+/**
+ * Updates all time-dependent and dynamic shader uniforms (CSM, WebGPU Glass, Ice, etc.)
+ */
+export function updateAllMaterialUniforms(material: THREE.Material, time: number, data?: MaterialData) {
+  if (!material || !material.userData) return;
+
+  if (material.userData.isCSM) {
+    updateCSMUniforms(material, time, data?.csmConfig);
+  }
+  if (material.userData.isWebGPUGlass) {
+    updateWebGPUGlassUniforms(material, time, data?.glassConfig);
+  }
+  if (data?.useORM) {
+    updateORMUniforms(material, data);
+  }
 }
 
 /**

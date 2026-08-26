@@ -16,7 +16,8 @@ import {
   Sparkles,
   Scissors,
   Box,
-  CornerUpRight
+  CornerUpRight,
+  Repeat
 } from 'lucide-react';
 
 export const PrecisionDrawToolbar: React.FC = () => {
@@ -35,13 +36,17 @@ export const PrecisionDrawToolbar: React.FC = () => {
     selectedEdgeIndices,
     insertVertexMode,
     setInsertVertexMode,
+    loopCutMode,
+    setLoopCutMode,
     project,
     weldSelectedVertices,
     subdivideShapeSegment,
     deleteSelectedVertices,
     toggleShapeClosed,
     extrudeFaces,
+    extrudeManifold,
     insetFaces,
+    applyLoopCut,
     flipSelectedFaceNormals,
     deleteSelectedFaces,
     mergeFaces,
@@ -284,10 +289,33 @@ export const PrecisionDrawToolbar: React.FC = () => {
                 ? 'bg-amber-600/90 hover:bg-amber-500 text-white border-amber-500 shadow-sm'
                 : 'bg-zinc-900/50 text-zinc-600 border-zinc-800 cursor-not-allowed'
             }`}
-            title="Extruir caras seleccionadas a lo largo de su normal (Ctrl + E)"
+            title="Extruir caras seleccionadas a lo largo de su normal (E)"
           >
             <ArrowUpRight size={11} />
             <span>Extruir (E)</span>
+          </button>
+
+          {/* Extrude Manifold */}
+          <button
+            type="button"
+            onClick={async () => {
+              if (selectedFaceIndices.length === 0) {
+                alert('Selecciona una o más caras para la Extrusión Manifold.');
+                return;
+              }
+              const res = await extrudeManifold(selectedObjectId!, selectedFaceIndices, 0.4);
+              if (!res.success) alert(res.message);
+            }}
+            disabled={selectedFaceIndices.length === 0}
+            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer border ${
+              selectedFaceIndices.length > 0
+                ? 'bg-emerald-600/90 hover:bg-emerald-500 text-white border-emerald-500 shadow-sm'
+                : 'bg-zinc-900/50 text-zinc-600 border-zinc-800 cursor-not-allowed'
+            }`}
+            title="Extrude Manifold (Blender Alt+E): Mantiene el sólido watertight y disuelve geometrías solapadas"
+          >
+            <Sparkles size={11} />
+            <span>Manifold (Alt+E)</span>
           </button>
 
           {/* Inset */}
@@ -433,6 +461,23 @@ export const PrecisionDrawToolbar: React.FC = () => {
           >
             <Sparkles size={11} />
             <span>Biselar (B)</span>
+          </button>
+
+          {/* Loop Cut & Slide */}
+          <button
+            type="button"
+            onClick={() => {
+              setLoopCutMode(!loopCutMode);
+            }}
+            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 transition-all cursor-pointer border ${
+              loopCutMode
+                ? 'bg-cyan-500 text-zinc-950 border-cyan-300 font-bold shadow-sm animate-pulse'
+                : 'bg-zinc-900 hover:bg-cyan-900/60 text-cyan-200 border-zinc-700 hover:border-cyan-500'
+            }`}
+            title="Corte en Bucle y Deslizamiento (Blender Loop Cut: Ctrl + R)"
+          >
+            <Repeat size={11} />
+            <span>Loop Cut (Ctrl+R)</span>
           </button>
 
           {/* Subdividir Arista */}

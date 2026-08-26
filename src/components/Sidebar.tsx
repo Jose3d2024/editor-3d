@@ -188,6 +188,13 @@ const PARAM_DEFS: Record<PrimitiveType, {
     { key: 'nurbsResolutionU', label: 'Resolución U (Tubo)', min: 6, max: 64, step: 2, integer: true },
     { key: 'nurbsResolutionV', label: 'Resolución V (Anillo)', min: 8, max: 64, step: 2, integer: true },
   ],
+  GEOSPHERE: [
+    { key: 'geodesicFrequency', label: 'Frecuencia Geodésica', min: 1, max: 16, step: 1, integer: true },
+    { key: 'segments',          label: 'Subdivisiones',        min: 1, max: 16, step: 1, integer: true },
+  ],
+  PARTICLE_SYSTEM: [],
+  SPACE_WARP: [],
+  GPGPU_SWARM: [],
 };
 
 type AlignAxis = 'x' | 'y' | 'z';

@@ -145,6 +145,22 @@ export const SHORTCUTS_DATA: ShortcutItem[] = [
     detail: 'Subdivide la arista o segmento seleccionado insertando un nuevo vértice central.',
   },
   {
+    id: 'mod-loop-cut',
+    category: 'modeling',
+    keys: ['Ctrl + R'],
+    description: 'Corte en Bucle (Loop Cut and Slide)',
+    detail: 'Inserta un bucle continuo de aristas dividiendo caras cuádruples con vista previa.',
+    badge: 'Blender',
+  },
+  {
+    id: 'mod-extrude-manifold',
+    category: 'modeling',
+    keys: ['Alt + E'],
+    description: 'Extrusión Manifold (Extrude Manifold)',
+    detail: 'Extruye caras resolviendo solapamientos e intersecciones automáticamente sin caras internas.',
+    badge: 'Blender',
+  },
+  {
     id: 'mod-extrude',
     category: 'modeling',
     keys: ['Ctrl + E'],

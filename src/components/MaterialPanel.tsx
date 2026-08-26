@@ -41,12 +41,17 @@ import {
   Unlink,
   Wand2,
   SlidersHorizontal,
-  RefreshCw
+  RefreshCw,
+  Cpu,
+  Code,
+  Waves
 } from 'lucide-react';
 import { adjustTextureColors, AlbedoColorAdjustments, generateFullPBRMapsFromSource } from '../utils/textureColorUtils';
 import { createORMMap, extractPBRMaterialFromGLTFOrOBJ, extractPBRMaterialsFromObject3D } from '../utils/materialUtils';
 import { applyUVWMapping, generateUVs } from '../utils/modifiers';
 import { importPBRPack, detectSlotFromFilename, importTextureFile } from '../utils/materialImporter';
+import { CSM_PRESETS } from '../utils/customShaderMaterial';
+import { WEBGPU_GLASS_PRESETS } from '../utils/webgpuGlassMaterial';
 import { 
   MATERIAL_LIBRARY, 
   MATERIAL_CATEGORIES, 
@@ -546,6 +551,354 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     icon: '🦪',
     description: 'Reflejos irisados nacarados',
     apply: { color: '#fdfcfb', roughness: 0.22, metalness: 0.05, sheen: 0.45, sheenColor: '#fbcfe8', iridescence: 0.8, iridescenceIOR: 1.5, iridescenceThicknessRange: [200, 500], transmission: 0 }
+  },
+
+  // ── WebGPU Physical Glass (Dispersión Espectral, Refracción & Cáusticas) ──
+  {
+    name: 'Prisma Óptico Newton (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '🌈',
+    description: 'Dispersión espectral prismática con separación de longitud de onda Cauchy',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.01,
+      metalness: 0.0,
+      transmission: 1.0,
+      ior: 1.65,
+      thickness: 1.8,
+      dispersion: 0.12,
+      attenuationColor: '#ffffff',
+      attenuationDistance: 8.0,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.01,
+      iridescence: 0.8,
+      iridescenceIOR: 1.4,
+      iridescenceThicknessRange: [200, 700],
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'newton_dispersion_prism',
+        dispersion: 0.12,
+        chromaticAberration: 0.08,
+        rimGlow: 1.5,
+        rimColor: '#a5b4fc',
+        thinFilmIridescence: 0.6,
+        causticIntensity: 1.6,
+      }
+    }
+  },
+  {
+    name: 'Diamante Cuántico (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '💎',
+    description: 'Refracción de alto IOR 2.417 con destellos cáusticos y borde Fresnel',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.005,
+      metalness: 0.0,
+      transmission: 1.0,
+      ior: 2.417,
+      thickness: 2.5,
+      dispersion: 0.18,
+      attenuationColor: '#ffffff',
+      attenuationDistance: 12.0,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.01,
+      iridescence: 0.95,
+      iridescenceIOR: 1.8,
+      iridescenceThicknessRange: [300, 800],
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'diamond_spectral',
+        dispersion: 0.18,
+        chromaticAberration: 0.12,
+        rimGlow: 2.2,
+        rimColor: '#e0e7ff',
+        thinFilmIridescence: 0.9,
+        causticIntensity: 2.0,
+      }
+    }
+  },
+  {
+    name: 'Cristal Ondulado Líquido (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '🌊',
+    description: 'Vidrio líquido dinámico con ondas sinusoidales en tiempo real y aberración cromática',
+    apply: {
+      color: '#f0f9ff',
+      roughness: 0.02,
+      metalness: 0.0,
+      transmission: 1.0,
+      ior: 1.333,
+      thickness: 2.2,
+      dispersion: 0.07,
+      attenuationColor: '#0284c7',
+      attenuationDistance: 3.5,
+      clearcoat: 0.95,
+      clearcoatRoughness: 0.02,
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'liquid_wave_glass',
+        dispersion: 0.07,
+        chromaticAberration: 0.06,
+        distortion: 0.45,
+        distortionSpeed: 1.5,
+        distortionFrequency: 3.5,
+        rimGlow: 1.2,
+        rimColor: '#38bdf8',
+        thinFilmIridescence: 0.3,
+        causticIntensity: 1.4,
+      }
+    }
+  },
+  {
+    name: 'Vidrio Soplado con Microburbujas (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '🫧',
+    description: 'Inclusiones 3D Voronoi internas de burbujas de aire y refracción sutil',
+    apply: {
+      color: '#f8fafc',
+      roughness: 0.06,
+      metalness: 0.0,
+      transmission: 0.98,
+      ior: 1.51,
+      thickness: 2.0,
+      dispersion: 0.06,
+      attenuationColor: '#bae6fd',
+      attenuationDistance: 4.0,
+      clearcoat: 0.9,
+      clearcoatRoughness: 0.04,
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'handblown_bubbles',
+        dispersion: 0.06,
+        chromaticAberration: 0.04,
+        distortion: 0.2,
+        internalBubbles: true,
+        bubbleDensity: 1.8,
+        bubbleScale: 24.0,
+        rimGlow: 1.1,
+        rimColor: '#e0e7fe',
+        causticIntensity: 1.2,
+      }
+    }
+  },
+  {
+    name: 'Vidrio Dicroico Iridiscente (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '✨',
+    description: 'Efecto dicroico multicapa con gradiente angular de longitud de onda',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.02,
+      metalness: 0.05,
+      transmission: 0.95,
+      ior: 1.72,
+      thickness: 1.5,
+      dispersion: 0.14,
+      attenuationColor: '#fbcfe8',
+      attenuationDistance: 5.0,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.01,
+      iridescence: 1.0,
+      iridescenceIOR: 1.9,
+      iridescenceThicknessRange: [180, 850],
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'dichroic_rainbow',
+        dispersion: 0.14,
+        chromaticAberration: 0.1,
+        rimGlow: 2.0,
+        rimColor: '#f43f5e',
+        thinFilmIridescence: 1.0,
+        causticIntensity: 1.8,
+      }
+    }
+  },
+
+  // ── THREE-CustomShaderMaterial (CSM Extension Shaders) ──
+  {
+    name: 'CSM Ondas Líquidas & Vórtice',
+    category: 'Custom Shaders (CSM)',
+    icon: '🌀',
+    description: 'Deformación dinámica de malla sinusoidal con normales recalculadas y brillo emissivo',
+    apply: {
+      color: '#0284c7',
+      roughness: 0.1,
+      metalness: 0.2,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshPhysicalMaterial',
+        preset: 'wave_distortion',
+        timeSpeed: 1.2,
+        displacementScale: 0.18,
+        noiseFrequency: 2.2,
+        colorAccent: '#38bdf8',
+        glowIntensity: 0.5,
+      }
+    }
+  },
+  {
+    name: 'CSM Escudo Holográfico Sci-Fi',
+    category: 'Custom Shaders (CSM)',
+    icon: '🛡️',
+    description: 'Efecto holográfico con líneas de escaneo activas, rejilla cúbica y glow Fresnel',
+    apply: {
+      color: '#0891b2',
+      roughness: 0.15,
+      metalness: 0.0,
+      opacity: 0.85,
+      transparent: true,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshStandardMaterial',
+        preset: 'hologram_shield',
+        timeSpeed: 2.0,
+        displacementScale: 0.05,
+        noiseFrequency: 8.0,
+        colorAccent: '#06b6d4',
+        glowIntensity: 2.5,
+      }
+    }
+  },
+  {
+    name: 'CSM Magma & Lava Volcánica',
+    category: 'Custom Shaders (CSM)',
+    icon: '🌋',
+    description: 'Corteza basáltica con fracturas incandescentes animadas por ruido simplex y pulsación',
+    apply: {
+      color: '#1c1917',
+      roughness: 0.85,
+      metalness: 0.1,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshStandardMaterial',
+        preset: 'volcanic_magma',
+        timeSpeed: 0.8,
+        displacementScale: 0.12,
+        noiseFrequency: 3.5,
+        colorAccent: '#ff3b00',
+        glowIntensity: 3.0,
+      }
+    }
+  },
+  {
+    name: 'CSM Torsión Espacial Helicoidal',
+    category: 'Custom Shaders (CSM)',
+    icon: '🌪️',
+    description: 'Torsión helicoidal geométrica 3D a lo largo del eje Y impulsada por GPU',
+    apply: {
+      color: '#581c87',
+      roughness: 0.2,
+      metalness: 0.6,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshStandardMaterial',
+        preset: 'twist_vortex',
+        timeSpeed: 1.2,
+        displacementScale: 0.25,
+        noiseFrequency: 2.0,
+        colorAccent: '#c084fc',
+        glowIntensity: 1.8,
+      }
+    }
+  },
+  {
+    name: 'CSM Tejido Bio-Orgánico',
+    category: 'Custom Shaders (CSM)',
+    icon: '🧬',
+    description: 'Piel y tejido vivo con pulsación biológica y vascularización procedural',
+    apply: {
+      color: '#881337',
+      roughness: 0.35,
+      metalness: 0.0,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshPhysicalMaterial',
+        preset: 'bio_organic_flesh',
+        timeSpeed: 1.5,
+        displacementScale: 0.15,
+        noiseFrequency: 3.0,
+        colorAccent: '#e11d48',
+        glowIntensity: 0.8,
+      }
+    }
+  },
+  {
+    name: 'CSM Cristal Cuántico Facetado',
+    category: 'Custom Shaders (CSM)',
+    icon: '💎',
+    description: 'Refracción molecular interna con faceteado anisotrópico dinámico',
+    apply: {
+      color: '#312e81',
+      roughness: 0.05,
+      metalness: 0.4,
+      transmission: 0.6,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshPhysicalMaterial',
+        preset: 'quantum_crystal',
+        timeSpeed: 1.0,
+        displacementScale: 0.1,
+        noiseFrequency: 4.0,
+        colorAccent: '#818cf8',
+        glowIntensity: 1.2,
+      }
+    }
+  },
+  {
+    name: 'CSM Glitch Digital Cyber',
+    category: 'Custom Shaders (CSM)',
+    icon: '👾',
+    description: 'Artefactos de compresión digital y líneas de datos de matriz cuántica',
+    apply: {
+      color: '#064e3b',
+      roughness: 0.3,
+      metalness: 0.1,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshStandardMaterial',
+        preset: 'digital_wire_glitch',
+        timeSpeed: 3.0,
+        displacementScale: 0.08,
+        noiseFrequency: 6.0,
+        colorAccent: '#10b981',
+        glowIntensity: 2.0,
+      }
+    }
+  },
+  {
+    name: 'CSM Sombreado Cómic / Pop-Art',
+    category: 'Custom Shaders (CSM)',
+    icon: '🎨',
+    description: 'Sombreado toon cel-shading con trama de puntos semitono Halftone',
+    apply: {
+      color: '#d97706',
+      roughness: 0.9,
+      metalness: 0.0,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshToonMaterial',
+        preset: 'comic_halftone',
+        timeSpeed: 0.0,
+        displacementScale: 0.0,
+        noiseFrequency: 12.0,
+        colorAccent: '#f59e0b',
+        glowIntensity: 1.0,
+      }
+    }
   },
 
   // Volumétricos 3D (Raymarching: WebGPU Fire, Lighting, Perlin & Ice)
@@ -1087,6 +1440,7 @@ export const MaterialPanel: React.FC = () => {
 
   // Categorías y filtrado de la librería procedimental
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [presetCategoryFilter, setPresetCategoryFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
   // Estado para la Librería de Texturas integrada
@@ -1260,12 +1614,12 @@ export const MaterialPanel: React.FC = () => {
         blending: pMat.volumetric?.blending ?? (pMat.id.includes('fire') || pMat.id.includes('plasma') || pMat.id.includes('aurora') || pMat.id.includes('nebula') ? 'additive' : 'normal'),
         turbulentFlame: pMat.volumetric?.turbulentFlame ?? pMat.id.includes('fire'),
       } : undefined,
-      map: isVol ? undefined : maps?.albedo,
-      normalMap: isVol ? undefined : maps?.normal,
-      roughnessMap: isVol ? undefined : maps?.roughness,
-      metalnessMap: isVol ? undefined : maps?.metallic,
-      aoMap: isVol ? undefined : maps?.ao,
-      displacementMap: isVol ? undefined : maps?.displacement,
+      map: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.albedo || undefined),
+      normalMap: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.normal || undefined),
+      roughnessMap: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.roughness || undefined),
+      metalnessMap: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.metallic || undefined),
+      aoMap: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.ao || undefined),
+      displacementMap: (isVol || pMat.isCSM || pMat.isWebGPUGlass) ? undefined : (maps?.displacement || undefined),
       roughness: d.roughness ?? 0.5,
       metalness: d.metalness ?? 0.0,
       normalScale: d.normalScale ?? 1.0,
@@ -1295,8 +1649,18 @@ export const MaterialPanel: React.FC = () => {
         frostIntensity: pMat.id === 'ice_frosted' ? 1.0 : 0.85,
         crackIntensity: pMat.id === 'ice_cracked' ? 1.2 : 0.9,
       } : undefined,
+      isCSM: Boolean(pMat.isCSM || pMat.category === 'csm' || pMat.id.startsWith('csm_')),
+      csmConfig: (pMat.isCSM || pMat.category === 'csm' || pMat.id.startsWith('csm_')) ? {
+        enabled: true,
+        ...(pMat.csmConfig || {}),
+      } : undefined,
+      isGlass: Boolean(pMat.isWebGPUGlass || pMat.category === 'glass_webgpu' || pMat.id.startsWith('glass_')),
+      glassConfig: (pMat.isWebGPUGlass || pMat.category === 'glass_webgpu' || pMat.id.startsWith('glass_')) ? {
+        enabled: true,
+        ...(pMat.webgpuGlass || {}),
+      } : undefined,
       opacity: 1,
-      transparent: isVol || (d.transmission ?? 0) > 0,
+      transparent: isVol || (d.transmission ?? 0) > 0 || (pMat.isCSM && pMat.csmConfig?.preset === 'hologram_shield'),
     };
 
     addMaterial(newMat);
@@ -1614,6 +1978,8 @@ export const MaterialPanel: React.FC = () => {
     normal: true,
     porosity: true,
     glass: true,
+    webgpu_glass: true,
+    csm: true,
     ice_nodes: true,
     clearcoat: false,
     sheen: false,
@@ -2568,26 +2934,87 @@ export const MaterialPanel: React.FC = () => {
       {/* Contenido con Scroll Protegido */}
       <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-w-full overflow-x-hidden">
         
-        {/* ── PRESETS FÍSICOS CALIBRADOS DE ACCESO RÁPIDO ── */}
-        <div className="bg-zinc-900/60 p-2.5 rounded-xl border border-white/5 space-y-2">
+        {/* ── PRESETS FÍSICOS CALIBRADOS DE ACCESO RÁPIDO CON FILTRO DE CATEGORÍA ── */}
+        <div className="bg-zinc-900/80 p-2.5 rounded-xl border border-white/10 space-y-2 shadow-md">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-400 flex items-center gap-1.5">
-              <span>✨</span> Presets Físicos Calibrados
+              <span>✨</span> Presets Calibrados
             </span>
-            <span className="text-[9px] text-zinc-500 font-mono">1-Click</span>
+            <div className="flex items-center gap-1">
+              <span className="text-[9px] text-zinc-500 font-mono">
+                {PHYSICALLY_CALIBRATED_PRESETS.filter(p => {
+                  if (presetCategoryFilter === 'all') return true;
+                  if (presetCategoryFilter === 'csm') return p.category === 'Custom Shaders (CSM)' || p.apply.isCSM;
+                  if (presetCategoryFilter === 'glass') return p.category === 'Vidrio & Gemas' || (p.apply.transmission && p.apply.transmission > 0);
+                  if (presetCategoryFilter === 'metal') return p.category === 'Metales';
+                  if (presetCategoryFilter === 'ice') return p.category === 'Hielo & Nieve';
+                  if (presetCategoryFilter === 'wood_stone') return p.category === 'Madera & Piedra';
+                  if (presetCategoryFilter === 'volumetric') return p.category === 'Volumétricos 3D' || p.apply.isVolumetric;
+                  if (presetCategoryFilter === 'paint') return p.category === 'Lacados & Pinturas' || p.category === 'Textiles';
+                  return p.category === presetCategoryFilter;
+                }).length} presets
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1">
-            {PHYSICALLY_CALIBRATED_PRESETS.map((preset, idx) => (
+
+          {/* Selector de subcategorías de Presets */}
+          <div className="flex items-center gap-1 overflow-x-auto custom-scrollbar pb-1 text-[9px]">
+            {[
+              { id: 'all', label: 'Todos', icon: '✨' },
+              { id: 'csm', label: '🌀 CSM Shaders', icon: '🌀' },
+              { id: 'glass', label: '💎 Vidrios & Gemas', icon: '💎' },
+              { id: 'metal', label: '🪙 Metales', icon: '⚙️' },
+              { id: 'ice', label: '❄️ Hielo & Nieve', icon: '❄️' },
+              { id: 'volumetric', label: '🔥 Volumétricos', icon: '🔥' },
+              { id: 'wood_stone', label: '🪵 Madera/Piedra', icon: '🪨' },
+              { id: 'paint', label: '🎨 Pintura/Telas', icon: '🎨' },
+            ].map(cat => (
               <button
-                key={idx}
-                onClick={() => updateMaterial(activeMaterial.id, preset.apply)}
-                className="px-2 py-1 rounded-lg bg-zinc-800/90 hover:bg-indigo-600/30 text-zinc-300 hover:text-white border border-white/5 hover:border-indigo-500/40 text-[10px] font-medium whitespace-nowrap transition-all flex items-center gap-1 flex-shrink-0 shadow-sm"
-                title={`${preset.name}: ${preset.description}`}
+                key={cat.id}
+                onClick={() => setPresetCategoryFilter(cat.id)}
+                className={`px-2 py-0.5 rounded-full whitespace-nowrap transition-all font-medium flex items-center gap-1 border ${
+                  presetCategoryFilter === cat.id
+                    ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm shadow-indigo-500/20'
+                    : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 border-white/5 hover:border-white/20'
+                }`}
               >
-                <span>{preset.icon}</span>
-                <span>{preset.name}</span>
+                <span>{cat.label}</span>
               </button>
             ))}
+          </div>
+
+          {/* Carrusel de botones de presets */}
+          <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1 pt-0.5">
+            {PHYSICALLY_CALIBRATED_PRESETS
+              .filter(preset => {
+                if (presetCategoryFilter === 'all') return true;
+                if (presetCategoryFilter === 'csm') return preset.category === 'Custom Shaders (CSM)' || preset.apply.isCSM;
+                if (presetCategoryFilter === 'glass') return preset.category === 'Vidrio & Gemas' || (preset.apply.transmission && preset.apply.transmission > 0);
+                if (presetCategoryFilter === 'metal') return preset.category === 'Metales';
+                if (presetCategoryFilter === 'ice') return preset.category === 'Hielo & Nieve';
+                if (presetCategoryFilter === 'wood_stone') return preset.category === 'Madera & Piedra';
+                if (presetCategoryFilter === 'volumetric') return preset.category === 'Volumétricos 3D' || preset.apply.isVolumetric;
+                if (presetCategoryFilter === 'paint') return preset.category === 'Lacados & Pinturas' || preset.category === 'Textiles';
+                return preset.category === presetCategoryFilter;
+              })
+              .map((preset, idx) => {
+                const isCSM = preset.category === 'Custom Shaders (CSM)' || preset.apply.isCSM;
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => updateMaterial(activeMaterial.id, preset.apply)}
+                    className={`px-2 py-1.5 rounded-lg text-[10px] font-medium whitespace-nowrap transition-all flex items-center gap-1.5 flex-shrink-0 shadow-sm border ${
+                      isCSM
+                        ? 'bg-indigo-950/60 hover:bg-indigo-900/80 text-indigo-200 hover:text-white border-indigo-500/40 hover:border-indigo-400 ring-1 ring-indigo-500/20'
+                        : 'bg-zinc-800/90 hover:bg-indigo-600/30 text-zinc-300 hover:text-white border-white/5 hover:border-indigo-500/40'
+                    }`}
+                    title={`${preset.name}: ${preset.description}`}
+                  >
+                    <span className="text-xs">{preset.icon}</span>
+                    <span>{preset.name}</span>
+                  </button>
+                );
+              })}
           </div>
         </div>
 
@@ -3690,6 +4117,561 @@ export const MaterialPanel: React.FC = () => {
                     className="w-4 h-4 rounded bg-transparent border-none cursor-pointer"
                   />
                   <span className="text-[9px] font-mono text-zinc-200">{activeMaterial.iceConfig?.cloudColor || '#e0f2fe'}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 3.6: WEBGPU GLASS (DISPERSIÓN ESPECTRAL, REFRACCIÓN & CÁUSTICAS) ── */}
+        <div className="bg-gradient-to-r from-blue-950/30 via-indigo-950/20 to-purple-950/30 rounded-xl border border-indigo-500/30 overflow-hidden shadow-lg shadow-indigo-950/20">
+          <button 
+            onClick={() => toggleSection('webgpu_glass')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-indigo-500/10 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-indigo-300">
+              <span className="text-sm">🌈</span>
+              <span>WebGPU Glass (Dispersión Espectral)</span>
+              {(activeMaterial.isGlass || activeMaterial.glassConfig?.enabled) && (
+                <span className="text-[8px] bg-gradient-to-r from-indigo-500/30 to-purple-500/30 text-indigo-200 px-1.5 py-0.5 rounded-full border border-indigo-400/40 font-mono font-semibold">
+                  WEBGPU ACTIVE
+                </span>
+              )}
+            </div>
+            {openSections.webgpu_glass ? <ChevronDown size={14} className="text-indigo-400" /> : <ChevronRight size={14} className="text-indigo-400" />}
+          </button>
+
+          {openSections.webgpu_glass && (
+            <div className="p-3 pt-1 space-y-3.5 border-t border-indigo-500/20">
+              {/* Switch Activar WebGPU Glass */}
+              <div className="flex items-center justify-between bg-indigo-950/40 p-2 rounded-lg border border-indigo-500/20">
+                <div className="flex flex-col">
+                  <span className="text-[10px] font-bold text-indigo-200">Activar Shader WebGPU Glass</span>
+                  <span className="text-[8px] text-zinc-400">Dispersión de Newton, aberración cromática y ondas cáusticas</span>
+                </div>
+                <input 
+                  type="checkbox"
+                  checked={Boolean(activeMaterial.isGlass || activeMaterial.glassConfig?.enabled)}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    updateMaterial(activeMaterial.id, {
+                      isGlass: enabled,
+                      transmission: enabled ? (activeMaterial.transmission || 1.0) : activeMaterial.transmission,
+                      ior: enabled ? (activeMaterial.ior || 1.65) : activeMaterial.ior,
+                      dispersion: enabled ? (activeMaterial.dispersion || 0.12) : activeMaterial.dispersion,
+                      thickness: enabled ? (activeMaterial.thickness || 1.8) : activeMaterial.thickness,
+                      glassConfig: {
+                        enabled,
+                        preset: activeMaterial.glassConfig?.preset || 'newton_dispersion_prism',
+                        dispersion: activeMaterial.glassConfig?.dispersion ?? (activeMaterial.dispersion || 0.12),
+                        chromaticAberration: activeMaterial.glassConfig?.chromaticAberration ?? 0.08,
+                        distortion: activeMaterial.glassConfig?.distortion ?? 0.0,
+                        distortionSpeed: activeMaterial.glassConfig?.distortionSpeed ?? 1.0,
+                        distortionFrequency: activeMaterial.glassConfig?.distortionFrequency ?? 3.0,
+                        internalBubbles: activeMaterial.glassConfig?.internalBubbles ?? false,
+                        bubbleDensity: activeMaterial.glassConfig?.bubbleDensity ?? 1.5,
+                        bubbleScale: activeMaterial.glassConfig?.bubbleScale ?? 20.0,
+                        frostedBlur: activeMaterial.glassConfig?.frostedBlur ?? 0.0,
+                        rimGlow: activeMaterial.glassConfig?.rimGlow ?? 1.5,
+                        rimColor: activeMaterial.glassConfig?.rimColor ?? '#a5b4fc',
+                        causticIntensity: activeMaterial.glassConfig?.causticIntensity ?? 1.5,
+                        thinFilmIridescence: activeMaterial.glassConfig?.thinFilmIridescence ?? 0.5,
+                      }
+                    });
+                  }}
+                  className="rounded accent-indigo-500 w-4 h-4 cursor-pointer"
+                />
+              </div>
+
+              {/* Presets Rápidos WebGPU Glass */}
+              <div className="space-y-1.5">
+                <div className="text-[9px] font-semibold text-zinc-300 uppercase tracking-wider flex items-center justify-between">
+                  <span>Presets Calibrados WebGPU Glass:</span>
+                  <span className="text-[8px] text-indigo-400 font-mono">{WEBGPU_GLASS_PRESETS.length} presets</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {WEBGPU_GLASS_PRESETS.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        updateMaterial(activeMaterial.id, {
+                          isGlass: true,
+                          transmission: 1.0,
+                          ior: p.pbrParams?.ior || activeMaterial.ior,
+                          dispersion: p.defaultParams.dispersion ?? activeMaterial.dispersion,
+                          roughness: p.pbrParams?.roughness ?? 0.01,
+                          thickness: p.pbrParams?.thickness ?? 2.0,
+                          attenuationColor: p.pbrParams?.attenuationColor || activeMaterial.attenuationColor,
+                          attenuationDistance: p.pbrParams?.attenuationDistance || activeMaterial.attenuationDistance,
+                          clearcoat: p.pbrParams?.clearcoat ?? 1.0,
+                          clearcoatRoughness: p.pbrParams?.clearcoatRoughness ?? 0.01,
+                          glassConfig: {
+                            ...p.defaultParams,
+                            enabled: true,
+                            preset: p.id,
+                          }
+                        });
+                      }}
+                      className={`p-2 rounded-lg text-left transition-all border flex flex-col gap-0.5 ${
+                        activeMaterial.glassConfig?.preset === p.id
+                          ? 'bg-indigo-600/30 border-indigo-400 text-indigo-100 shadow-sm shadow-indigo-500/30'
+                          : 'bg-zinc-900/60 border-white/5 text-zinc-300 hover:bg-indigo-950/40 hover:border-indigo-500/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[9px] font-bold truncate">{p.name}</span>
+                        <span className="text-[7px] px-1 py-0.2 bg-white/10 rounded font-mono text-indigo-300">
+                          IOR {p.pbrParams?.ior || 1.5}
+                        </span>
+                      </div>
+                      <span className="text-[8px] text-zinc-400 truncate">{p.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sliders de Parámetros Físicos WebGPU Glass */}
+              <div className="space-y-2.5 bg-black/20 p-2.5 rounded-lg border border-white/5">
+                {/* Dispersión Espectral Cauchy */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300 font-medium">Dispersión Espectral (Cauchy)</label>
+                    <span className="font-mono text-indigo-300 font-bold">
+                      {(activeMaterial.glassConfig?.dispersion ?? 0.12).toFixed(3)}
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="0.35" step="0.005"
+                    value={activeMaterial.glassConfig?.dispersion ?? 0.12}
+                    onChange={e => {
+                      const val = parseFloat(e.target.value);
+                      updateMaterial(activeMaterial.id, {
+                        isGlass: true,
+                        dispersion: val,
+                        glassConfig: {
+                          ...(activeMaterial.glassConfig || { enabled: true }),
+                          dispersion: val
+                        }
+                      });
+                    }}
+                    className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Aberración Cromática */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300 font-medium">Aberración Cromática (Wavelength Split)</label>
+                    <span className="font-mono text-indigo-300 font-bold">
+                      {(((activeMaterial.glassConfig?.chromaticAberration ?? 0.08)) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="0.25" step="0.005"
+                    value={activeMaterial.glassConfig?.chromaticAberration ?? 0.08}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isGlass: true,
+                      glassConfig: {
+                        ...(activeMaterial.glassConfig || { enabled: true }),
+                        chromaticAberration: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Resplandor Fresnel de Borde (Rim Glow) */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[9px]">
+                      <label className="text-zinc-400">Resplandor Rim Glow</label>
+                      <span className="font-mono text-indigo-300">{(activeMaterial.glassConfig?.rimGlow ?? 1.5).toFixed(1)}x</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="4.0" step="0.1"
+                      value={activeMaterial.glassConfig?.rimGlow ?? 1.5}
+                      onChange={e => updateMaterial(activeMaterial.id, {
+                        isGlass: true,
+                        glassConfig: {
+                          ...(activeMaterial.glassConfig || { enabled: true }),
+                          rimGlow: parseFloat(e.target.value)
+                        }
+                      })}
+                      className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[9px] text-zinc-400">Color de Resplandor Rim</label>
+                    <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded border border-white/5">
+                      <input 
+                        type="color"
+                        value={activeMaterial.glassConfig?.rimColor || '#a5b4fc'}
+                        onChange={e => updateMaterial(activeMaterial.id, {
+                          isGlass: true,
+                          glassConfig: {
+                            ...(activeMaterial.glassConfig || { enabled: true }),
+                            rimColor: e.target.value
+                          }
+                        })}
+                        className="w-4 h-4 rounded bg-transparent border-none cursor-pointer"
+                      />
+                      <span className="text-[8px] font-mono text-zinc-300 truncate">
+                        {activeMaterial.glassConfig?.rimColor || '#a5b4fc'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Destellos Cáusticos Especulares */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300 font-medium">Intensidad de Cáusticas & Destellos</label>
+                    <span className="font-mono text-indigo-300 font-bold">
+                      {(activeMaterial.glassConfig?.causticIntensity ?? 1.5).toFixed(1)}x
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="3.5" step="0.1"
+                    value={activeMaterial.glassConfig?.causticIntensity ?? 1.5}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isGlass: true,
+                      glassConfig: {
+                        ...(activeMaterial.glassConfig || { enabled: true }),
+                        causticIntensity: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Deformación y Ondas de Superficie Líquida */}
+                <div className="space-y-1 pt-1 border-t border-white/5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Ondulación Líquida Dinámica</label>
+                    <span className="font-mono text-indigo-300">
+                      {(((activeMaterial.glassConfig?.distortion ?? 0)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1.0" step="0.02"
+                    value={activeMaterial.glassConfig?.distortion ?? 0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isGlass: true,
+                      glassConfig: {
+                        ...(activeMaterial.glassConfig || { enabled: true }),
+                        distortion: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Microburbujas Voronoi Internas */}
+                <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-zinc-300 font-medium">Microburbujas Internas 3D</span>
+                    <span className="text-[8px] text-zinc-400">Inclusiones de aire Voronoi dentro de la masa vítrea</span>
+                  </div>
+                  <input 
+                    type="checkbox"
+                    checked={Boolean(activeMaterial.glassConfig?.internalBubbles)}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isGlass: true,
+                      glassConfig: {
+                        ...(activeMaterial.glassConfig || { enabled: true }),
+                        internalBubbles: e.target.checked
+                      }
+                    })}
+                    className="rounded accent-indigo-500 w-4 h-4 cursor-pointer"
+                  />
+                </div>
+
+                {/* Película Delgada Iridiscente */}
+                <div className="space-y-1 pt-1 border-t border-white/5">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300">Interferencia Dicroica / Película Delgada</label>
+                    <span className="font-mono text-indigo-300">
+                      {(((activeMaterial.glassConfig?.thinFilmIridescence ?? 0.5)) * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="1.0" step="0.05"
+                    value={activeMaterial.glassConfig?.thinFilmIridescence ?? 0.5}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isGlass: true,
+                      glassConfig: {
+                        ...(activeMaterial.glassConfig || { enabled: true }),
+                        thinFilmIridescence: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-indigo-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── SECCIÓN 3.7: THREE-CUSTOMSHADERMATERIAL (CSM SHADER EXTENSIONS) ── */}
+        <div className="bg-gradient-to-r from-purple-950/30 via-fuchsia-950/20 to-pink-950/30 rounded-xl border border-purple-500/30 overflow-hidden shadow-lg shadow-purple-950/20">
+          <button 
+            onClick={() => toggleSection('csm')}
+            className="w-full p-2.5 flex items-center justify-between text-left hover:bg-purple-500/10 transition-colors"
+          >
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-purple-300">
+              <Cpu size={14} className="text-purple-400" />
+              <span>CustomShaderMaterial (CSM)</span>
+              {(activeMaterial.isCSM || activeMaterial.csmConfig?.enabled) && (
+                <span className="text-[8px] bg-gradient-to-r from-purple-500/30 to-fuchsia-500/30 text-purple-200 px-1.5 py-0.5 rounded-full border border-purple-400/40 font-mono font-semibold">
+                  CSM ACTIVE
+                </span>
+              )}
+            </div>
+            {openSections.csm ? <ChevronDown size={14} className="text-purple-400" /> : <ChevronRight size={14} className="text-purple-400" />}
+          </button>
+
+          {openSections.csm && (
+            <div className="p-3 pt-1 space-y-3.5 border-t border-purple-500/20">
+              {/* Switch Activar CSM */}
+              <div className="flex items-center justify-between bg-purple-950/40 p-2 rounded-lg border border-purple-500/20">
+                <div className="flex flex-col">
+                  <span className="text-[10px] font-bold text-purple-200">Activar Extensión CSM</span>
+                  <span className="text-[8px] text-zinc-400">Extiende materiales estándar con vertex & fragment shaders custom</span>
+                </div>
+                <input 
+                  type="checkbox"
+                  checked={Boolean(activeMaterial.isCSM || activeMaterial.csmConfig?.enabled)}
+                  onChange={e => {
+                    const enabled = e.target.checked;
+                    updateMaterial(activeMaterial.id, {
+                      isCSM: enabled,
+                      csmConfig: {
+                        enabled,
+                        baseMaterial: activeMaterial.csmConfig?.baseMaterial || 'MeshPhysicalMaterial',
+                        preset: activeMaterial.csmConfig?.preset || 'wave_distortion',
+                        timeSpeed: activeMaterial.csmConfig?.timeSpeed ?? 1.0,
+                        displacementScale: activeMaterial.csmConfig?.displacementScale ?? 0.0,
+                        noiseFrequency: activeMaterial.csmConfig?.noiseFrequency ?? 3.0,
+                        colorAccent: activeMaterial.csmConfig?.colorAccent || '#38bdf8',
+                        glowIntensity: activeMaterial.csmConfig?.glowIntensity ?? 1.5,
+                        vertexShader: activeMaterial.csmConfig?.vertexShader,
+                        fragmentShader: activeMaterial.csmConfig?.fragmentShader,
+                      }
+                    });
+                  }}
+                  className="rounded accent-purple-500 w-4 h-4 cursor-pointer"
+                />
+              </div>
+
+              {/* Selector de Material Base Three.js */}
+              <div className="space-y-1">
+                <label className="text-[9px] font-semibold text-zinc-300 uppercase tracking-wider">Material Base Three.js:</label>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { id: 'MeshPhysicalMaterial', label: 'Physical PBR' },
+                    { id: 'MeshStandardMaterial', label: 'Standard PBR' },
+                    { id: 'MeshToonMaterial', label: 'Toon Cel' },
+                  ].map(bm => (
+                    <button
+                      key={bm.id}
+                      onClick={() => updateMaterial(activeMaterial.id, {
+                        isCSM: true,
+                        csmConfig: {
+                          ...(activeMaterial.csmConfig || { enabled: true }),
+                          baseMaterial: bm.id as any
+                        }
+                      })}
+                      className={`py-1 px-1 rounded text-[8px] font-bold transition-all border text-center ${
+                        (activeMaterial.csmConfig?.baseMaterial || 'MeshPhysicalMaterial') === bm.id
+                          ? 'bg-purple-600/30 text-purple-200 border-purple-400'
+                          : 'bg-zinc-900/60 text-zinc-400 border-white/5 hover:bg-zinc-800'
+                      }`}
+                    >
+                      {bm.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Presets Rápidos CSM */}
+              <div className="space-y-1.5">
+                <div className="text-[9px] font-semibold text-zinc-300 uppercase tracking-wider flex items-center justify-between">
+                  <span>Presets de Sombreador CSM:</span>
+                  <span className="text-[8px] text-purple-400 font-mono">{CSM_PRESETS.length} presets</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {CSM_PRESETS.map(p => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        updateMaterial(activeMaterial.id, {
+                          isCSM: true,
+                          csmConfig: {
+                            ...p.defaultParams,
+                            baseMaterial: p.defaultBaseMaterial,
+                            enabled: true,
+                            preset: p.id,
+                            vertexShader: p.vertexCode,
+                            fragmentShader: p.fragmentCode,
+                          }
+                        });
+                      }}
+                      className={`p-2 rounded-lg text-left transition-all border flex flex-col gap-0.5 ${
+                        activeMaterial.csmConfig?.preset === p.id
+                          ? 'bg-purple-600/30 border-purple-400 text-purple-100 shadow-sm shadow-purple-500/30'
+                          : 'bg-zinc-900/60 border-white/5 text-zinc-300 hover:bg-purple-950/40 hover:border-purple-500/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[9px] font-bold truncate">{p.name}</span>
+                        <span className="text-[7px] px-1 py-0.2 bg-white/10 rounded font-mono text-purple-300 truncate">
+                          {p.defaultBaseMaterial?.replace('Mesh', '').replace('Material', '')}
+                        </span>
+                      </div>
+                      <span className="text-[8px] text-zinc-400 truncate">{p.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sliders de Parámetros CSM */}
+              <div className="space-y-2.5 bg-black/20 p-2.5 rounded-lg border border-white/5">
+                {/* Desplazamiento de Vértices */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <div className="flex items-center gap-1.5">
+                      <label className="text-zinc-300 font-medium">Deformación 3D (Displacement)</label>
+                      {(activeMaterial.csmConfig?.displacementScale ?? 0.0) === 0 ? (
+                        <span className="text-[8px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 rounded font-mono border border-emerald-500/30">
+                          Sólido Cerrado
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-purple-300 font-bold">
+                        {(activeMaterial.csmConfig?.displacementScale ?? 0.0).toFixed(2)}x
+                      </span>
+                      {(activeMaterial.csmConfig?.displacementScale ?? 0.0) > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => updateMaterial(activeMaterial.id, {
+                            isCSM: true,
+                            csmConfig: {
+                              ...(activeMaterial.csmConfig || { enabled: true }),
+                              displacementScale: 0.0
+                            }
+                          })}
+                          className="text-[8px] px-1 py-0.5 bg-white/10 hover:bg-white/20 text-zinc-300 rounded transition-colors"
+                          title="Restablecer a 0 para mantener la malla 3D cerrada e intacta"
+                        >
+                          Fijar en 0
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <input 
+                    type="range" min="0" max="0.5" step="0.01"
+                    value={activeMaterial.csmConfig?.displacementScale ?? 0.0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isCSM: true,
+                      csmConfig: {
+                        ...(activeMaterial.csmConfig || { enabled: true }),
+                        displacementScale: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-purple-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                  <p className="text-[7.5px] text-zinc-400 leading-tight">
+                    * En <strong>0.00x</strong> el shader aplica efectos ópticos (Fresnel, brillo, lava, iridiscencia) preservando la figura 3D intacta y sellada.
+                  </p>
+                </div>
+
+                {/* Velocidad de Tiempo */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300 font-medium">Velocidad de Animación (Time Speed)</label>
+                    <span className="font-mono text-purple-300 font-bold">
+                      {(activeMaterial.csmConfig?.timeSpeed ?? 1.0).toFixed(1)}x
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0" max="4.0" step="0.1"
+                    value={activeMaterial.csmConfig?.timeSpeed ?? 1.0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isCSM: true,
+                      csmConfig: {
+                        ...(activeMaterial.csmConfig || { enabled: true }),
+                        timeSpeed: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-purple-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Frecuencia de Ruido / Ondas */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-[10px]">
+                    <label className="text-zinc-300 font-medium">Frecuencia Espacial de Ruido</label>
+                    <span className="font-mono text-purple-300 font-bold">
+                      {(activeMaterial.csmConfig?.noiseFrequency ?? 3.0).toFixed(1)}
+                    </span>
+                  </div>
+                  <input 
+                    type="range" min="0.5" max="15.0" step="0.2"
+                    value={activeMaterial.csmConfig?.noiseFrequency ?? 3.0}
+                    onChange={e => updateMaterial(activeMaterial.id, {
+                      isCSM: true,
+                      csmConfig: {
+                        ...(activeMaterial.csmConfig || { enabled: true }),
+                        noiseFrequency: parseFloat(e.target.value)
+                      }
+                    })}
+                    className="w-full accent-purple-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                {/* Color de Acento y Emisión Glow */}
+                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-white/5">
+                  <div className="space-y-1">
+                    <label className="text-[9px] text-zinc-400">Color de Acento Shader</label>
+                    <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded border border-white/5">
+                      <input 
+                        type="color"
+                        value={activeMaterial.csmConfig?.colorAccent || '#38bdf8'}
+                        onChange={e => updateMaterial(activeMaterial.id, {
+                          isCSM: true,
+                          csmConfig: {
+                            ...(activeMaterial.csmConfig || { enabled: true }),
+                            colorAccent: e.target.value
+                          }
+                        })}
+                        className="w-4 h-4 rounded bg-transparent border-none cursor-pointer"
+                      />
+                      <span className="text-[8px] font-mono text-zinc-300 truncate">
+                        {activeMaterial.csmConfig?.colorAccent || '#38bdf8'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex justify-between items-center text-[9px]">
+                      <label className="text-zinc-400">Brillo Glow / Emisión</label>
+                      <span className="font-mono text-purple-300">{(activeMaterial.csmConfig?.glowIntensity ?? 1.5).toFixed(1)}x</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="5.0" step="0.1"
+                      value={activeMaterial.csmConfig?.glowIntensity ?? 1.5}
+                      onChange={e => updateMaterial(activeMaterial.id, {
+                        isCSM: true,
+                        csmConfig: {
+                          ...(activeMaterial.csmConfig || { enabled: true }),
+                          glowIntensity: parseFloat(e.target.value)
+                        }
+                      })}
+                      className="w-full accent-purple-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

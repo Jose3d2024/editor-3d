@@ -34,6 +34,7 @@
     "three": "^0.183.1",
     "three-bvh-csg": "^0.0.18",
     "three-csg-ts": "^3.2.0",
+    "three-custom-shader-material": "^6.4.0",
     "three-gpu-pathtracer": "^0.0.24",
     "three-mesh-bvh": "^0.9.13",
     "vite": "^6.2.0",

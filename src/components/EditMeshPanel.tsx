@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useStore } from '../store/useStore';
 import { CSGObject } from '../types';
 import { WireframeModal } from './WireframeModal';
+import { extractUniqueEdges } from '../utils/wireframeMesh';
 import {
   Scissors,
   Layers,
@@ -50,6 +51,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
     subdivideShapeSegment,
     toggleShapeClosed,
     extrudeFaces,
+    extrudeManifold,
     insetFaces,
     subdivideFaces,
     mergeFaces,
@@ -57,6 +59,13 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
     capSelectedFacesObject,
     deleteSelectedFaces,
     bevelSelectedEdges,
+    applyLoopCut,
+    loopCutMode,
+    setLoopCutMode,
+    loopCutCuts,
+    setLoopCutCuts,
+    loopCutSlide,
+    setLoopCutSlide,
     subdivideSelectedEdges,
     bridgeSelectedEdges,
     dissolveSelectedEdges,
@@ -102,6 +111,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
 
   const vertCount = obj.vertices?.length ?? obj.stats?.vertices ?? 0;
   const faceCount = obj.faces?.length ?? obj.stats?.faces ?? 0;
+  const aristasCount = extractUniqueEdges(obj).length;
   const numEdges = Math.floor(selectedEdgeIndices.length / 2);
   const isShape = obj.type === 'SHAPE';
 
@@ -121,10 +131,14 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
         </div>
 
         {/* Estadísticas de Malla */}
-        <div className="grid grid-cols-3 gap-1.5 py-1.5 px-2 bg-zinc-950/60 rounded-lg border border-white/5 text-[10px] text-zinc-400 text-center font-mono">
+        <div className="grid grid-cols-4 gap-1 py-1.5 px-2 bg-zinc-950/60 rounded-lg border border-white/5 text-[10px] text-zinc-400 text-center font-mono">
           <div>
             <span className="text-zinc-500 block text-[9px]">VÉRTICES</span>
             <span className="text-emerald-400 font-bold">{vertCount}</span>
+          </div>
+          <div>
+            <span className="text-zinc-500 block text-[9px]">ARISTAS</span>
+            <span className="text-cyan-400 font-bold">{aristasCount}</span>
           </div>
           <div>
             <span className="text-zinc-500 block text-[9px]">CARAS</span>
@@ -527,6 +541,80 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
             </button>
           </div>
 
+          {/* Corte en Bucle y Deslizamiento (Loop Cut and Slide - Blender Ctrl+R) */}
+          <div className="space-y-2 p-2 bg-zinc-900/80 rounded-lg border border-cyan-500/30">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-cyan-300 flex items-center gap-1 text-[11px]">
+                <Repeat size={13} className="text-cyan-400" />
+                <span>Corte en Bucle (Loop Cut)</span>
+              </span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 font-mono border border-cyan-800/40">
+                Ctrl + R
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-[10px]">
+              <div>
+                <div className="flex justify-between text-zinc-400 mb-0.5">
+                  <span>Cortes:</span>
+                  <span className="font-mono text-cyan-300">{loopCutCuts}</span>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value={loopCutCuts}
+                  onChange={e => setLoopCutCuts(parseInt(e.target.value))}
+                  className="w-full h-1 bg-zinc-700 rounded appearance-none cursor-pointer accent-cyan-500"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-zinc-400 mb-0.5">
+                  <span>Deslizar:</span>
+                  <span className="font-mono text-cyan-300">{loopCutSlide.toFixed(2)}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.95"
+                  step="0.05"
+                  value={loopCutSlide}
+                  onChange={e => setLoopCutSlide(parseFloat(e.target.value))}
+                  className="w-full h-1 bg-zinc-700 rounded appearance-none cursor-pointer accent-cyan-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => setLoopCutMode(!loopCutMode)}
+                className={`py-1.5 px-2 rounded-md text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+                  loopCutMode
+                    ? 'bg-cyan-500 text-zinc-950 ring-2 ring-cyan-300 shadow-md animate-pulse'
+                    : 'bg-zinc-800 hover:bg-cyan-900/70 text-cyan-200 border border-cyan-700/50'
+                }`}
+              >
+                <Repeat size={12} />
+                <span>{loopCutMode ? 'Activo (Pasa mouse)' : 'Modo Interactivo (Ctrl+R)'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const res = applyLoopCut(obj.id, undefined, loopCutCuts, loopCutSlide);
+                  showFeedback(res.message);
+                }}
+                disabled={selectedEdgeIndices.length < 2}
+                className="py-1.5 px-2 bg-cyan-700 hover:bg-cyan-600 disabled:opacity-40 text-white rounded-md text-[10px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer"
+              >
+                <span>Cortar Arista Sel.</span>
+              </button>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-1.5">
             <button
               type="button"
@@ -608,21 +696,43 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
               onChange={e => setExtrudeAmount(parseFloat(e.target.value))}
               className="w-full h-1 bg-zinc-700 rounded appearance-none cursor-pointer accent-amber-500"
             />
-            <button
-              type="button"
-              onClick={() => {
-                if (selectedFaceIndices.length === 0) {
-                  showFeedback('Selecciona una o más caras para extruir.');
-                  return;
-                }
-                extrudeFaces(obj.id, selectedFaceIndices, extrudeAmount);
-                showFeedback('Extrusión aplicada.');
-              }}
-              disabled={selectedFaceIndices.length === 0}
-              className="w-full py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all shadow cursor-pointer"
-            >
-              <span>🚀 Extruir Caras (E / Ctrl+E)</span>
-            </button>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedFaceIndices.length === 0) {
+                    showFeedback('Selecciona una o más caras para extruir.');
+                    return;
+                  }
+                  extrudeFaces(obj.id, selectedFaceIndices, extrudeAmount);
+                  showFeedback('Extrusión estándar aplicada.');
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="w-full py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all shadow cursor-pointer"
+                title="Extrusión estándar (E)"
+              >
+                <span>🚀 Extruir (E)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (selectedFaceIndices.length === 0) {
+                    showFeedback('Selecciona una o más caras para la Extrusión Manifold.');
+                    return;
+                  }
+                  showFeedback('Calculando Extrusión Manifold...');
+                  const res = await extrudeManifold(obj.id, selectedFaceIndices, extrudeAmount);
+                  showFeedback(res.message);
+                }}
+                disabled={selectedFaceIndices.length === 0}
+                className="w-full py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-[10px] font-bold flex items-center justify-center gap-1 transition-all shadow cursor-pointer"
+                title="Extrude Manifold (Blender Alt+E): Disuelve caras solapadas, perfora túneles/huecos limpios y mantiene el sólido cerrado y manifold"
+              >
+                <Sparkles size={11} />
+                <span>Manifold (Alt+E)</span>
+              </button>
+            </div>
           </div>
 
           {/* Inset */}

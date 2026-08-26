@@ -607,10 +607,14 @@ export interface GeneratedMaps {
 
 export interface ProceduralMaterial {
   id: string; name: string;
-  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent' | 'gaseous' | 'ice_snow';
+  category: 'wood' | 'stone' | 'metal' | 'paint' | 'synthetic' | 'ground' | 'textile' | 'iridescent' | 'gaseous' | 'ice_snow' | 'csm' | 'glass_webgpu';
   icon: string;
   isVolumetric?: boolean;
   volumetric?: VolumetricConfig;
+  isCSM?: boolean;
+  csmConfig?: any;
+  isWebGPUGlass?: boolean;
+  webgpuGlass?: any;
   /** Suggested UV repeat — smaller = texture appears larger on mesh */
   defaults: {
     roughness: number; metalness: number;
@@ -966,9 +970,35 @@ export function generateMaterial(
   return mat.generate(w, h);
 }
 
-/** Default thumbnail: 128x128 albedo preview */
+const COLOR_THUMB_CACHE = new Map<string, string>();
+export function _colorThumb(hexColor: string, icon?: string): string {
+  const cacheKey = `${hexColor}_${icon || ''}`;
+  if (COLOR_THUMB_CACHE.has(cacheKey)) return COLOR_THUMB_CACHE.get(cacheKey)!;
+  const canvas = document.createElement('canvas');
+  canvas.width = 48;
+  canvas.height = 48;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    const grad = ctx.createRadialGradient(20, 16, 2, 24, 24, 26);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.35, hexColor);
+    grad.addColorStop(1, '#090a0f');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(24, 24, 22, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+    ctx.stroke();
+  }
+  const url = canvas.toDataURL('image/webp', 0.85);
+  COLOR_THUMB_CACHE.set(cacheKey, url);
+  return url;
+}
+
+/** Default thumbnail: 48x48 albedo preview (ultra-fast 48x48) */
 function _thumb(mat:{generate(w:number,h:number):GeneratedMaps}):string{
-  return mat.generate(128,128).albedo;
+  return mat.generate(48,48).albedo;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4728,7 +4758,340 @@ const activeMagmaCrust: ProceduralMaterial = {
 
 // ── REESTRUCTURACIÓN DE LA BIBLIOTECA GENERAL ────────────────────────────────
 
+// ── CSM & Glass Material Definitions ───────────────────────────────────────
+function fastSolidMaps(colorHex: string, rough = 0.5, metal = 0.0): GeneratedMaps {
+  return {
+    albedo: '',
+    normal: '',
+    roughness: '',
+    metallic: '',
+    ao: '',
+    displacement: '',
+  };
+}
+
+export const csmWaves: ProceduralMaterial = {
+  id: 'csm_waves',
+  name: 'CSM Ondas Líquidas & Vórtice',
+  category: 'csm',
+  icon: '🌊',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshPhysicalMaterial',
+    preset: 'wave_distortion',
+    timeSpeed: 1.2,
+    displacementScale: 0.0,
+    noiseFrequency: 2.2,
+    colorAccent: '#38bdf8',
+    glowIntensity: 0.5,
+  },
+  defaults: {
+    roughness: 0.1,
+    metalness: 0.2,
+    color: '#0284c7',
+    clearcoat: 0.8,
+    clearcoatRoughness: 0.1,
+    transmission: 0.4,
+    ior: 1.33,
+  },
+  generate: () => fastSolidMaps('#0284c7', 0.1, 0.2),
+  thumbnail: () => _colorThumb('#0284c7', '🌊'),
+};
+
+export const csmShield: ProceduralMaterial = {
+  id: 'csm_shield',
+  name: 'CSM Escudo Holográfico Sci-Fi',
+  category: 'csm',
+  icon: '🛡️',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshStandardMaterial',
+    preset: 'hologram_shield',
+    timeSpeed: 2.0,
+    displacementScale: 0.0,
+    noiseFrequency: 8.0,
+    colorAccent: '#06b6d4',
+    glowIntensity: 2.5,
+  },
+  defaults: {
+    roughness: 0.15,
+    metalness: 0.0,
+    color: '#0891b2',
+    emissive: '#06b6d4',
+    emissiveIntensity: 1.5,
+  },
+  generate: () => fastSolidMaps('#0891b2', 0.15, 0.0),
+  thumbnail: () => _colorThumb('#0891b2', '🛡️'),
+};
+
+export const csmMagma: ProceduralMaterial = {
+  id: 'csm_magma',
+  name: 'CSM Magma Volcánico y Relieve',
+  category: 'csm',
+  icon: '🌋',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshStandardMaterial',
+    preset: 'volcanic_magma',
+    timeSpeed: 0.8,
+    displacementScale: 0.0,
+    noiseFrequency: 3.5,
+    colorAccent: '#ff3b00',
+    glowIntensity: 3.0,
+  },
+  defaults: {
+    roughness: 0.85,
+    metalness: 0.1,
+    color: '#1c1917',
+    emissive: '#ff3b00',
+    emissiveIntensity: 2.0,
+  },
+  generate: () => fastSolidMaps('#1c1917', 0.85, 0.1),
+  thumbnail: () => _colorThumb('#ff3b00', '🌋'),
+};
+
+export const csmTwist: ProceduralMaterial = {
+  id: 'csm_twist',
+  name: 'CSM Torsión Espacial Helicoidal',
+  category: 'csm',
+  icon: '🌪️',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshStandardMaterial',
+    preset: 'twist_vortex',
+    timeSpeed: 1.2,
+    displacementScale: 0.0,
+    noiseFrequency: 2.0,
+    colorAccent: '#c084fc',
+    glowIntensity: 1.8,
+  },
+  defaults: {
+    roughness: 0.2,
+    metalness: 0.6,
+    color: '#581c87',
+  },
+  generate: () => fastSolidMaps('#581c87', 0.2, 0.6),
+  thumbnail: () => _colorThumb('#a855f7', '🌪️'),
+};
+
+export const csmBioFlesh: ProceduralMaterial = {
+  id: 'csm_flesh',
+  name: 'CSM Tejido Bio-Orgánico',
+  category: 'csm',
+  icon: '🧬',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshPhysicalMaterial',
+    preset: 'bio_organic_flesh',
+    timeSpeed: 1.5,
+    displacementScale: 0.0,
+    noiseFrequency: 3.0,
+    colorAccent: '#e11d48',
+    glowIntensity: 0.8,
+  },
+  defaults: {
+    roughness: 0.35,
+    metalness: 0.0,
+    color: '#881337',
+  },
+  generate: () => fastSolidMaps('#881337', 0.35, 0.0),
+  thumbnail: () => _colorThumb('#e11d48', '🧬'),
+};
+
+export const csmQuantumCrystal: ProceduralMaterial = {
+  id: 'csm_crystal',
+  name: 'CSM Cristal Cuántico Facetado',
+  category: 'csm',
+  icon: '💎',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshPhysicalMaterial',
+    preset: 'quantum_crystal',
+    timeSpeed: 1.0,
+    displacementScale: 0.0,
+    noiseFrequency: 4.0,
+    colorAccent: '#818cf8',
+    glowIntensity: 1.2,
+  },
+  defaults: {
+    roughness: 0.05,
+    metalness: 0.4,
+    color: '#312e81',
+    transmission: 0.6,
+  },
+  generate: () => fastSolidMaps('#312e81', 0.05, 0.4),
+  thumbnail: () => _colorThumb('#818cf8', '💎'),
+};
+
+export const csmGlitch: ProceduralMaterial = {
+  id: 'csm_glitch',
+  name: 'CSM Glitch Digital Cyber',
+  category: 'csm',
+  icon: '👾',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshStandardMaterial',
+    preset: 'digital_wire_glitch',
+    timeSpeed: 3.0,
+    displacementScale: 0.0,
+    noiseFrequency: 6.0,
+    colorAccent: '#10b981',
+    glowIntensity: 2.0,
+  },
+  defaults: {
+    roughness: 0.3,
+    metalness: 0.1,
+    color: '#064e3b',
+  },
+  generate: () => fastSolidMaps('#064e3b', 0.3, 0.1),
+  thumbnail: () => _colorThumb('#10b981', '👾'),
+};
+
+export const csmComic: ProceduralMaterial = {
+  id: 'csm_comic',
+  name: 'CSM Sombreado Cómic / Pop-Art',
+  category: 'csm',
+  icon: '🎨',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshToonMaterial',
+    preset: 'comic_halftone',
+    timeSpeed: 0.0,
+    displacementScale: 0.0,
+    noiseFrequency: 12.0,
+    colorAccent: '#f59e0b',
+    glowIntensity: 1.0,
+  },
+  defaults: {
+    roughness: 0.9,
+    metalness: 0.0,
+    color: '#d97706',
+  },
+  generate: () => fastSolidMaps('#d97706', 0.9, 0.0),
+  thumbnail: () => _colorThumb('#f59e0b', '🎨'),
+};
+
+export const glassPrismDispersion: ProceduralMaterial = {
+  id: 'glass_prism',
+  name: 'Vidrio Espectral Cauchy (WebGPU)',
+  category: 'glass_webgpu',
+  icon: '🌈',
+  isWebGPUGlass: true,
+  webgpuGlass: {
+    enabled: true,
+    dispersion: 0.085,
+    aberration: 0.05,
+    rimGlow: 1.2,
+    rimColor: '#a5b4fc',
+    causticIntensity: 1.4,
+  },
+  defaults: {
+    roughness: 0.02,
+    metalness: 0.0,
+    color: '#ffffff',
+    transmission: 0.96,
+    ior: 1.52,
+    thickness: 1.2,
+  },
+  generate: () => fastSolidMaps('#e0e7ff', 0.02, 0.0),
+  thumbnail: () => _colorThumb('#a5b4fc', '🌈'),
+};
+
+export const glassFrostedAcid: ProceduralMaterial = {
+  id: 'glass_frosted',
+  name: 'Vidrio Ácido Esmerilado (WebGPU)',
+  category: 'glass_webgpu',
+  icon: '🌫️',
+  isWebGPUGlass: true,
+  webgpuGlass: {
+    enabled: true,
+    frostedRoughness: 0.38,
+    dispersion: 0.03,
+    causticIntensity: 0.6,
+  },
+  defaults: {
+    roughness: 0.32,
+    metalness: 0.0,
+    color: '#f8fafc',
+    transmission: 0.88,
+    ior: 1.48,
+    thickness: 1.0,
+  },
+  generate: () => fastSolidMaps('#cbd5e1', 0.32, 0.0),
+  thumbnail: () => _colorThumb('#cbd5e1', '🌫️'),
+};
+
+export const glassEmeraldCaustic: ProceduralMaterial = {
+  id: 'glass_emerald',
+  name: 'Vidrio Esmeralda Cáusticas (WebGPU)',
+  category: 'glass_webgpu',
+  icon: '❇️',
+  isWebGPUGlass: true,
+  webgpuGlass: {
+    enabled: true,
+    dispersion: 0.06,
+    rimGlow: 1.8,
+    rimColor: '#34d399',
+    causticIntensity: 2.2,
+  },
+  defaults: {
+    roughness: 0.04,
+    metalness: 0.0,
+    color: '#064e3b',
+    attenuationColor: '#059669',
+    attenuationDistance: 0.8,
+    transmission: 0.92,
+    ior: 1.57,
+    thickness: 1.5,
+  },
+  generate: () => fastSolidMaps('#059669', 0.04, 0.0),
+  thumbnail: () => _colorThumb('#10b981', '❇️'),
+};
+
+export const glassRubyDichroic: ProceduralMaterial = {
+  id: 'glass_ruby',
+  name: 'Vidrio Dicroico Rubí (WebGPU)',
+  category: 'glass_webgpu',
+  icon: '💎',
+  isWebGPUGlass: true,
+  webgpuGlass: {
+    enabled: true,
+    dispersion: 0.12,
+    aberration: 0.08,
+    rimGlow: 2.0,
+    rimColor: '#f43f5e',
+    causticIntensity: 1.8,
+  },
+  defaults: {
+    roughness: 0.03,
+    metalness: 0.0,
+    color: '#881337',
+    attenuationColor: '#e11d48',
+    attenuationDistance: 0.6,
+    transmission: 0.90,
+    ior: 1.77,
+    thickness: 1.6,
+  },
+  generate: () => fastSolidMaps('#e11d48', 0.03, 0.0),
+  thumbnail: () => _colorThumb('#f43f5e', '💎'),
+};
+
 export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
+  // Custom Shader Materials (CSM)
+  csmWaves, csmShield, csmMagma, csmTwist,
+  csmBioFlesh, csmQuantumCrystal, csmGlitch, csmComic,
+
+  // WebGPU Glass Materials
+  glassPrismDispersion, glassFrostedAcid, glassEmeraldCaustic, glassRubyDichroic,
+
   // Wood & Organic (Substance 3D Core Collection)
   oakPlanks, walnut, pine, mahogany, varnishedWood,
   shouSugiBan, teakDeck, wovenBamboo, pressedCork,
@@ -4768,6 +5131,8 @@ export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
 ];
 
 export const MATERIAL_CATEGORIES = [
+  { id: 'csm', label: 'Custom Shaders (CSM)', icon: '🌀' },
+  { id: 'glass_webgpu', label: 'Vidrio Espectral & Cáusticas', icon: '💎' },
   { id: 'ice_snow', label: 'Hielo & Nieve', icon: '❄️' },
   { id: 'wood', label: 'Madera', icon: '🪵' },
   { id: 'stone', label: 'Piedra / Orgánico', icon: '🪨' },
@@ -4803,24 +5168,40 @@ export async function generateAllThumbnailsAsync(): Promise<Map<string, string>>
     return THUMBNAIL_CACHE;
   }
 
+  // Pre-cargar inmediatamente todos los materiales que tienen thumbnail rápido sincrónico
   for (const mat of MATERIAL_LIBRARY) {
-    // 1. Verificar si este material específico ya fue guardado en el disco duro anteriormente
-    const cachedThumb = await loadMaterialFromDisk(mat.id);
-    
-    if (cachedThumb) {
-      // SI YA EXISTE: Lo inyectamos directo en la memoria activa sin ejecutar .generate() de CPU
-      THUMBNAIL_CACHE.set(mat.id, cachedThumb);
-    } else {
-      // SINO EXISTE (Es nuevo o importado en este frame): Lo calculamos una única vez
-      // Optimizamos a una resolución ligera de miniatura (64x64px) para no saturar memoria
-      const generated = mat.generate(64, 64);
-      const thumbUrl = mat.thumbnail ? mat.thumbnail() : generated.albedo;
-      
-      // Grabar permanentemente solo este nuevo elemento en la base de datos persistente
-      await saveMaterialToDisk(mat.id, thumbUrl);
-      THUMBNAIL_CACHE.set(mat.id, thumbUrl);
+    if (mat.thumbnail) {
+      try {
+        const t = mat.thumbnail();
+        THUMBNAIL_CACHE.set(mat.id, t);
+      } catch {
+        // Continue
+      }
     }
   }
+
+  // Procesar en lotes de 10 en paralelo para no bloquear el hilo principal
+  const remaining = MATERIAL_LIBRARY.filter(m => !THUMBNAIL_CACHE.has(m.id));
+  const batchSize = 10;
+  for (let i = 0; i < remaining.length; i += batchSize) {
+    const batch = remaining.slice(i, i + batchSize);
+    await Promise.all(batch.map(async (mat) => {
+      try {
+        const cachedThumb = await loadMaterialFromDisk(mat.id);
+        if (cachedThumb) {
+          THUMBNAIL_CACHE.set(mat.id, cachedThumb);
+        } else {
+          const thumbUrl = mat.thumbnail ? mat.thumbnail() : _thumb(mat);
+          saveMaterialToDisk(mat.id, thumbUrl).catch(() => {});
+          THUMBNAIL_CACHE.set(mat.id, thumbUrl);
+        }
+      } catch {
+        // Fallback rápido
+        THUMBNAIL_CACHE.set(mat.id, _colorThumb(mat.defaults?.color || '#888888'));
+      }
+    }));
+  }
+
   return THUMBNAIL_CACHE;
 }
 

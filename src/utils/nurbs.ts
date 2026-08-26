@@ -254,7 +254,7 @@ export function sampleNurbsCurveWithAttrs(curve: NurbsCurveData, segments = 32):
   const out: EvaluatedCurvePoint[] = [];
   const pts = curve.controlPoints;
   const p = Math.max(1, Math.min(curve.degree, pts.length - 1));
-  const knots = curve.knots && curve.knots.length === pts.length + p + 2
+  const knots = curve.knots && curve.knots.length === pts.length + p + 1
     ? curve.knots
     : buildKnots(pts.length, p, curve.closed, curve.endpoint !== false, curve.knotsType);
 
@@ -282,11 +282,11 @@ export function evaluateNurbsSurfacePoint(surface: NurbsSurfaceData, u: number, 
   const pU = Math.max(1, Math.min(surface.degreeU, numU - 1));
   const pV = Math.max(1, Math.min(surface.degreeV, numV - 1));
 
-  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 2
+  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 1
     ? surface.knotsU
     : buildKnots(numU, pU, surface.closedU, surface.endpointU !== false, surface.knotsTypeU);
 
-  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 2
+  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 1
     ? surface.knotsV
     : buildKnots(numV, pV, surface.closedV, surface.endpointV !== false, surface.knotsTypeV);
 
@@ -330,10 +330,10 @@ export function evaluateNurbsSurfaceNormal(surface: NurbsSurfaceData, u: number,
 
   const pU = Math.max(1, Math.min(surface.degreeU, numU - 1));
   const pV = Math.max(1, Math.min(surface.degreeV, numV - 1));
-  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 2
+  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 1
     ? surface.knotsU
     : buildKnots(numU, pU, surface.closedU, surface.endpointU !== false, surface.knotsTypeU);
-  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 2
+  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 1
     ? surface.knotsV
     : buildKnots(numV, pV, surface.closedV, surface.endpointV !== false, surface.knotsTypeV);
 
@@ -367,6 +367,8 @@ export function evaluateNurbsSurfaceNormal(surface: NurbsSurfaceData, u: number,
     nz /= len;
   } else {
     // Fallback normal for poles/singularities
+    if (u <= uMin + 1e-4) return [0, -1, 0];
+    if (u >= uMax - 1e-4) return [0, 1, 0];
     const p0 = evaluateNurbsSurfacePoint(surface, u, v);
     const p0Len = Math.hypot(p0[0], p0[1], p0[2]);
     if (p0Len > 1e-4) {
@@ -398,11 +400,11 @@ export function tessellateNurbsSurface(
   const pU = Math.max(1, Math.min(surface.degreeU, numU - 1));
   const pV = Math.max(1, Math.min(surface.degreeV, numV - 1));
 
-  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 2
+  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 1
     ? surface.knotsU
     : buildKnots(numU, pU, surface.closedU, surface.endpointU !== false, surface.knotsTypeU);
 
-  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 2
+  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 1
     ? surface.knotsV
     : buildKnots(numV, pV, surface.closedV, surface.endpointV !== false, surface.knotsTypeV);
 
@@ -425,7 +427,7 @@ export function tessellateNurbsSurface(
       const n = evaluateNurbsSurfaceNormal(surface, u, v);
 
       vertices.push(pt);
-      uvs.push([uNorm, vNorm]);
+      uvs.push([vNorm, uNorm]);
       normals.push(n);
     }
   }
@@ -470,10 +472,10 @@ export function generateNurbsSurfaceIsoparms(
 
   const pU = Math.max(1, Math.min(surface.degreeU, numU - 1));
   const pV = Math.max(1, Math.min(surface.degreeV, numV - 1));
-  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 2
+  const knotsU = surface.knotsU && surface.knotsU.length === numU + pU + 1
     ? surface.knotsU
     : buildKnots(numU, pU, surface.closedU, surface.endpointU !== false, surface.knotsTypeU);
-  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 2
+  const knotsV = surface.knotsV && surface.knotsV.length === numV + pV + 1
     ? surface.knotsV
     : buildKnots(numV, pV, surface.closedV, surface.endpointV !== false, surface.knotsTypeV);
 
@@ -699,24 +701,21 @@ export function tessellateNurbsCurveToMesh(
 // ─── NURBS PRIMITIVES GENERATORS ────────────────────────────────────────────
 
 /**
- * Standard 3D NURBS Curve.
+ * Standard 3D NURBS Curve (Degree 3 cubic curve with 4 control points).
  */
 export function createDefaultNurbsCurve(): NurbsCurveData {
   return {
     degree: 3,
     controlPoints: [
-      { point: [-1.5, 0, 0], weight: 1.0 },
-      { point: [-0.5, 1.2, 0], weight: 1.0 },
-      { point: [0.5, -1.2, 0], weight: 1.0 },
-      { point: [1.5, 0, 0], weight: 1.0 },
+      { point: [-1.5, 0, -0.5], weight: 1.0 },
+      { point: [-0.5, 1.2, 0.5], weight: 1.0 },
+      { point: [0.5, -0.8, -0.5], weight: 1.0 },
+      { point: [1.5, 0.5, 0.5], weight: 1.0 },
     ],
     closed: false,
   };
 }
 
-/**
- * Exact Rational NURBS Circle (9 control points with weight sqrt(2)/2 on corners).
- */
 export function createDefaultNurbsCircle(radius = 1.0): NurbsCurveData {
   const r = radius;
   const w = Math.SQRT1_2; // 0.7071067811865475
@@ -726,13 +725,13 @@ export function createDefaultNurbsCircle(radius = 1.0): NurbsCurveData {
     knots: [0, 0, 0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1, 1, 1],
     controlPoints: [
       { point: [r, 0, 0], weight: 1.0 },
-      { point: [r, 0, -r], weight: w },
-      { point: [0, 0, -r], weight: 1.0 },
-      { point: [-r, 0, -r], weight: w },
-      { point: [-r, 0, 0], weight: 1.0 },
-      { point: [-r, 0, r], weight: w },
-      { point: [0, 0, r], weight: 1.0 },
       { point: [r, 0, r], weight: w },
+      { point: [0, 0, r], weight: 1.0 },
+      { point: [-r, 0, r], weight: w },
+      { point: [-r, 0, 0], weight: 1.0 },
+      { point: [-r, 0, -r], weight: w },
+      { point: [0, 0, -r], weight: 1.0 },
+      { point: [r, 0, -r], weight: w },
       { point: [r, 0, 0], weight: 1.0 },
     ],
     closed: true,
@@ -773,38 +772,43 @@ export function createDefaultNurbsSurface(size = 2.0): NurbsSurfaceData {
 
 /**
  * Exact Rational NURBS Cylinder (Rhino 3D standard).
+ * Degree 1 (linear) in height U x Degree 2 (quadratic rational) in circle revolution V.
  */
 export function createDefaultNurbsCylinder(radius = 0.8, height = 2.0): NurbsSurfaceData {
   const r = radius;
   const w = Math.SQRT1_2;
   const halfH = height / 2;
 
-  // 9 circular points x 3 vertical heights
-  const heights = [-halfH, 0, halfH];
-  const grid: NurbsControlPoint[][] = [];
+  const rowBottom: NurbsControlPoint[] = [
+    { point: [r, -halfH, 0], weight: 1.0 },
+    { point: [r, -halfH, r], weight: w },
+    { point: [0, -halfH, r], weight: 1.0 },
+    { point: [-r, -halfH, r], weight: w },
+    { point: [-r, -halfH, 0], weight: 1.0 },
+    { point: [-r, -halfH, -r], weight: w },
+    { point: [0, -halfH, -r], weight: 1.0 },
+    { point: [r, -halfH, -r], weight: w },
+    { point: [r, -halfH, 0], weight: 1.0 },
+  ];
 
-  for (let hIdx = 0; hIdx < 3; hIdx++) {
-    const y = heights[hIdx];
-    const row: NurbsControlPoint[] = [
-      { point: [r, y, 0], weight: 1.0 },
-      { point: [r, y, -r], weight: w },
-      { point: [0, y, -r], weight: 1.0 },
-      { point: [-r, y, -r], weight: w },
-      { point: [-r, y, 0], weight: 1.0 },
-      { point: [-r, y, r], weight: w },
-      { point: [0, y, r], weight: 1.0 },
-      { point: [r, y, r], weight: w },
-      { point: [r, y, 0], weight: 1.0 },
-    ];
-    grid.push(row);
-  }
+  const rowTop: NurbsControlPoint[] = [
+    { point: [r, halfH, 0], weight: 1.0 },
+    { point: [r, halfH, r], weight: w },
+    { point: [0, halfH, r], weight: 1.0 },
+    { point: [-r, halfH, r], weight: w },
+    { point: [-r, halfH, 0], weight: 1.0 },
+    { point: [-r, halfH, -r], weight: w },
+    { point: [0, halfH, -r], weight: 1.0 },
+    { point: [r, halfH, -r], weight: w },
+    { point: [r, halfH, 0], weight: 1.0 },
+  ];
 
   return {
-    degreeU: 2,
+    degreeU: 1,
     degreeV: 2,
-    knotsU: [0, 0, 0, 1, 1, 1],
+    knotsU: [0, 0, 1, 1],
     knotsV: [0, 0, 0, 0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1, 1, 1],
-    controlPoints: grid,
+    controlPoints: [rowBottom, rowTop],
     resolutionU: 16,
     resolutionV: 32,
     closedV: true,
@@ -813,18 +817,18 @@ export function createDefaultNurbsCylinder(radius = 0.8, height = 2.0): NurbsSur
 
 /**
  * Exact Rational NURBS Sphere (Rhino 3D standard revolution).
- * Uses 5 profile rings from South Pole to North Pole x 9 circular points with exact rational weights.
+ * Uses 5 profile levels from South Pole to North Pole x 9 circular points with exact rational weights.
  */
 export function createDefaultNurbsSphere(radius = 1.0): NurbsSurfaceData {
   const R = radius;
   const w = Math.SQRT1_2;
 
   // 5 profile levels in U (South Pole to North Pole)
-  // Level 0 (South Pole): y = -R, ringRadius = 0, weight = 1
-  // Level 1 (South Tangent): y = -R, ringRadius = R, weight = w
-  // Level 2 (Equator): y = 0, ringRadius = R, weight = 1
-  // Level 3 (North Tangent): y = R, ringRadius = R, weight = w
-  // Level 4 (North Pole): y = R, ringRadius = 0, weight = 1
+  // Level 0 (South Pole): y = -R, r = 0, weight = 1
+  // Level 1 (South Tangent): y = -R, r = R, weight = w
+  // Level 2 (Equator): y = 0, r = R, weight = 1
+  // Level 3 (North Tangent): y = R, r = R, weight = w
+  // Level 4 (North Pole): y = R, r = 0, weight = 1
   const levels: { y: number; r: number; uWeight: number }[] = [
     { y: -R, r: 0, uWeight: 1.0 },
     { y: -R, r: R, uWeight: w },
@@ -833,21 +837,31 @@ export function createDefaultNurbsSphere(radius = 1.0): NurbsSurfaceData {
     { y: R, r: 0, uWeight: 1.0 },
   ];
 
+  const circleDirs: [number, number, number][] = [
+    [1, 0, 1.0],
+    [1, 1, w],
+    [0, 1, 1.0],
+    [-1, 1, w],
+    [-1, 0, 1.0],
+    [-1, -1, w],
+    [0, -1, 1.0],
+    [1, -1, w],
+    [1, 0, 1.0],
+  ];
+
   const grid: NurbsControlPoint[][] = [];
 
   for (let i = 0; i < levels.length; i++) {
     const { y, r, uWeight } = levels[i];
-    const row: NurbsControlPoint[] = [
-      { point: [r, y, 0], weight: 1.0 * uWeight },
-      { point: [r, y, -r], weight: w * uWeight },
-      { point: [0, y, -r], weight: 1.0 * uWeight },
-      { point: [-r, y, -r], weight: w * uWeight },
-      { point: [-r, y, 0], weight: 1.0 * uWeight },
-      { point: [-r, y, r], weight: w * uWeight },
-      { point: [0, y, r], weight: 1.0 * uWeight },
-      { point: [r, y, r], weight: w * uWeight },
-      { point: [r, y, 0], weight: 1.0 * uWeight },
-    ];
+    const row: NurbsControlPoint[] = [];
+
+    for (let j = 0; j < circleDirs.length; j++) {
+      const [cx, cz, vWeight] = circleDirs[j];
+      row.push({
+        point: [r * cx, y, r * cz],
+        weight: uWeight * vWeight,
+      });
+    }
     grid.push(row);
   }
 
@@ -871,16 +885,15 @@ export function createDefaultNurbsCone(radius = 1.0, height = 2.0): NurbsSurface
   const w = Math.SQRT1_2;
   const halfH = height / 2;
 
-  // Base circular ring at y = -halfH, apex at y = halfH
   const rowBase: NurbsControlPoint[] = [
     { point: [R, -halfH, 0], weight: 1.0 },
-    { point: [R, -halfH, -R], weight: w },
-    { point: [0, -halfH, -R], weight: 1.0 },
-    { point: [-R, -halfH, -R], weight: w },
-    { point: [-R, -halfH, 0], weight: 1.0 },
-    { point: [-R, -halfH, R], weight: w },
-    { point: [0, -halfH, R], weight: 1.0 },
     { point: [R, -halfH, R], weight: w },
+    { point: [0, -halfH, R], weight: 1.0 },
+    { point: [-R, -halfH, R], weight: w },
+    { point: [-R, -halfH, 0], weight: 1.0 },
+    { point: [-R, -halfH, -R], weight: w },
+    { point: [0, -halfH, -R], weight: 1.0 },
+    { point: [R, -halfH, -R], weight: w },
     { point: [R, -halfH, 0], weight: 1.0 },
   ];
 
@@ -919,14 +932,26 @@ export function createDefaultNurbsTorus(majorRadius = 1.0, minorRadius = 0.35): 
   // 9 cross-section circle points around (R, 0)
   const crossOffsets: { x: number; y: number; uWeight: number }[] = [
     { x: r, y: 0, uWeight: 1.0 },
-    { x: r, y: -r, uWeight: w },
-    { x: 0, y: -r, uWeight: 1.0 },
-    { x: -r, y: -r, uWeight: w },
-    { x: -r, y: 0, uWeight: 1.0 },
-    { x: -r, y: r, uWeight: w },
-    { x: 0, y: r, uWeight: 1.0 },
     { x: r, y: r, uWeight: w },
+    { x: 0, y: r, uWeight: 1.0 },
+    { x: -r, y: r, uWeight: w },
+    { x: -r, y: 0, uWeight: 1.0 },
+    { x: -r, y: -r, uWeight: w },
+    { x: 0, y: -r, uWeight: 1.0 },
+    { x: r, y: -r, uWeight: w },
     { x: r, y: 0, uWeight: 1.0 },
+  ];
+
+  const circleDirs: [number, number, number][] = [
+    [1, 0, 1.0],
+    [1, 1, w],
+    [0, 1, 1.0],
+    [-1, 1, w],
+    [-1, 0, 1.0],
+    [-1, -1, w],
+    [0, -1, 1.0],
+    [1, -1, w],
+    [1, 0, 1.0],
   ];
 
   const grid: NurbsControlPoint[][] = [];
@@ -934,18 +959,15 @@ export function createDefaultNurbsTorus(majorRadius = 1.0, minorRadius = 0.35): 
   for (let i = 0; i < crossOffsets.length; i++) {
     const { x, y, uWeight } = crossOffsets[i];
     const ringRadius = R + x;
+    const row: NurbsControlPoint[] = [];
 
-    const row: NurbsControlPoint[] = [
-      { point: [ringRadius, y, 0], weight: 1.0 * uWeight },
-      { point: [ringRadius, y, -ringRadius], weight: w * uWeight },
-      { point: [0, y, -ringRadius], weight: 1.0 * uWeight },
-      { point: [-ringRadius, y, -ringRadius], weight: w * uWeight },
-      { point: [-ringRadius, y, 0], weight: 1.0 * uWeight },
-      { point: [-ringRadius, y, ringRadius], weight: w * uWeight },
-      { point: [0, y, ringRadius], weight: 1.0 * uWeight },
-      { point: [ringRadius, y, ringRadius], weight: w * uWeight },
-      { point: [ringRadius, y, 0], weight: 1.0 * uWeight },
-    ];
+    for (let j = 0; j < circleDirs.length; j++) {
+      const [cx, cz, vWeight] = circleDirs[j];
+      row.push({
+        point: [ringRadius * cx, y, ringRadius * cz],
+        weight: uWeight * vWeight,
+      });
+    }
     grid.push(row);
   }
 
@@ -1018,11 +1040,21 @@ export function revolveNurbsCurve(
   const numPts = pts.length;
   const w = Math.SQRT1_2;
 
-  // 9 radial sections for 360 degree revolve
-  const totalRad = (angleDeg * Math.PI) / 180;
+  // 9 radial sections for 360 degree revolve (4 quarter arcs of 90 degrees)
   const isFull360 = Math.abs(angleDeg - 360) < 0.1;
 
-  const numV = 9;
+  const circleDirs: [number, number, number][] = [
+    [1, 0, 1.0],
+    [1, 1, w],
+    [0, 1, 1.0],
+    [-1, 1, w],
+    [-1, 0, 1.0],
+    [-1, -1, w],
+    [0, -1, 1.0],
+    [1, -1, w],
+    [1, 0, 1.0],
+  ];
+
   const grid: NurbsControlPoint[][] = [];
 
   for (let i = 0; i < numPts; i++) {
@@ -1031,30 +1063,26 @@ export function revolveNurbsCurve(
     const ptW = cp.weight ?? 1.0;
     const row: NurbsControlPoint[] = [];
 
-    for (let j = 0; j < numV; j++) {
-      const angle = (j / 8) * totalRad;
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const radW = (j % 2 === 1) ? w : 1.0;
-
+    for (let j = 0; j < circleDirs.length; j++) {
+      const [cx, cz, vWeight] = circleDirs[j];
       let rx = px, ry = py, rz = pz;
       if (axis === 'y') {
         const radius = Math.hypot(px, pz);
-        rx = radius * cos;
-        rz = radius * sin;
+        rx = radius * cx;
+        rz = radius * cz;
       } else if (axis === 'x') {
         const radius = Math.hypot(py, pz);
-        ry = radius * cos;
-        rz = radius * sin;
+        ry = radius * cx;
+        rz = radius * cz;
       } else if (axis === 'z') {
         const radius = Math.hypot(px, py);
-        rx = radius * cos;
-        ry = radius * sin;
+        rx = radius * cx;
+        ry = radius * cz;
       }
 
       row.push({
         point: [rx, ry, rz],
-        weight: ptW * radW,
+        weight: ptW * vWeight,
       });
     }
     grid.push(row);
@@ -1780,3 +1808,100 @@ export function mergeSurfacesU(master: NurbsSurfaceData, slave: NurbsSurfaceData
     controlPoints: combinedControlPoints
   };
 }
+
+/**
+ * Creates a Ruled NURBS Surface connecting two 3D boundary curves linearly (3ds Max Ruled Surface).
+ */
+export function createNurbsRuledSurface(
+  curveA: NurbsCurveData,
+  curveB: NurbsCurveData,
+  uSteps = 4
+): NurbsSurfaceData {
+  const numPts = Math.max(curveA.controlPoints.length, curveB.controlPoints.length);
+  const ptsA = curveA.controlPoints.length === numPts
+    ? curveA.controlPoints.map(cp => ({ ...cp, point: [...cp.point] as V3 }))
+    : sampleNurbsCurve(curveA, numPts - 1).map(p => ({ point: p, weight: 1.0 }));
+
+  const ptsB = curveB.controlPoints.length === numPts
+    ? curveB.controlPoints.map(cp => ({ ...cp, point: [...cp.point] as V3 }))
+    : sampleNurbsCurve(curveB, numPts - 1).map(p => ({ point: p, weight: 1.0 }));
+
+  const grid: NurbsControlPoint[][] = [];
+  const steps = Math.max(2, uSteps);
+
+  for (let s = 0; s < steps; s++) {
+    const t = s / (steps - 1);
+    const row: NurbsControlPoint[] = [];
+    for (let i = 0; i < numPts; i++) {
+      const pa = ptsA[i].point;
+      const pb = ptsB[i].point;
+      const wa = ptsA[i].weight ?? 1.0;
+      const wb = ptsB[i].weight ?? 1.0;
+      row.push({
+        point: [
+          pa[0] * (1 - t) + pb[0] * t,
+          pa[1] * (1 - t) + pb[1] * t,
+          pa[2] * (1 - t) + pb[2] * t,
+        ],
+        weight: wa * (1 - t) + wb * t,
+      });
+    }
+    grid.push(row);
+  }
+
+  return {
+    degreeU: steps > 3 ? 3 : 1,
+    degreeV: Math.max(1, Math.min(3, numPts - 1)),
+    controlPoints: grid,
+    resolutionU: 16,
+    resolutionV: 24,
+    closedV: curveA.closed && curveB.closed,
+  };
+}
+
+/**
+ * Creates a Cap Surface for a closed NURBS Curve (3ds Max Cap Surface).
+ */
+export function createNurbsCapSurface(curve: NurbsCurveData): NurbsSurfaceData {
+  const pts = curve.controlPoints;
+  const numPts = pts.length;
+  // Calculate center of mass
+  let cx = 0, cy = 0, cz = 0;
+  for (const cp of pts) {
+    cx += cp.point[0];
+    cy += cp.point[1];
+    cz += cp.point[2];
+  }
+  cx /= numPts; cy /= numPts; cz /= numPts;
+
+  const centerRow: NurbsControlPoint[] = pts.map(() => ({
+    point: [cx, cy, cz] as V3,
+    weight: 1.0,
+  }));
+
+  const midRow: NurbsControlPoint[] = pts.map(cp => ({
+    point: [
+      (cp.point[0] + cx) * 0.5,
+      (cp.point[1] + cy) * 0.5,
+      (cp.point[2] + cz) * 0.5,
+    ] as V3,
+    weight: cp.weight ?? 1.0,
+  }));
+
+  const boundaryRow: NurbsControlPoint[] = pts.map(cp => ({
+    point: [...cp.point] as V3,
+    weight: cp.weight ?? 1.0,
+  }));
+
+  return {
+    degreeU: 2,
+    degreeV: curve.degree,
+    knotsU: [0, 0, 0, 1, 1, 1],
+    knotsV: curve.knots ? [...curve.knots] : undefined,
+    controlPoints: [centerRow, midRow, boundaryRow],
+    resolutionU: 12,
+    resolutionV: 24,
+    closedV: true,
+  };
+}
+

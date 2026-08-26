@@ -23,11 +23,20 @@ import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createPBRMaterial, updateORMUniforms } from '../utils/materialUtils';
 import { createRaymarchedCloudMaterial } from '../utils/volumetricRaymarch';
+import { createGpgpuSwarmMesh, DEFAULT_GPGPU_SWARM_CONFIG } from '../utils/gpgpuSwarm';
+import {
+  ParticleSimulator,
+  DEFAULT_PARTICLE_CONFIG,
+  DEFAULT_SPACE_WARP_CONFIG,
+  SpaceWarpObjectData
+} from '../utils/particleSystem';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
 import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
+import { extractUniqueEdges } from '../utils/wireframeMesh';
+import { getLoopCutPreview } from '../utils/loopCut';
 
 interface ViewportProps {
   type: ViewportType;
@@ -239,6 +248,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   const siluetaGroupRef = useRef<THREE.Group>(new THREE.Group());
   const hoverGroupRef = useRef<THREE.Group>(new THREE.Group());
   const meshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const particleSimulatorsRef = useRef<Map<string, ParticleSimulator>>(new Map());
   const vertexPointsRef = useRef<THREE.Points | null>(null);
 
   const getObjectMesh = (id: string | null | undefined): THREE.Mesh | undefined => {
@@ -325,6 +335,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     setSilueta, moveReferenceMode, setReference,
     addMaterial, assignMaterialToObjects,
     insertVertexMode, setInsertVertexMode,
+    loopCutMode, setLoopCutMode,
+    loopCutCuts, setLoopCutCuts,
+    loopCutSlide, setLoopCutSlide,
+    applyLoopCut, extrudeManifold,
     orthoDrawMode, setOrthoDrawMode,
     drawLockAxis, setDrawLockAxis
   } = useStore();
@@ -1456,12 +1470,20 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                   const dist = evalCam.position.distanceTo(evalCam.target);
                   const line = targetGroup.getObjectByName('targetLine') as THREE.Line;
                   if (line) {
-                    line.geometry.dispose();
-                    line.geometry = new THREE.BufferGeometry().setFromPoints([
-                      new THREE.Vector3(0, 0, -0.20),
-                      new THREE.Vector3(0, 0, -dist)
-                    ]);
-                    (line as any).computeLineDistances();
+                    const posAttr = line.geometry.getAttribute('position') as THREE.BufferAttribute;
+                    if (posAttr && posAttr.count >= 2) {
+                      posAttr.setXYZ(0, 0, 0, -0.20);
+                      posAttr.setXYZ(1, 0, 0, -dist);
+                      posAttr.needsUpdate = true;
+                      (line as any).computeLineDistances?.();
+                    } else {
+                      line.geometry.dispose();
+                      line.geometry = new THREE.BufferGeometry().setFromPoints([
+                        new THREE.Vector3(0, 0, -0.20),
+                        new THREE.Vector3(0, 0, -dist)
+                      ]);
+                      (line as any).computeLineDistances?.();
+                    }
                   }
                   const reticle = targetGroup.getObjectByName('targetReticle');
                   if (reticle) {
@@ -1481,10 +1503,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const lightPos = mainLight ? mainLight.position : new THREE.Vector3(5, 10, 5);
 
           currentScene.traverse((child) => {
-            if (child instanceof THREE.Mesh) {
+            if (child instanceof THREE.Mesh || child instanceof THREE.Points) {
               const materials = Array.isArray(child.material) ? child.material : [child.material];
-              materials.forEach(mat => {
-                if (mat.uniforms) {
+              materials.forEach((mat: any) => {
+                if (mat && mat.uniforms) {
                   if (mat.uniforms.uCameraPos) {
                     mat.uniforms.uCameraPos.value.copy(currentCamera.position);
                   }
@@ -1494,11 +1516,99 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                   if (mat.uniforms.uLightPosition) {
                     mat.uniforms.uLightPosition.value.copy(lightPos);
                   }
+                  if (mat.uniforms.uLightPos) {
+                    mat.uniforms.uLightPos.value.copy(lightPos);
+                  }
                   if (mat.uniforms.uModelInverse) {
                     mat.uniforms.uModelInverse.value.copy(child.matrixWorld).invert();
                   }
+                  if (mat.uniforms.uInteractiveMouse && mat.uniforms.uInteractiveMouse.value === 1 && mat.uniforms.uMousePos) {
+                    const ray = new THREE.Ray();
+                    ray.origin.copy(currentCamera.position);
+                    const ndc = new THREE.Vector3(mouseRef.current.x, mouseRef.current.y, 0.5).unproject(currentCamera);
+                    ray.direction.copy(ndc.sub(currentCamera.position).normalize());
+                    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -child.position.y);
+                    const target = new THREE.Vector3();
+                    if (ray.intersectPlane(plane, target)) {
+                      const localTarget = target.applyMatrix4(new THREE.Matrix4().copy(child.matrixWorld).invert());
+                      mat.uniforms.uMousePos.value.copy(localTarget);
+                    }
+                  }
+                }
+                if (mat && mat.userData?.shader?.uniforms) {
+                  const sh = mat.userData.shader.uniforms;
+                  if (sh.uTime) sh.uTime.value = elapsedTime;
+                  if (sh.uGlassTime) sh.uGlassTime.value = elapsedTime;
+                  if (sh.uCameraPos) sh.uCameraPos.value.copy(currentCamera.position);
+                  if (sh.uLightPos) sh.uLightPos.value.copy(lightPos);
                 }
               });
+            }
+          });
+
+          // 5. Actualizar simuladores de partículas (Particle Systems y Space Warps)
+          const dt = clock.getDelta();
+          const spaceWarpsData: SpaceWarpObjectData[] = [];
+          (project.objects || []).forEach(o => {
+            const isWarp = o.type === 'SPACE_WARP' || o.isSpaceWarp || o.parameters?.isSpaceWarp;
+            if (isWarp) {
+              const warpCfg = { ...DEFAULT_SPACE_WARP_CONFIG, ...(o.parameters?.spaceWarpConfig || {}), ...(o.spaceWarpConfig || {}) };
+              const interp = getInterpolatedTransform(o, currentTime);
+              const pos = new THREE.Vector3(interp.position[0], interp.position[1], interp.position[2]);
+              const eul = new THREE.Euler(interp.rotation[0], interp.rotation[1], interp.rotation[2], 'XYZ');
+              const quat = new THREE.Quaternion().setFromEuler(eul);
+              spaceWarpsData.push({
+                id: o.id,
+                type: warpCfg.warpType || 'WIND',
+                position: pos,
+                quaternion: quat,
+                config: warpCfg
+              });
+            }
+          });
+
+          particleSimulatorsRef.current.forEach((sim, emitterId) => {
+            const emitterObj = project.objects.find(o => o.id === emitterId);
+            if (!emitterObj) return;
+
+            const interp = getInterpolatedTransform(emitterObj, currentTime);
+            const pos = new THREE.Vector3(interp.position[0], interp.position[1], interp.position[2]);
+            const eul = new THREE.Euler(interp.rotation[0], interp.rotation[1], interp.rotation[2], 'XYZ');
+            const quat = new THREE.Quaternion().setFromEuler(eul);
+            const scale = new THREE.Vector3(interp.scale[0], interp.scale[1], interp.scale[2]);
+
+            if (isScrubbing) {
+              sim.seekToTime(
+                currentTime,
+                (t) => {
+                  const tr = getInterpolatedTransform(emitterObj, t);
+                  return {
+                    position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+                    quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+                    scale: new THREE.Vector3(tr.scale[0], tr.scale[1], tr.scale[2])
+                  };
+                },
+                (t) => {
+                  const warps: SpaceWarpObjectData[] = [];
+                  (project.objects || []).forEach(o => {
+                    if (o.type === 'SPACE_WARP' || o.isSpaceWarp || o.parameters?.isSpaceWarp) {
+                      const wCfg = { ...DEFAULT_SPACE_WARP_CONFIG, ...(o.parameters?.spaceWarpConfig || {}), ...(o.spaceWarpConfig || {}) };
+                      const tr = getInterpolatedTransform(o, t);
+                      warps.push({
+                        id: o.id,
+                        type: wCfg.warpType || 'WIND',
+                        position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+                        quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+                        config: wCfg
+                      });
+                    }
+                  });
+                  return warps;
+                }
+              );
+            } else {
+              const effectiveDt = dt > 0 ? Math.min(dt, 0.05) : 0.016;
+              sim.update(effectiveDt, { position: pos, quaternion: quat, scale: scale }, spaceWarpsData, isPlaying ? currentTime : elapsedTime);
             }
           });
 
@@ -1846,10 +1956,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
         let customMaterial: THREE.Material | null = null;
         if (hasCustomOverride) {
-          const mData = {
-            ...(referencedMaterial || {}),
-            ...(obj.material || {})
-          } as any;
+          const mData = referencedMaterial
+            ? { ...referencedMaterial, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+            : (obj.material || {});
           customMaterial = getMaterialForObject(obj, mData);
         }
 
@@ -2277,10 +2386,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       // Resolve material: priority is inline material > materialId > default
       const projectMaterials = project.materials || [];
       const referencedMaterial = obj.materialId ? projectMaterials.find(m => m.id === obj.materialId) : null;
-      const mData = {
-        ...(referencedMaterial || {}),
-        ...(obj.material || {})
-      } as any;
+      const mData = (referencedMaterial
+        ? { ...referencedMaterial, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+        : (obj.material || {})) as any;
 
       if (!hasUVs && obj.vertices && obj.faces) {
         meshData = generateUVs(meshData);
@@ -2397,20 +2505,63 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       const isSelected = (selectedObjectIds ?? [selectedObjectId]).includes(obj.id);
+      const isGpgpu = obj.type === 'GPGPU_SWARM' || obj.isGpgpuSwarm || obj.parameters?.isGpgpuSwarm;
+      const isParticle = obj.type === 'PARTICLE_SYSTEM' || obj.isParticleSystem || obj.parameters?.isParticleSystem;
 
-      // ── Solid mesh ───────────────────────────────────────────────────────
-      if (viewMode !== 'WIREFRAME') {
+      // ── Solid mesh / GPGPU Swarm / Particle System ─────────────────────────
+      if (isGpgpu) {
+        const swarmCfg = { ...DEFAULT_GPGPU_SWARM_CONFIG, ...(obj.parameters?.gpgpuSwarmConfig || {}), ...(obj.gpgpuSwarmConfig || {}) };
+        const swarmMesh = createGpgpuSwarmMesh(swarmCfg, obj.id);
+        swarmMesh.position.copy(initialPos);
+        swarmMesh.rotation.copy(initialRot);
+        swarmMesh.scale.copy(initialScale);
+        swarmMesh.updateMatrixWorld(true);
+        group.add(swarmMesh);
+        meshesRef.current.set(obj.id, swarmMesh);
+
+        // Invisible pick proxy sphere for raycast selection in viewport
+        const pickProxy = new THREE.Mesh(
+          new THREE.SphereGeometry(Math.max(1.0, (swarmCfg.boundingRadius || 6) * 0.45), 12, 12),
+          new THREE.MeshBasicMaterial({ visible: false, depthWrite: false })
+        );
+        pickProxy.position.copy(initialPos);
+        pickProxy.rotation.copy(initialRot);
+        pickProxy.scale.copy(initialScale);
+        pickProxy.userData.id = obj.id;
+        group.add(pickProxy);
+      } else if (isParticle) {
+        const pCfg = { ...DEFAULT_PARTICLE_CONFIG, ...(obj.parameters?.particleConfig || {}), ...(obj.particleConfig || {}) };
+        let sim = particleSimulatorsRef.current.get(obj.id);
+        if (!sim) {
+          sim = new ParticleSimulator(obj.id, pCfg);
+          particleSimulatorsRef.current.set(obj.id, sim);
+        } else {
+          sim.updateConfig(pCfg);
+        }
+        group.add(sim.points);
+        meshesRef.current.set(obj.id, sim.points);
+
+        // Pick proxy for easy selection in viewport
+        const pickProxy = new THREE.Mesh(
+          new THREE.SphereGeometry(Math.max(0.6, (pCfg.particleSize || 0.2) * 4), 12, 12),
+          new THREE.MeshBasicMaterial({ visible: false, depthWrite: false })
+        );
+        pickProxy.position.copy(initialPos);
+        pickProxy.rotation.copy(initialRot);
+        pickProxy.scale.copy(initialScale);
+        pickProxy.userData.id = obj.id;
+        group.add(pickProxy);
+      } else if (viewMode !== 'WIREFRAME') {
         const opacity = obj.opacity ?? 1;
         
         // Resolve material: priority is inline material > materialId > default
         const projectMaterials = project.materials || [];
         const referencedMaterial = obj.materialId ? project.materials.find(m => m.id === obj.materialId) : null;
         
-        // Merge referenced material with inline overrides
-        const m = {
-          ...(referencedMaterial || {}),
-          ...(obj.material || {})
-        } as any;
+        // Use referenced material cleanly, only applying inline overrides if explicitly user-modified
+        const m = (referencedMaterial
+          ? { ...referencedMaterial, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+          : (obj.material || {})) as any;
 
         const finalMaterial = getMaterialForObject(obj, m);
 
@@ -2428,42 +2579,14 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
-      // We build edges from logical faces or explicit wireframe edges
-      const edgeToFaces = new Map<string, number[]>();
-
-      if (obj.faces && obj.faces.length > 0) {
-        obj.faces.forEach((face, fIdx) => {
-          const len = face.indices.length;
-          for (let i = 0; i < len; i++) {
-            const a = face.indices[i];
-            const b = face.indices[(i + 1) % len];
-            const key = a < b ? `${a}:${b}` : `${b}:${a}`;
-            let fList = edgeToFaces.get(key);
-            if (!fList) {
-              fList = [];
-              edgeToFaces.set(key, fList);
-            }
-            fList.push(fIdx);
-          }
-        });
-      }
+      const uniqueEdges = (obj.faces && obj.faces.length > 0) || (obj.wireframeEdges && obj.wireframeEdges.length > 0)
+        ? extractUniqueEdges(obj, { dissolveCoplanars: false })
+        : [];
 
       const edgePositions: number[] = [];
 
-      if (edgeToFaces.size > 0) {
-        edgeToFaces.forEach((_facesSharingEdge, key) => {
-          const [aStr, bStr] = key.split(':');
-          const a = parseInt(aStr, 10);
-          const b = parseInt(bStr, 10);
-          if (posArr[a*3] !== undefined && posArr[b*3] !== undefined) {
-            edgePositions.push(
-              posArr[a*3], posArr[a*3+1], posArr[a*3+2],
-              posArr[b*3], posArr[b*3+1], posArr[b*3+2]
-            );
-          }
-        });
-      } else if (obj.wireframeEdges && obj.wireframeEdges.length > 0) {
-        for (const [a, b] of obj.wireframeEdges) {
+      if (uniqueEdges.length > 0) {
+        for (const [a, b] of uniqueEdges) {
           if (posArr[a*3] !== undefined && posArr[b*3] !== undefined) {
             edgePositions.push(
               posArr[a*3], posArr[a*3+1], posArr[a*3+2],
@@ -2851,6 +2974,15 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       };
       group.children.forEach(disposeObject);
       primitivesGroup.children.forEach(disposeObject);
+
+      // Clean up deleted particle simulators
+      const currentObjectIds = new Set(project.objects.map(o => o.id));
+      particleSimulatorsRef.current.forEach((sim, id) => {
+        if (!currentObjectIds.has(id)) {
+          sim.dispose();
+          particleSimulatorsRef.current.delete(id);
+        }
+      });
     };
   }, [project, viewMode, selectedObjectId, selectedObjectIds, editMode, selectedVertexIndices, selectedFaceIndices, selectedEdgeIndices, selectedGLTFMeshes, isolateGLTFSelection]);
 
@@ -4376,6 +4508,55 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           }
 
+          // 3. Screen-space proximity fallback for 3D Mesh vertices
+          if (hitVtxIdx === null && selObj && selObj.vertices && selObj.vertices.length > 0) {
+            const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
+            const mat4 = meshObj ? meshObj.matrixWorld : (() => {
+              const _interp = getInterpolatedTransform(selObj, currentTime);
+              return new THREE.Matrix4().compose(
+                new THREE.Vector3().fromArray(_interp.position),
+                new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                new THREE.Vector3().fromArray(_interp.scale)
+              );
+            })();
+
+            const rect = rendererRef.current!.domElement.getBoundingClientRect();
+            const clickScreenX = event.clientX - rect.left;
+            const clickScreenY = event.clientY - rect.top;
+
+            let closestDist = 18;
+            let closestIdx: number | null = null;
+            let closestWorldPt: THREE.Vector3 | null = null;
+
+            for (let i = 0; i < selObj.vertices.length; i++) {
+              const v = selObj.vertices[i];
+              const off = selObj.vertexOffsets?.[i] || [0, 0, 0];
+              const worldPt = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+              const p_ndc = worldPt.clone().project(cameraRef.current!);
+              if (p_ndc.z > 1) continue;
+
+              const sx = (p_ndc.x * 0.5 + 0.5) * rect.width;
+              const sy = (p_ndc.y * -0.5 + 0.5) * rect.height;
+              const dist = Math.hypot(clickScreenX - sx, clickScreenY - sy);
+
+              if (dist < closestDist) {
+                closestDist = dist;
+                closestIdx = i;
+                closestWorldPt = worldPt;
+              }
+            }
+
+            if (closestIdx !== null && closestWorldPt) {
+              hitVtxIdx = closestIdx;
+              hitWorldPos = closestWorldPt.clone();
+              if (vertexPointsRef.current) {
+                coincidentIndices = getCoincidentVertices(vertexPointsRef.current.geometry, hitVtxIdx);
+              } else {
+                coincidentIndices = [hitVtxIdx];
+              }
+            }
+          }
+
           if (hitVtxIdx !== null && hitWorldPos) {
             event.stopPropagation();
             event.preventDefault();
@@ -4566,67 +4747,73 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const mesh = intersect.object as THREE.Mesh;
                 const clickedId = mesh.userData.id;
                 const selObj = projectRef.current.objects.find(o => o.id === clickedId);
-                if (selObj && mesh.geometry) {
-                  const pos = mesh.geometry.getAttribute('position');
-                  const a = intersect.face.a, b = intersect.face.b, c = intersect.face.c;
-                  const pa = new THREE.Vector3(pos.getX(a), pos.getY(a), pos.getZ(a)).applyMatrix4(mesh.matrixWorld);
-                  const pb = new THREE.Vector3(pos.getX(b), pos.getY(b), pos.getZ(b)).applyMatrix4(mesh.matrixWorld);
-                  const pc = new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c)).applyMatrix4(mesh.matrixWorld);
+                if (selObj && selObj.vertices && selObj.vertices.length > 0) {
                   const pt = intersect.point;
-                  const dAB = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                  const dBC = new THREE.Line3(pb, pc).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                  const dCA = new THREE.Line3(pc, pa).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                  const validEdges = extractUniqueEdges(selObj);
+                  let bestEdge: [number, number] | null = null;
+                  let bestDist = Infinity;
+                  const pStart = new THREE.Vector3();
+                  const pEnd = new THREE.Vector3();
 
-                  let pStart: THREE.Vector3, pEnd: THREE.Vector3;
-                  let vA: number, vB: number;
-                  if (dAB <= dBC && dAB <= dCA) { pStart = pa; pEnd = pb; vA = a; vB = b; }
-                  else if (dBC <= dAB && dBC <= dCA) { pStart = pb; pEnd = pc; vA = b; vB = c; }
-                  else { pStart = pc; pEnd = pa; vA = c; vB = a; }
-
-                  const vertexMap = mesh.userData.vertexMap as number[] | undefined;
-                  let logVA = vA, logVB = vB;
-                  if (vertexMap) {
-                    logVA = vertexMap[vA];
-                    logVB = vertexMap[vB];
-                  }
-
-                  let isSel = false;
-                  for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
-                    const e1 = selectedEdgeIndices[i], e2 = selectedEdgeIndices[i + 1];
-                    if ((e1 === logVA && e2 === logVB) || (e1 === logVB && e2 === logVA)) {
-                      isSel = true;
-                      break;
+                  for (const [v1, v2] of validEdges) {
+                    const vert1 = selObj.vertices[v1];
+                    const vert2 = selObj.vertices[v2];
+                    if (!vert1 || !vert2) continue;
+                    const off1 = selObj.vertexOffsets?.[v1] || [0, 0, 0];
+                    const off2 = selObj.vertexOffsets?.[v2] || [0, 0, 0];
+                    const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mesh.matrixWorld);
+                    const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mesh.matrixWorld);
+                    const dist = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                    if (dist < bestDist) {
+                      bestDist = dist;
+                      bestEdge = [v1, v2];
+                      pStart.copy(pa);
+                      pEnd.copy(pb);
                     }
                   }
 
-                  const eGeo = new THREE.BufferGeometry().setFromPoints([pStart, pEnd]);
-                  const hoverColor = isSel ? 0xef4444 : 0xfacc15;
-                  const edgeLine = new THREE.Line(
-                    eGeo,
-                    new THREE.LineBasicMaterial({
-                      color: hoverColor,
-                      linewidth: 5,
-                      depthTest: false,
-                      transparent: true,
-                      opacity: 0.95
-                    })
-                  );
-                  edgeLine.renderOrder = 60;
-                  hoverGroup.add(edgeLine);
+                  if (bestEdge) {
+                    const logVA = bestEdge[0];
+                    const logVB = bestEdge[1];
 
-                  [pStart, pEnd].forEach(p => {
-                    const dot = new THREE.Mesh(
-                      SHARED_VERTEX_GEO,
-                      isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
+                    let isSel = false;
+                    for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
+                      const e1 = selectedEdgeIndices[i], e2 = selectedEdgeIndices[i + 1];
+                      if ((e1 === logVA && e2 === logVB) || (e1 === logVB && e2 === logVA)) {
+                        isSel = true;
+                        break;
+                      }
+                    }
+
+                    const eGeo = new THREE.BufferGeometry().setFromPoints([pStart, pEnd]);
+                    const hoverColor = isSel ? 0xef4444 : 0xfacc15;
+                    const edgeLine = new THREE.Line(
+                      eGeo,
+                      new THREE.LineBasicMaterial({
+                        color: hoverColor,
+                        linewidth: 5,
+                        depthTest: false,
+                        transparent: true,
+                        opacity: 0.95
+                      })
                     );
-                    dot.scale.setScalar(0.016);
-                    dot.position.copy(p);
-                    dot.renderOrder = 65;
-                    hoverGroup.add(dot);
-                  });
+                    edgeLine.renderOrder = 60;
+                    hoverGroup.add(edgeLine);
 
-                  rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
-                  hitEdge = true;
+                    [pStart, pEnd].forEach(p => {
+                      const dot = new THREE.Mesh(
+                        SHARED_VERTEX_GEO,
+                        isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
+                      );
+                      dot.scale.setScalar(0.016);
+                      dot.position.copy(p);
+                      dot.renderOrder = 65;
+                      hoverGroup.add(dot);
+                    });
+
+                    rendererRef.current.domElement.style.cursor = isSel ? 'grab' : 'pointer';
+                    hitEdge = true;
+                  }
                 }
               }
             }
@@ -4707,47 +4894,256 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             if (!hitFace) {
               rendererRef.current.domElement.style.cursor = 'default';
             }
-          } else if (editMode === 'VERTEX') {
+          } else if (editMode === 'VERTEX' || insertVertexMode) {
             let vtxHovered = false;
             let isHoveredSelected = false;
             let hitPos: THREE.Vector3 | null = null;
+            let hoveredVertexIdx: number | null = null;
 
+            // 1. Raycast against Points geometry
             if (vertexPointsRef.current) {
               if (camera instanceof THREE.PerspectiveCamera) {
                 const camDist = camera.position.distanceTo(vertexPointsRef.current.position);
-                raycasterRef.current.params.Points.threshold = Math.max(0.18, camDist * 0.035);
+                raycasterRef.current.params.Points.threshold = Math.max(0.20, camDist * 0.04);
               } else {
                 raycasterRef.current.params.Points.threshold = 0.5;
               }
               const hits = raycasterRef.current.intersectObject(vertexPointsRef.current);
               if (hits.length > 0 && hits[0].index !== undefined) {
                 vtxHovered = true;
+                hoveredVertexIdx = hits[0].index;
                 isHoveredSelected = selectedVertexIndices.includes(hits[0].index);
                 hitPos = hits[0].point.clone();
               }
             }
 
+            // 2. Raycast against visual vertex dot spheres
             if (!vtxHovered && groupRef.current) {
               const sphereHits = raycasterRef.current.intersectObjects(groupRef.current.children, false);
               const vh = sphereHits.find(h => h.object.userData?.isVertexHandle && h.object.userData?.id === selectedObjectId);
               if (vh && vh.object.userData.vertexIndex !== undefined) {
                 vtxHovered = true;
+                hoveredVertexIdx = vh.object.userData.vertexIndex;
                 isHoveredSelected = selectedVertexIndices.includes(vh.object.userData.vertexIndex);
                 hitPos = vh.point.clone();
               }
             }
 
+            // 3. Raycast against 2D Shape handles if it's a SHAPE
+            if (!vtxHovered && primitivesGroupRef.current) {
+              const sphereHits = raycasterRef.current.intersectObjects(primitivesGroupRef.current.children, false);
+              const sh = sphereHits.find(h => h.object.userData?.handleType === 'anchor');
+              if (sh && sh.object.userData.anchorIdx !== undefined) {
+                vtxHovered = true;
+                hoveredVertexIdx = sh.object.userData.anchorIdx;
+                isHoveredSelected = selectedVertexIndices.includes(sh.object.userData.anchorIdx);
+                hitPos = sh.point.clone();
+              }
+            }
+
+            // 4. Screen-space proximity fallback for existing vertices (16px threshold)
+            if (!vtxHovered && selectedObjectId) {
+              const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+              if (selObj && selObj.vertices && selObj.vertices.length > 0) {
+                const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
+                const mat4 = meshObj ? meshObj.matrixWorld : (() => {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  return new THREE.Matrix4().compose(
+                    new THREE.Vector3().fromArray(_interp.position),
+                    new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                    new THREE.Vector3().fromArray(_interp.scale)
+                  );
+                })();
+
+                const mouseScreenX = event.clientX - rect.left;
+                const mouseScreenY = event.clientY - rect.top;
+
+                for (let i = 0; i < selObj.vertices.length; i++) {
+                  const v = selObj.vertices[i];
+                  const off = selObj.vertexOffsets?.[i] || [0, 0, 0];
+                  const worldPt = new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+                  const p_ndc = worldPt.clone().project(camera);
+                  if (p_ndc.z > 1) continue;
+
+                  const sx = (p_ndc.x * 0.5 + 0.5) * rect.width;
+                  const sy = (p_ndc.y * -0.5 + 0.5) * rect.height;
+                  const dist = Math.hypot(mouseScreenX - sx, mouseScreenY - sy);
+
+                  if (dist <= 16) {
+                    vtxHovered = true;
+                    hoveredVertexIdx = i;
+                    isHoveredSelected = selectedVertexIndices.includes(i);
+                    hitPos = worldPt.clone();
+                    break;
+                  }
+                }
+              }
+            }
+
             if (vtxHovered && hitPos && hoverGroup) {
+              // Existing vertex hover styling:
+              // Changes color to distinguish from creating:
+              // - Selected: Bright Red/Coral (#ef4444) dot + halo ring
+              // - Unselected: Bright Golden Amber (#f59e0b) dot + halo ring
+              const dotColor = isHoveredSelected ? 0xef4444 : 0xf59e0b;
+              const ringColor = isHoveredSelected ? 0xfda4af : 0xfde68a;
+
+              // Center highlight dot
               const hoverDot = new THREE.Mesh(
                 SHARED_VERTEX_GEO,
-                new THREE.MeshBasicMaterial({ color: isHoveredSelected ? 0xef4444 : 0x38bdf8, depthTest: false })
+                new THREE.MeshBasicMaterial({ color: dotColor, depthTest: false })
               );
-              hoverDot.scale.setScalar(isHoveredSelected ? 0.026 : 0.020);
+              hoverDot.scale.setScalar(isHoveredSelected ? 0.028 : 0.024);
               hoverDot.position.copy(hitPos);
               hoverDot.renderOrder = 65;
               hoverGroup.add(hoverDot);
 
+              // Outer halo ring indicating existing element (move or delete)
+              const hoverRing = new THREE.Mesh(
+                SHARED_VERTEX_GEO,
+                new THREE.MeshBasicMaterial({ color: ringColor, wireframe: true, depthTest: false })
+              );
+              hoverRing.scale.setScalar(isHoveredSelected ? 0.040 : 0.036);
+              hoverRing.position.copy(hitPos);
+              hoverRing.renderOrder = 66;
+              hoverGroup.add(hoverRing);
+
+              // Hovering over an existing vertex allows moving (grab) or selecting for deletion
               rendererRef.current.domElement.style.cursor = isHoveredSelected ? 'grab' : 'pointer';
+            } else if (selectedObjectId && hoverGroup) {
+              // Hovering over a border/edge: allows creating new vertices!
+              const selObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+              if (selObj && selObj.vertices && selObj.vertices.length >= 2) {
+                const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
+                const mat4 = meshObj ? meshObj.matrixWorld : (() => {
+                  const _interp = getInterpolatedTransform(selObj, currentTime);
+                  return new THREE.Matrix4().compose(
+                    new THREE.Vector3().fromArray(_interp.position),
+                    new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                    new THREE.Vector3().fromArray(_interp.scale)
+                  );
+                })();
+
+                const validEdges: Array<[number, number]> = selObj.type === 'SHAPE'
+                  ? (() => {
+                      const edges: Array<[number, number]> = [];
+                      const count = selObj.parameters?.closed ? selObj.vertices.length : selObj.vertices.length - 1;
+                      for (let i = 0; i < count; i++) {
+                        edges.push([i, (i + 1) % selObj.vertices.length]);
+                      }
+                      return edges;
+                    })()
+                  : extractUniqueEdges(selObj, { dissolveCoplanars: false });
+
+                let bestEdgeDist = 24; // 24px screen distance threshold anywhere along the edge
+                let bestEdge: [number, number] | null = null;
+                let bestWorldPt: THREE.Vector3 | null = null;
+                const mouseScreenX = event.clientX - rect.left;
+                const mouseScreenY = event.clientY - rect.top;
+
+                for (const [v1, v2] of validEdges) {
+                  const vert1 = selObj.vertices[v1];
+                  const vert2 = selObj.vertices[v2];
+                  if (!vert1 || !vert2) continue;
+                  const off1 = selObj.vertexOffsets?.[v1] || [0, 0, 0];
+                  const off2 = selObj.vertexOffsets?.[v2] || [0, 0, 0];
+                  const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mat4);
+                  const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mat4);
+
+                  const pA_ndc = pa.clone().project(camera);
+                  const pB_ndc = pb.clone().project(camera);
+                  if (pA_ndc.z > 1 && pB_ndc.z > 1) continue;
+
+                  const sAx = (pA_ndc.x * 0.5 + 0.5) * rect.width;
+                  const sAy = (pA_ndc.y * -0.5 + 0.5) * rect.height;
+                  const sBx = (pB_ndc.x * 0.5 + 0.5) * rect.width;
+                  const sBy = (pB_ndc.y * -0.5 + 0.5) * rect.height;
+
+                  const distToA = Math.hypot(mouseScreenX - sAx, mouseScreenY - sAy);
+                  const distToB = Math.hypot(mouseScreenX - sBx, mouseScreenY - sBy);
+                  if (distToA <= 16 || distToB <= 16) continue; // Skip edge creation if hovering near endpoints
+
+                  const dx = sBx - sAx;
+                  const dy = sBy - sAy;
+                  const lenSq = dx * dx + dy * dy;
+                  if (lenSq === 0) continue;
+
+                  let t = ((mouseScreenX - sAx) * dx + (mouseScreenY - sAy) * dy) / lenSq;
+                  if (t < 0.04 || t > 0.96) continue; // Keep clear margin from endpoints
+
+                  const projX = sAx + t * dx;
+                  const projY = sAy + t * dy;
+                  const screenDist = Math.hypot(mouseScreenX - projX, mouseScreenY - projY);
+
+                  if (screenDist < bestEdgeDist) {
+                    bestEdgeDist = screenDist;
+                    bestEdge = [v1, v2];
+                    bestWorldPt = pa.clone().lerp(pb, t);
+                  }
+                }
+
+                if (bestEdge && bestWorldPt) {
+                  if (loopCutMode && selObj.faces && selObj.faces.length > 0) {
+                    // Render Blender-style Loop Cut and Slide preview loop
+                    const loopPreviewSegs = getLoopCutPreview(selObj, bestEdge, loopCutCuts, loopCutSlide);
+                    
+                    if (loopPreviewSegs.length > 0) {
+                      const allLoopPoints: THREE.Vector3[] = [];
+                      loopPreviewSegs.forEach(seg => {
+                        const pStart = new THREE.Vector3(...seg.start).applyMatrix4(mat4);
+                        const pEnd = new THREE.Vector3(...seg.end).applyMatrix4(mat4);
+                        allLoopPoints.push(pStart, pEnd);
+
+                        // Small vertex preview dot at each cut point
+                        const cutDot = new THREE.Mesh(
+                          SHARED_VERTEX_GEO,
+                          new THREE.MeshBasicMaterial({ color: 0x22d3ee, depthTest: false })
+                        );
+                        cutDot.scale.setScalar(0.016);
+                        cutDot.position.copy(pStart);
+                        cutDot.renderOrder = 85;
+                        hoverGroup.add(cutDot);
+                      });
+
+                      const loopGeo = new THREE.BufferGeometry().setFromPoints(allLoopPoints);
+                      const loopMat = new THREE.LineBasicMaterial({
+                        color: 0x06b6d4,
+                        depthTest: false,
+                        linewidth: 2,
+                      });
+                      const loopLineSegments = new THREE.LineSegments(loopGeo, loopMat);
+                      loopLineSegments.renderOrder = 80;
+                      hoverGroup.add(loopLineSegments);
+                    }
+
+                    // Main cursor preview dot on the hovered edge
+                    const previewDot = new THREE.Mesh(
+                      SHARED_VERTEX_GEO,
+                      new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false, transparent: true, opacity: 0.95 })
+                    );
+                    previewDot.scale.setScalar(0.024);
+                    previewDot.position.copy(bestWorldPt);
+                    previewDot.renderOrder = 90;
+                    hoverGroup.add(previewDot);
+                  } else {
+                    // Show the preview circle for creating a new vertex right on the edge!
+                    const previewDot = new THREE.Mesh(
+                      SHARED_VERTEX_GEO,
+                      new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false, transparent: true, opacity: 0.95 })
+                    );
+                    previewDot.scale.setScalar(0.022);
+                    previewDot.position.copy(bestWorldPt);
+                    previewDot.renderOrder = 70;
+                    hoverGroup.add(previewDot);
+                  }
+
+                  rendererRef.current.domElement.style.cursor = 'crosshair';
+                } else {
+                  rendererRef.current.domElement.style.cursor = 'default';
+                }
+              } else {
+                rendererRef.current.domElement.style.cursor = 'default';
+              }
             } else {
               rendererRef.current.domElement.style.cursor = 'default';
             }
@@ -4953,23 +5349,79 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             });
           } else {
             const mesh = primitivesGroupRef.current?.children.find((ch:any)=>ch.userData.id===selectedObjectId) as THREE.Mesh|undefined;
-            if (mesh) {
-              const pos = mesh.geometry.getAttribute('position');
-              const centroid = new THREE.Vector3();
+            const curSelObj = projectRef.current.objects.find(o => o.id === selectedObjectId);
+            if (curSelObj && curSelObj.vertices) {
               const idxs = Object.keys(gs.startVertexOffsets).map(Number);
-              idxs.forEach(idx=>centroid.add(new THREE.Vector3(pos.getX(idx),pos.getY(idx),pos.getZ(idx))));
+              const startPositions: Record<number, THREE.Vector3> = {};
+              const centroid = new THREE.Vector3();
+              idxs.forEach(idx => {
+                const baseV = curSelObj.vertices[idx];
+                if (baseV) {
+                  const s = (gs.startVertexOffsets[idx] || [0, 0, 0]) as [number, number, number];
+                  const p = new THREE.Vector3(baseV[0] + s[0], baseV[1] + s[1], baseV[2] + s[2]);
+                  startPositions[idx] = p;
+                  centroid.add(p);
+                }
+              });
               if (idxs.length) centroid.divideScalar(idxs.length);
-              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>{
-                const base = new THREE.Vector3(pos.getX(Number(idx)),pos.getY(Number(idx)),pos.getZ(Number(idx)));
-                const s = so as [number,number,number];
-                const fromCenter = new THREE.Vector3().subVectors(base.clone().add(new THREE.Vector3(...s)),centroid);
-                const scaledFromCenter = fromCenter.clone();
-                scaledFromCenter.x *= scaleX;
-                scaledFromCenter.y *= scaleY;
-                scaledFromCenter.z *= scaleZ;
-                const newWorld = centroid.clone().add(scaledFromCenter);
-                return {index:Number(idx), offset:[newWorld.x-base.x,newWorld.y-base.y,newWorld.z-base.z] as [number,number,number]};
-              }));
+
+              // Check if in FACE mode with a face selected to align scaling with face normal and plane
+              let faceAxes: { T: THREE.Vector3; B: THREE.Vector3; N: THREE.Vector3 } | null = null;
+              if (editMode === 'FACE' && selectedFaceIndices.length === 1 && curSelObj.faces) {
+                const face = curSelObj.faces[selectedFaceIndices[0]];
+                if (face && face.indices.length >= 3) {
+                  const p0 = startPositions[face.indices[0]];
+                  const p1 = startPositions[face.indices[1]];
+                  const p2 = startPositions[face.indices[2]];
+                  if (p0 && p1 && p2) {
+                    const edge1 = new THREE.Vector3().subVectors(p1, p0);
+                    const edge2 = new THREE.Vector3().subVectors(p2, p0);
+                    const N = new THREE.Vector3().crossVectors(edge1, edge2).normalize();
+                    const T = edge1.clone().normalize();
+                    const B = new THREE.Vector3().crossVectors(N, T).normalize();
+                    faceAxes = { T, B, N };
+                  }
+                }
+              }
+
+              const newOffsets = idxs.map(idx => {
+                const baseV = curSelObj.vertices[idx];
+                const p = startPositions[idx];
+                if (!baseV || !p) return { index: idx, offset: (curSelObj.vertexOffsets?.[idx] || [0, 0, 0]) as [number, number, number] };
+
+                const fromCenter = new THREE.Vector3().subVectors(p, centroid);
+                let scaledPos: THREE.Vector3;
+
+                if (scaleAxis === 'UNIFORM' || scaleAxis === 'FREE' || (!faceAxes && scaleX === scaleY && scaleY === scaleZ)) {
+                  // Uniform scale expands all 4 sides outwards uniformly and symmetrically!
+                  const factor = scaleX;
+                  scaledPos = centroid.clone().addScaledVector(fromCenter, factor);
+                } else if (faceAxes) {
+                  // Face-aligned scaling: expand symmetrically along width (T), height (B), and depth (N)
+                  const u = fromCenter.dot(faceAxes.T);
+                  const v = fromCenter.dot(faceAxes.B);
+                  const w = fromCenter.dot(faceAxes.N);
+                  const scaledVec = faceAxes.T.clone().multiplyScalar(u * scaleX)
+                    .addScaledVector(faceAxes.B, v * scaleY)
+                    .addScaledVector(faceAxes.N, w * scaleZ);
+                  scaledPos = centroid.clone().add(scaledVec);
+                } else {
+                  // General axis-aligned scaling
+                  const scaledVec = new THREE.Vector3(fromCenter.x * scaleX, fromCenter.y * scaleY, fromCenter.z * scaleZ);
+                  scaledPos = centroid.clone().add(scaledVec);
+                }
+
+                return {
+                  index: idx,
+                  offset: [
+                    scaledPos.x - baseV[0],
+                    scaledPos.y - baseV[1],
+                    scaledPos.z - baseV[2]
+                  ] as [number, number, number]
+                };
+              });
+
+              updateVertexOffsets(selectedObjectId, newOffsets);
             }
           }
         } else if (gs.activeAxis==='FREE') {
@@ -5674,48 +6126,52 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const mesh = intersect.object as THREE.Mesh;
                 const clickedId = mesh.userData.id;
                 if (clickedId && clickedId !== selectedObjectId) selectObject(clickedId);
-                if (clickedId) {
-                  const pos = mesh.geometry.getAttribute('position');
-                  const a = intersect.face.a, b = intersect.face.b, c = intersect.face.c;
-                  const pa = new THREE.Vector3(pos.getX(a), pos.getY(a), pos.getZ(a)).applyMatrix4(mesh.matrixWorld);
-                  const pb = new THREE.Vector3(pos.getX(b), pos.getY(b), pos.getZ(b)).applyMatrix4(mesh.matrixWorld);
-                  const pc = new THREE.Vector3(pos.getX(c), pos.getY(c), pos.getZ(c)).applyMatrix4(mesh.matrixWorld);
+                const selObj = projectRef.current.objects.find(o => o.id === (clickedId || selectedObjectId));
+                if (selObj && selObj.vertices && selObj.vertices.length > 0) {
                   const pt = intersect.point;
-                  const dAB = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                  const dBC = new THREE.Line3(pb, pc).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                  const dCA = new THREE.Line3(pc, pa).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
-                  let edge: [number, number];
-                  if (dAB <= dBC && dAB <= dCA) edge = [a, b];
-                  else if (dBC <= dAB && dBC <= dCA) edge = [b, c];
-                  else edge = [c, a];
-                  
-                  const vertexMap = mesh.userData.vertexMap as number[] | undefined;
-                  if (vertexMap) {
-                    edge = [vertexMap[edge[0]], vertexMap[edge[1]]];
+                  const validEdges = extractUniqueEdges(selObj);
+                  let bestEdge: [number, number] | null = null;
+                  let bestDist = Infinity;
+
+                  for (const [v1, v2] of validEdges) {
+                    const vert1 = selObj.vertices[v1];
+                    const vert2 = selObj.vertices[v2];
+                    if (!vert1 || !vert2) continue;
+                    const off1 = selObj.vertexOffsets?.[v1] || [0, 0, 0];
+                    const off2 = selObj.vertexOffsets?.[v2] || [0, 0, 0];
+                    const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mesh.matrixWorld);
+                    const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mesh.matrixWorld);
+                    const dist = new THREE.Line3(pa, pb).closestPointToPoint(pt, true, new THREE.Vector3()).distanceTo(pt);
+                    if (dist < bestDist) {
+                      bestDist = dist;
+                      bestEdge = [v1, v2];
+                    }
                   }
 
-                  const isCtrl = event.ctrlKey || event.metaKey || event.shiftKey;
-                  let ne: number[] = [];
-                  if (isCtrl) {
-                    // Toggle edge selection logic...
-                    const edgeExists = (v1: number, v2: number) => {
-                      for (let i = 0; i < selectedEdgeIndices.length; i += 2)
-                        if ((selectedEdgeIndices[i] === v1 && selectedEdgeIndices[i + 1] === v2) || (selectedEdgeIndices[i] === v2 && selectedEdgeIndices[i + 1] === v1)) return true;
-                      return false;
-                    };
-                    if (edgeExists(edge[0], edge[1])) {
-                      for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
-                        const v1 = selectedEdgeIndices[i], v2 = selectedEdgeIndices[i + 1];
-                        if (!((v1 === edge[0] && v2 === edge[1]) || (v1 === edge[1] && v2 === edge[0]))) ne.push(v1, v2);
+                  if (bestEdge) {
+                    const edge = bestEdge;
+                    const isCtrl = event.ctrlKey || event.metaKey || event.shiftKey;
+                    let ne: number[] = [];
+                    if (isCtrl) {
+                      const edgeExists = (v1: number, v2: number) => {
+                        for (let i = 0; i < selectedEdgeIndices.length; i += 2)
+                          if ((selectedEdgeIndices[i] === v1 && selectedEdgeIndices[i + 1] === v2) || (selectedEdgeIndices[i] === v2 && selectedEdgeIndices[i + 1] === v1)) return true;
+                        return false;
+                      };
+                      if (edgeExists(edge[0], edge[1])) {
+                        for (let i = 0; i < selectedEdgeIndices.length; i += 2) {
+                          const v1 = selectedEdgeIndices[i], v2 = selectedEdgeIndices[i + 1];
+                          if (!((v1 === edge[0] && v2 === edge[1]) || (v1 === edge[1] && v2 === edge[0]))) ne.push(v1, v2);
+                        }
+                      } else {
+                        ne = [...selectedEdgeIndices, edge[0], edge[1]];
                       }
                     } else {
-                      ne = [...selectedEdgeIndices, edge[0], edge[1]];
+                      ne = [edge[0], edge[1]];
                     }
-                  } else {
-                    ne = [edge[0], edge[1]];
+                    setSelectedEdgeIndices(ne);
+                    setSelectedVertexIndices(Array.from(new Set(ne)));
                   }
-                  setSelectedEdgeIndices(ne);
-                  setSelectedVertexIndices(Array.from(new Set(ne)));
                 }
               }
             }
@@ -5867,15 +6323,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
           }
           
-          if (editMode === 'VERTEX' && selectedObjectId && !hitSomething) {
+          if ((editMode === 'VERTEX' || editMode === 'EDGE' || insertVertexMode || loopCutMode) && selectedObjectId && !hitSomething) {
             const obj = projectRef.current.objects.find(o => o.id === selectedObjectId);
-            if (obj && obj.type === 'SHAPE' && obj.vertices && obj.vertices.length >= 2) {
-              const _interp = getInterpolatedTransform(obj, currentTime);
-              const mat4 = new THREE.Matrix4().compose(
-                new THREE.Vector3().fromArray(_interp.position),
-                new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
-                new THREE.Vector3().fromArray(_interp.scale)
-              );
+            if (obj && obj.vertices && obj.vertices.length >= 2) {
+              const meshObj = primitivesGroupRef.current?.children.find(c => (c as any).userData?.id === selectedObjectId) as THREE.Mesh | undefined;
+              const mat4 = meshObj ? meshObj.matrixWorld : (() => {
+                const _interp = getInterpolatedTransform(obj, currentTime);
+                return new THREE.Matrix4().compose(
+                  new THREE.Vector3().fromArray(_interp.position),
+                  new THREE.Quaternion().setFromEuler(new THREE.Euler().fromArray(_interp.rotation)),
+                  new THREE.Vector3().fromArray(_interp.scale)
+                );
+              })();
               const invMat = mat4.clone().invert();
 
               const width = rendererRef.current!.domElement.clientWidth;
@@ -5884,53 +6343,125 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const sx = event.clientX - rect.left;
               const sy = event.clientY - rect.top;
 
-              const rawVerts = obj.vertices.map((v, i) => {
-                const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
-                return new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
-              });
+              if (obj.type === 'SHAPE') {
+                const rawVerts = obj.vertices.map((v, i) => {
+                  const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
+                  return new THREE.Vector3(v[0] + off[0], v[1] + off[1], v[2] + off[2]).applyMatrix4(mat4);
+                });
 
-              let minSegDist = 20; // 20px screen distance threshold
-              let bestSeg = -1;
-              let bestT = 0.5;
-              let bestWorldPt: THREE.Vector3 | null = null;
+                let minSegDist = 24; // 24px screen distance threshold
+                let bestSeg = -1;
+                let bestWorldPt: THREE.Vector3 | null = null;
 
-              const isClosed = !!obj.parameters.closed;
-              const segCount = isClosed ? rawVerts.length : rawVerts.length - 1;
+                const isClosed = !!obj.parameters?.closed;
+                const segCount = isClosed ? rawVerts.length : rawVerts.length - 1;
 
-              for (let i = 0; i < segCount; i++) {
-                const p1 = rawVerts[i];
-                const p2 = rawVerts[(i + 1) % rawVerts.length];
-                const ndc1 = p1.clone().project(cameraRef.current!);
-                const ndc2 = p2.clone().project(cameraRef.current!);
-                if (ndc1.z > 1 || ndc2.z > 1) continue;
+                for (let i = 0; i < segCount; i++) {
+                  const p1 = rawVerts[i];
+                  const p2 = rawVerts[(i + 1) % rawVerts.length];
+                  const ndc1 = p1.clone().project(cameraRef.current!);
+                  const ndc2 = p2.clone().project(cameraRef.current!);
+                  if (ndc1.z > 1 && ndc2.z > 1) continue;
 
-                const s1 = { x: (ndc1.x * 0.5 + 0.5) * width, y: (ndc1.y * -0.5 + 0.5) * height };
-                const s2 = { x: (ndc2.x * 0.5 + 0.5) * width, y: (ndc2.y * -0.5 + 0.5) * height };
+                  const s1 = { x: (ndc1.x * 0.5 + 0.5) * width, y: (ndc1.y * -0.5 + 0.5) * height };
+                  const s2 = { x: (ndc2.x * 0.5 + 0.5) * width, y: (ndc2.y * -0.5 + 0.5) * height };
 
-                const dx = s2.x - s1.x;
-                const dy = s2.y - s1.y;
-                const lenSq = dx * dx + dy * dy;
-                if (lenSq === 0) continue;
+                  const distTo1 = Math.hypot(sx - s1.x, sy - s1.y);
+                  const distTo2 = Math.hypot(sx - s2.x, sy - s2.y);
+                  if (distTo1 <= 16 || distTo2 <= 16) continue;
 
-                let t = ((sx - s1.x) * dx + (sy - s1.y) * dy) / lenSq;
-                t = Math.max(0, Math.min(1, t));
+                  const dx = s2.x - s1.x;
+                  const dy = s2.y - s1.y;
+                  const lenSq = dx * dx + dy * dy;
+                  if (lenSq === 0) continue;
 
-                const projX = s1.x + t * dx;
-                const projY = s1.y + t * dy;
-                const dist = Math.hypot(sx - projX, sy - projY);
+                  let t = ((sx - s1.x) * dx + (sy - s1.y) * dy) / lenSq;
+                  if (t < 0.04 || t > 0.96) continue;
 
-                if (dist < minSegDist) {
-                  minSegDist = dist;
-                  bestSeg = i;
-                  bestT = t;
-                  bestWorldPt = p1.clone().lerp(p2, t);
+                  const projX = s1.x + t * dx;
+                  const projY = s1.y + t * dy;
+                  const dist = Math.hypot(sx - projX, sy - projY);
+
+                  if (dist < minSegDist) {
+                    minSegDist = dist;
+                    bestSeg = i;
+                    bestWorldPt = p1.clone().lerp(p2, t);
+                  }
                 }
-              }
 
-              if (bestSeg >= 0 && bestWorldPt && (insertVertexMode || event.altKey || minSegDist < 12)) {
-                const localPt = bestWorldPt.clone().applyMatrix4(invMat);
-                useStore.getState().insertShapeVertexAtPoint(selectedObjectId, [localPt.x, localPt.y, localPt.z], bestSeg);
-                hitSomething = true;
+                if (bestSeg >= 0 && bestWorldPt) {
+                  const localPt = bestWorldPt.clone().applyMatrix4(invMat);
+                  useStore.getState().insertShapeVertexAtPoint(selectedObjectId, [localPt.x, localPt.y, localPt.z], bestSeg);
+                  hitSomething = true;
+                }
+              } else {
+                // 3D Mesh edge insertion / loop cut
+                const validEdges = extractUniqueEdges(obj, { dissolveCoplanars: false });
+                let minEdgeDist = 24; // 24px screen distance threshold
+                let bestEdge: [number, number] | null = null;
+                let bestWorldPt: THREE.Vector3 | null = null;
+
+                for (const [v1, v2] of validEdges) {
+                  const vert1 = obj.vertices[v1];
+                  const vert2 = obj.vertices[v2];
+                  if (!vert1 || !vert2) continue;
+                  const off1 = obj.vertexOffsets?.[v1] || [0, 0, 0];
+                  const off2 = obj.vertexOffsets?.[v2] || [0, 0, 0];
+                  const pa = new THREE.Vector3(vert1[0] + off1[0], vert1[1] + off1[1], vert1[2] + off1[2]).applyMatrix4(mat4);
+                  const pb = new THREE.Vector3(vert2[0] + off2[0], vert2[1] + off2[1], vert2[2] + off2[2]).applyMatrix4(mat4);
+
+                  const pA_ndc = pa.clone().project(cameraRef.current!);
+                  const pB_ndc = pb.clone().project(cameraRef.current!);
+                  if (pA_ndc.z > 1 && pB_ndc.z > 1) continue;
+
+                  const sAx = (pA_ndc.x * 0.5 + 0.5) * width;
+                  const sAy = (pA_ndc.y * -0.5 + 0.5) * height;
+                  const sBx = (pB_ndc.x * 0.5 + 0.5) * width;
+                  const sBy = (pB_ndc.y * -0.5 + 0.5) * height;
+
+                  const distToA = Math.hypot(sx - sAx, sy - sAy);
+                  const distToB = Math.hypot(sx - sBx, sy - sBy);
+                  if (distToA <= 16 || distToB <= 16) continue;
+
+                  const dx = sBx - sAx;
+                  const dy = sBy - sAy;
+                  const lenSq = dx * dx + dy * dy;
+                  if (lenSq === 0) continue;
+
+                  let t = ((sx - sAx) * dx + (sy - sAy) * dy) / lenSq;
+                  if (t < 0.04 || t > 0.96) continue;
+
+                  const projX = sAx + t * dx;
+                  const projY = sAy + t * dy;
+                  const dist = Math.hypot(sx - projX, sy - projY);
+
+                  if (dist < minEdgeDist) {
+                    minEdgeDist = dist;
+                    bestEdge = [v1, v2];
+                    bestWorldPt = pa.clone().lerp(pb, t);
+                  }
+                }
+
+                if (bestEdge && bestWorldPt) {
+                  if (loopCutMode && obj.faces && obj.faces.length > 0) {
+                    // Execute Loop Cut on the clicked edge
+                    useStore.getState().applyLoopCut(
+                      selectedObjectId,
+                      [bestEdge[0], bestEdge[1]],
+                      loopCutCuts,
+                      loopCutSlide
+                    );
+                    hitSomething = true;
+                  } else {
+                    const localPt = bestWorldPt.clone().applyMatrix4(invMat);
+                    useStore.getState().insertVertexOnEdge(
+                      selectedObjectId,
+                      [bestEdge[0], bestEdge[1]],
+                      [localPt.x, localPt.y, localPt.z]
+                    );
+                    hitSomething = true;
+                  }
+                }
               }
             }
           }
@@ -6166,6 +6697,25 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           useStore.getState().bridgeSelectedEdges(selectedObjectId, selectedEdgeIndices);
           return;
         }
+      }
+
+      // ── GLOBAL EDIT MODE SHORTCUTS ──
+      // Loop Cut & Slide (Ctrl + R / Cmd + R)
+      if ((event.ctrlKey || event.metaKey) && (event.key === 'r' || event.key === 'R')) {
+        event.preventDefault();
+        const currentLoopCut = useStore.getState().loopCutMode;
+        useStore.setState({ loopCutMode: !currentLoopCut });
+        return;
+      }
+
+      // Extrude Manifold (Alt + E)
+      if (event.altKey && (event.key === 'e' || event.key === 'E')) {
+        event.preventDefault();
+        const { selectedObjectId, selectedFaceIndices, editMode } = useStore.getState();
+        if (selectedObjectId && editMode === 'FACE' && selectedFaceIndices.length > 0) {
+          useStore.getState().extrudeManifold(selectedObjectId, selectedFaceIndices, 0.4);
+        }
+        return;
       }
 
       switch(event.key.toLowerCase()) {

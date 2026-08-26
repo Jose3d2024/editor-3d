@@ -11,7 +11,11 @@ import { applyNoiseToMesh, type NoiseDeformConfig } from '../utils/meshNoise';
 import { executeUnifiedBoolean, BooleanExecuteOptions, BooleanResult, UnifiedBooleanOp } from '../utils/booleanOperations';
 import { getDefaultMaterials } from '../utils/defaultMaterials';
 import { DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
+import { DEFAULT_PARTICLE_CONFIG, DEFAULT_SPACE_WARP_CONFIG } from '../utils/particleSystem';
+import { DEFAULT_GPGPU_SWARM_CONFIG } from '../utils/gpgpuSwarm';
 import { convertToWireframeModel, createWireframeTubesGeometry, extractUniqueEdges, type WireframeOptions } from '../utils/wireframeMesh';
+import { executeLoopCut } from '../utils/loopCut';
+import { executeExtrudeManifold } from '../utils/extrudeManifold';
 import {
   createDefaultNurbsCurve,
   createDefaultNurbsCircle,
@@ -395,6 +399,8 @@ interface Store extends AppState {
   insertVertexOnEdge: (id: string, edgeIndices?: number[], point?: V3) => { success: boolean; message: string };
   bridgeSelectedEdges: (id: string, edgeIndices?: number[]) => { success: boolean; message: string };
   bevelSelectedEdges: (id: string, edgeIndices?: number[], width?: number, segments?: number) => { success: boolean; message: string };
+  applyLoopCut: (id: string, edge?: [number, number], cuts?: number, slide?: number) => { success: boolean; message: string };
+  extrudeManifold: (id: string, faceIndices?: number[], distance?: number) => Promise<{ success: boolean; message: string }>;
 }
 
 function solidExtrudeMesh(
@@ -492,6 +498,12 @@ export const useStore = create<Store>()((set, get) => ({
   setDrawLockAxis: (axis) => set({ drawLockAxis: axis }),
   insertVertexMode: false,
   setInsertVertexMode: (enabled) => set({ insertVertexMode: enabled }),
+  loopCutMode: false,
+  setLoopCutMode: (enabled) => set({ loopCutMode: enabled }),
+  loopCutCuts: 1,
+  setLoopCutCuts: (cuts) => set({ loopCutCuts: cuts }),
+  loopCutSlide: 0.5,
+  setLoopCutSlide: (slide) => set({ loopCutSlide: slide }),
   moveReferenceMode: false,
   history: [DEFAULT_PROJECT],
   historyIndex: 0,
@@ -758,10 +770,22 @@ export const useStore = create<Store>()((set, get) => ({
 
   assignMaterialToObjects: (objectIds, materialId) => {
     const { project } = get();
+    const assignedMat = materialId ? project.materials.find(m => m.id === materialId) : null;
     set({
       project: {
         ...project,
-        objects: project.objects.map(o => objectIds.includes(o.id) ? { ...o, materialId: materialId ?? undefined } : o)
+        objects: project.objects.map(o => {
+          if (!objectIds.includes(o.id)) return o;
+          const updated: CSGObject = {
+            ...o,
+            materialId: materialId ?? undefined,
+            material: undefined, // Clear previous inline material overrides to prevent mixing/blending with old textures
+          };
+          if (assignedMat?.color) {
+            updated.color = assignedMat.color;
+          }
+          return updated;
+        })
       }
     });
     get().saveHistory();
@@ -999,7 +1023,37 @@ export const useStore = create<Store>()((set, get) => ({
     const type = typeOrObj as PrimitiveType;
     const p: CSGObject['parameters'] = {};
     switch (type) {
-      case 'SPHERE':       p.segments = 32; p.sphereType = 'UV'; p.detail = 1; break;
+      case 'GEOSPHERE':
+        p.radius = 0.5;
+        p.geodesicBaseType = 'ICOSAHEDRON';
+        p.geodesicFrequency = 4;
+        p.geodesicHemisphere = false;
+        p.baseToPivot = false;
+        break;
+      case 'SPHERE':
+        p.radius = 0.5;
+        p.segments = 32;
+        p.heightSegments = 16;
+        p.sphereType = 'UV';
+        p.hemisphere = 0.0;
+        p.chopSquash = 'chop';
+        p.sliceOn = false;
+        p.sliceFrom = 0;
+        p.sliceTo = 360;
+        p.baseToPivot = false;
+        break;
+      case 'PARTICLE_SYSTEM':
+        p.isParticleSystem = true;
+        p.particleConfig = { ...DEFAULT_PARTICLE_CONFIG };
+        break;
+      case 'SPACE_WARP':
+        p.isSpaceWarp = true;
+        p.warpConfig = { ...DEFAULT_SPACE_WARP_CONFIG };
+        break;
+      case 'GPGPU_SWARM':
+        p.isGpgpuSwarm = true;
+        p.gpgpuSwarmConfig = { ...DEFAULT_GPGPU_SWARM_CONFIG };
+        break;
       case 'CYLINDER':     p.segments = 32; break;
       case 'CONE':         p.segments = 32; break;
       case 'TORUS':        p.radialSegments = 16; p.tubularSegments = 100; p.radius = 0.5; p.tube = 0.2; break;
@@ -1059,17 +1113,23 @@ export const useStore = create<Store>()((set, get) => ({
     }
     const geom = generatePrimitive(type, p);
     const names: Record<string,string> = {
-      CUBE:'Cubo',SPHERE:'Esfera',CYLINDER:'Cilindro',CONE:'Cono',TORUS:'Toroide',
+      CUBE:'Cubo',SPHERE:'Esfera',GEOSPHERE:'GeoEsfera',CYLINDER:'Cilindro',CONE:'Cono',TORUS:'Toroide',
       ICOSAHEDRON:'Icosaedro',DODECAHEDRON:'Dodecaedro',PYRAMID:'Pirámide',PRISM:'Prisma',
       CAPSULE:'Cápsula',TETRAHEDRON:'Tetraedro',OCTAHEDRON:'Octaedro',TUBE:'Tubo',
       ARC:'Arco 3D',STAR:'Estrella 3D',
       WEDGE:'Cuña',HEMISPHERE:'Hemisferio',PLANE:'Plano',CIRCLE:'Círculo',RING:'Anillo',SHAPE:'Forma',
       VOLUME_CLOUD:'Cubo Volumétrico (Nube 3D)',
+      PARTICLE_SYSTEM:'Sistema de Partículas (PF Source)',
+      SPACE_WARP:'Deformador Espacial (Space Warp)',
+      GPGPU_SWARM:'Enjambre GPGPU (GPU Swarm)',
       NURBS_CURVE:'Curva NURBS',NURBS_CIRCLE:'Círculo NURBS',NURBS_SURFACE:'Superficie NURBS',
       NURBS_CYLINDER:'Cilindro NURBS',NURBS_CONE:'Cono NURBS',NURBS_SPHERE:'Esfera NURBS',NURBS_TORUS:'Toroide NURBS'
     };
     const isNurbsType = type.startsWith('NURBS_');
     const isVol = type === 'VOLUME_CLOUD' || p.isVolumetric === true;
+    const isParticle = type === 'PARTICLE_SYSTEM' || p.isParticleSystem === true;
+    const isWarp = type === 'SPACE_WARP' || p.isSpaceWarp === true;
+    const isGpgpu = type === 'GPGPU_SWARM' || p.isGpgpuSwarm === true;
     const newObj: CSGObject = {
       id: genId(),
       name: `${names[type] ?? type} ${state.project.objects.length + 1}`,
@@ -1081,9 +1141,15 @@ export const useStore = create<Store>()((set, get) => ({
       isNurbs: isNurbsType,
       isVolumetric: isVol,
       volumetric: isVol ? { ...DEFAULT_VOLUMETRIC_CONFIG, ...(p.volumetric || {}) } : undefined,
+      isParticleSystem: isParticle,
+      particleConfig: isParticle ? { ...DEFAULT_PARTICLE_CONFIG, ...(p.particleConfig || {}) } : undefined,
+      isSpaceWarp: isWarp,
+      warpConfig: isWarp ? { ...DEFAULT_SPACE_WARP_CONFIG, ...(p.warpConfig || {}) } : undefined,
+      isGpgpuSwarm: isGpgpu,
+      gpgpuSwarmConfig: isGpgpu ? { ...DEFAULT_GPGPU_SWARM_CONFIG, ...(p.gpgpuSwarmConfig || {}) } : undefined,
       vertices: geom.vertices, faces: geom.faces,
-      color: isVol ? '#ffffff' : '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
-      smoothShading: ['SPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE', 'NURBS_SURFACE', 'NURBS_CYLINDER', 'NURBS_CONE', 'NURBS_SPHERE', 'NURBS_TORUS'].includes(type),
+      color: isVol ? '#ffffff' : isGpgpu ? '#38bdf8' : isParticle ? '#38bdf8' : isWarp ? '#a855f7' : '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6,'0'),
+      smoothShading: ['SPHERE', 'GEOSPHERE', 'CYLINDER', 'CONE', 'TORUS', 'CAPSULE', 'HEMISPHERE', 'TUBE', 'NURBS_SURFACE', 'NURBS_CYLINDER', 'NURBS_CONE', 'NURBS_SPHERE', 'NURBS_TORUS'].includes(type),
       opacity: 1, visible: true, keyframes: [],
     };
     set({ project: { ...state.project, objects: [...state.project.objects, newObj] }, selectedObjectId: newObj.id, selectedObjectIds: [newObj.id] });
@@ -2948,6 +3014,13 @@ export const useStore = create<Store>()((set, get) => ({
     const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
     newObj.type = 'MESH';
 
+    // Bake all existing vertices first so no previous deformations are lost
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const o = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
+    });
+    newObj.vertexOffsets = {};
+
     // 1. Check if any existing face contains both v1 and v2
     let splitFaceCount = 0;
     const newFaces: MeshFace[] = [];
@@ -2992,6 +3065,9 @@ export const useStore = create<Store>()((set, get) => ({
       }
     });
 
+    delete newObj.wireframeEdges;
+    newObj.parameters = {};
+
     if (splitFaceCount > 0) {
       newObj.faces = newFaces;
       get().updateObject(id, newObj);
@@ -3030,6 +3106,14 @@ export const useStore = create<Store>()((set, get) => ({
 
     const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
     newObj.type = 'MESH';
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const o = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
+    });
+    newObj.vertexOffsets = {};
+    delete newObj.wireframeEdges;
+    newObj.parameters = {};
+
     newObj.faces.push({ indices: [...sel] });
     get().updateObject(id, newObj);
     get().saveHistory();
@@ -3048,11 +3132,17 @@ export const useStore = create<Store>()((set, get) => ({
     newObj.type = 'MESH';
     const off: V3 = offset || [0, 0.4, 0];
 
+    // Bake all existing vertices first so no previous deformations are lost
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const vo = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + vo[0], v[1] + vo[1], v[2] + vo[2]];
+    });
+    newObj.vertexOffsets = {};
+
     const newCreatedIndices: number[] = [];
     sel.forEach((vi) => {
       const v = newObj.vertices[vi];
-      const vo = newObj.vertexOffsets?.[vi] || [0, 0, 0];
-      const newV: V3 = [v[0] + vo[0] + off[0], v[1] + vo[1] + off[1], v[2] + vo[2] + off[2]];
+      const newV: V3 = [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
       const newIdx = newObj.vertices.length;
       newObj.vertices.push(newV);
       newCreatedIndices.push(newIdx);
@@ -3068,6 +3158,8 @@ export const useStore = create<Store>()((set, get) => ({
     }
 
     newObj.vertexOffsets = {};
+    delete newObj.wireframeEdges;
+    newObj.parameters = {};
     get().updateObject(id, newObj);
     set({ selectedVertexIndices: newCreatedIndices });
     get().saveHistory();
@@ -3075,7 +3167,7 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   insertVertexOnEdge: (id: string, edgeIndices?: number[], point?: V3) => {
-    const { project } = get();
+    const { project, selectedEdgeIndices, selectedVertexIndices } = get();
     const obj = project.objects.find(o => o.id === id);
     if (!obj || !obj.vertices) return { success: false, message: 'Objeto no encontrado.' };
 
@@ -3084,7 +3176,65 @@ export const useStore = create<Store>()((set, get) => ({
       return get().subdivideShapeSegment(id);
     }
 
-    return get().subdivideSelectedEdges(id, edgeIndices);
+    let edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    if ((!edges || edges.length < 2) && selectedVertexIndices && selectedVertexIndices.length === 2) {
+      edges = [selectedVertexIndices[0], selectedVertexIndices[1]];
+    }
+
+    if (!edges || edges.length < 2) {
+      return { success: false, message: 'Selecciona una arista o haz clic sobre un borde para insertar un vértice.' };
+    }
+
+    const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
+    newObj.type = 'MESH';
+
+    // Bake all existing vertices first so previous deformations/moves are permanently preserved
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const o = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
+    });
+    newObj.vertexOffsets = {};
+
+    const newCreatedIndices: number[] = [];
+
+    for (let ei = 0; ei < edges.length; ei += 2) {
+      const eA = edges[ei], eB = edges[ei + 1];
+      const pA = newObj.vertices[eA], pB = newObj.vertices[eB];
+      const vPos: V3 = point ? [point[0], point[1], point[2]] : [(pA[0]+pB[0])/2, (pA[1]+pB[1])/2, (pA[2]+pB[2])/2];
+      const newIdx = newObj.vertices.length;
+      newObj.vertices.push(vPos);
+      newCreatedIndices.push(newIdx);
+
+      const newFaces: MeshFace[] = [];
+      newObj.faces.forEach(face => {
+        const len = face.indices.length;
+        let edgePos = -1;
+        for (let i = 0; i < len; i++) {
+          const a = face.indices[i], b = face.indices[(i + 1) % len];
+          if ((a === eA && b === eB) || (a === eB && b === eA)) {
+            edgePos = i;
+            break;
+          }
+        }
+
+        if (edgePos === -1) {
+          newFaces.push(face);
+        } else {
+          const updatedIndices = [...face.indices];
+          updatedIndices.splice(edgePos + 1, 0, newIdx);
+          newFaces.push({ ...face, indices: updatedIndices });
+        }
+      });
+      newObj.faces = newFaces;
+    }
+
+    delete newObj.wireframeEdges;
+    newObj.vertexOffsets = {};
+    newObj.parameters = {};
+    get().updateObject(id, newObj);
+    set({ selectedVertexIndices: newCreatedIndices, selectedEdgeIndices: [] });
+    get().saveHistory();
+    return { success: true, message: `Vértice insertado en la arista.` };
   },
 
   deleteSelectedVertices: (id: string, vertexIndices?: number[]) => {
@@ -3555,11 +3705,12 @@ export const useStore = create<Store>()((set, get) => ({
     const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
     newObj.type = 'MESH';
 
-    const bakeVert = (i: number): V3 => {
-      const b = newObj.vertices[i];
-      const o = newObj.vertexOffsets?.[i] || [0,0,0];
-      return [b[0]+o[0], b[1]+o[1], b[2]+o[2]];
-    };
+    // Bake all existing vertices first so previous deformations are permanently preserved
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const o = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
+    });
+    newObj.vertexOffsets = {};
 
     const newFaces: MeshFace[] = [];
     const facesToRemove = new Set(faceIndices);
@@ -3569,7 +3720,7 @@ export const useStore = create<Store>()((set, get) => ({
       if (!face || face.indices.length < 3) return;
 
       const n = face.indices.length;
-      const pts = face.indices.map(bakeVert);
+      const pts = face.indices.map(i => newObj.vertices[i]);
       let cx = 0, cy = 0, cz = 0;
       pts.forEach(p => { cx += p[0]; cy += p[1]; cz += p[2]; });
       cx /= n; cy /= n; cz /= n;
@@ -3611,6 +3762,7 @@ export const useStore = create<Store>()((set, get) => ({
     finalFaces.push(...newFaces);
 
     newObj.faces = finalFaces;
+    delete newObj.wireframeEdges;
     newObj.vertexOffsets = {};
     newObj.parameters = {};
 
@@ -3754,7 +3906,7 @@ export const useStore = create<Store>()((set, get) => ({
   },
 
   subdivideSelectedEdges: (id: string, edgeIndices?: number[]) => {
-    const { project, selectedEdgeIndices } = get();
+    const { project, selectedEdgeIndices, selectedVertexIndices } = get();
     const obj = project.objects.find(o => o.id === id);
     if (!obj) return { success: false, message: 'Objeto no encontrado.' };
 
@@ -3762,25 +3914,32 @@ export const useStore = create<Store>()((set, get) => ({
       return get().subdivideShapeSegment(id);
     }
 
-    const edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
-    if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos un borde.' };
+    let edges = edgeIndices && edgeIndices.length >= 2 ? edgeIndices : selectedEdgeIndices;
+    if ((!edges || edges.length < 2) && selectedVertexIndices && selectedVertexIndices.length === 2) {
+      edges = [selectedVertexIndices[0], selectedVertexIndices[1]];
+    }
+
+    if (!edges || edges.length < 2) return { success: false, message: 'Selecciona al menos una arista para dividir.' };
 
     const newObj: CSGObject = JSON.parse(JSON.stringify(obj));
     newObj.type = 'MESH';
 
-    const bakeVert = (i: number): V3 => {
-      const b = newObj.vertices[i];
-      const o = newObj.vertexOffsets?.[i] || [0,0,0];
-      return [b[0]+o[0], b[1]+o[1], b[2]+o[2]];
-    };
+    // Bake all existing vertices first so previous deformations/moves are permanently preserved
+    newObj.vertices = newObj.vertices.map((v, i) => {
+      const o = newObj.vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + o[0], v[1] + o[1], v[2] + o[2]];
+    });
+    newObj.vertexOffsets = {};
 
+    const newCreatedIndices: number[] = [];
     let splitCount = 0;
     for (let ei = 0; ei < edges.length; ei += 2) {
       const eA = edges[ei], eB = edges[ei + 1];
-      const pA = bakeVert(eA), pB = bakeVert(eB);
+      const pA = newObj.vertices[eA], pB = newObj.vertices[eB];
       const mid: V3 = [(pA[0]+pB[0])/2, (pA[1]+pB[1])/2, (pA[2]+pB[2])/2];
       const midIdx = newObj.vertices.length;
       newObj.vertices.push(mid);
+      newCreatedIndices.push(midIdx);
 
       const newFaces: MeshFace[] = [];
       newObj.faces.forEach(face => {
@@ -3806,11 +3965,13 @@ export const useStore = create<Store>()((set, get) => ({
       newObj.faces = newFaces;
     }
 
+    delete newObj.wireframeEdges;
     newObj.vertexOffsets = {};
+    newObj.parameters = {};
     get().updateObject(id, newObj);
-    set({ selectedEdgeIndices: [] });
+    set({ selectedVertexIndices: newCreatedIndices, selectedEdgeIndices: [] });
     get().saveHistory();
-    return { success: true, message: `Borde(s) dividido(s) creando nuevo vértice.` };
+    return { success: true, message: `Arista(s) dividida(s) creando nuevo vértice.` };
   },
 
   bridgeSelectedEdges: (id: string, edgeIndices?: number[]) => {
@@ -3870,6 +4031,67 @@ export const useStore = create<Store>()((set, get) => ({
       console.error(e);
       return { success: false, message: 'Error al biselar bordes.' };
     }
+  },
+
+  applyLoopCut: (id: string, edge?: [number, number], cuts?: number, slide?: number) => {
+    const { project, selectedEdgeIndices, loopCutCuts, loopCutSlide } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    let targetEdge = edge;
+    if (!targetEdge && selectedEdgeIndices && selectedEdgeIndices.length >= 2) {
+      targetEdge = [selectedEdgeIndices[0], selectedEdgeIndices[1]];
+    }
+
+    if (!targetEdge) {
+      return { success: false, message: 'Selecciona o pasa el cursor sobre una arista para cortar el bucle.' };
+    }
+
+    const numCuts = cuts ?? loopCutCuts ?? 1;
+    const slideFactor = slide ?? loopCutSlide ?? 0.5;
+
+    const result = executeLoopCut(obj, targetEdge, numCuts, slideFactor);
+    if (result.success && result.newObj) {
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o => (o.id === id ? result.newObj! : o)),
+        },
+        selectedVertexIndices: result.newVertexIndices || [],
+        selectedEdgeIndices: [],
+      });
+      get().saveHistory();
+      return { success: true, message: result.message };
+    }
+
+    return { success: false, message: result.message || 'No se pudo realizar el corte en bucle.' };
+  },
+
+  extrudeManifold: async (id: string, faceIndices?: number[], distance: number = 0.3) => {
+    const { project, selectedFaceIndices } = get();
+    const obj = project.objects.find(o => o.id === id);
+    if (!obj) return { success: false, message: 'Objeto no encontrado.' };
+
+    const targetFaces = faceIndices && faceIndices.length > 0 ? faceIndices : selectedFaceIndices;
+    if (!targetFaces || targetFaces.length === 0) {
+      return { success: false, message: 'Selecciona al menos una cara para la Extrusión Manifold.' };
+    }
+
+    const result = await executeExtrudeManifold(obj, targetFaces, distance, { autoHeal: true });
+    if (result.success && result.newObj) {
+      set({
+        project: {
+          ...project,
+          objects: project.objects.map(o => (o.id === id ? result.newObj! : o)),
+        },
+        selectedFaceIndices: [],
+        selectedVertexIndices: result.selectedVertexIndices || [],
+      });
+      get().saveHistory();
+      return { success: true, message: result.message };
+    }
+
+    return { success: false, message: result.message || 'Error en la Extrusión Manifold.' };
   },
 
   healObject: async (id) => {

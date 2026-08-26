@@ -35,6 +35,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
   const [radius, setRadius] = useState<number>(0.035);
   const [radialSegments, setRadialSegments] = useState<number>(6);
   const [addJointSpheres, setAddJointSpheres] = useState<boolean>(true);
+  const [dissolveCoplanars, setDissolveCoplanars] = useState<boolean>(true);
   const [asNewObject, setAsNewObject] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -51,7 +52,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
     faces: obj.faces,
     wireframeEdges: obj.wireframeEdges,
     parameters: obj.parameters,
-  }).length : 0;
+  }, { dissolveCoplanars }).length : 0;
 
   const handleApply = () => {
     if (!obj) return;
@@ -67,6 +68,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
         radius,
         radialSegments,
         addJointSpheres,
+        dissolveCoplanars,
         asNewObject,
       };
       const res = convertToWireframe(obj.id, options);
@@ -86,6 +88,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
         radius,
         radialSegments,
         addJointSpheres,
+        dissolveCoplanars,
       };
       await Exporter.exportWireframe([obj], project.materials, format, options);
       showStatus(`¡Exportado como archivo ${format} alámbrico exitosamente!`);
@@ -278,6 +281,30 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
                   <div
                     className={`w-4 h-4 rounded-full bg-white transition-transform ${
                       addJointSpheres ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Optimizar y Disolver Aristas Coplanares */}
+              <div className="flex items-center justify-between pt-2 border-t border-zinc-800/80">
+                <div>
+                  <div className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                    <span>Limpieza Coplanar Automática</span>
+                    <span className="text-[9px] px-1.5 py-0.2 bg-emerald-950 text-emerald-400 border border-emerald-800/60 rounded">Óptimo</span>
+                  </div>
+                  <div className="text-[10px] text-zinc-500">Elimina diagonales y aristas internas en caras planas</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDissolveCoplanars(!dissolveCoplanars)}
+                  className={`w-10 h-5 rounded-full transition-colors relative p-0.5 ${
+                    dissolveCoplanars ? 'bg-emerald-600' : 'bg-zinc-800'
+                  }`}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                      dissolveCoplanars ? 'translate-x-5' : 'translate-x-0'
                     }`}
                   />
                 </button>

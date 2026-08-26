@@ -30,18 +30,12 @@ export default function App() {
   useEffect(() => {
     const initApplication = async () => {
       try {
-        setLoadingStatus('Cargando base de datos persistente...');
-        
-        // 1. Generar o recuperar instantáneamente de IndexedDB todas las miniaturas
-        // Al hacerlo aquí, la biblioteca se pre-carga al 100% en segundo plano
-        setLoadingStatus('Pre-calculando y optimizando Biblioteca de Materiales PBR procedimentales...');
-        await generateAllThumbnailsAsync();
-        
-        setLoadingStatus('Estabilizando viewports...');
         setAppReady(true);
+        // Pre-cargar biblioteca en segundo plano sin congelar la interfaz
+        generateAllThumbnailsAsync().catch(err => console.warn("Thumbnails async notice:", err));
       } catch (e) {
         console.error("Error durante el arranque:", e);
-        setAppReady(true); // Evitar soft-lock en fallos
+        setAppReady(true);
       }
     };
     initApplication();

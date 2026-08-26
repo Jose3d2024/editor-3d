@@ -24,11 +24,10 @@ export class Exporter {
     // Resolve material: priority is inline material > materialId > default
     const referencedMaterial = obj.materialId ? projectMaterials.find(m => m.id === obj.materialId) : null;
     
-    // Merge referenced material with inline overrides
-    const m = {
-      ...(referencedMaterial || {}),
-      ...(obj.material || {})
-    } as any;
+    // Cleanly resolve material data
+    const m = (referencedMaterial
+      ? { ...referencedMaterial, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+      : (obj.material || {})) as any;
 
     let customMaterial: THREE.Material | null = null;
     if (obj.materialId || Object.keys(obj.material || {}).length > 0 || (obj.color && obj.color !== '#ffffff') || (obj.opacity !== undefined && obj.opacity !== 1)) {

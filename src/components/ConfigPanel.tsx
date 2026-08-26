@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { SHORTCUTS_DATA, CATEGORIES, ShortcutItem } from './KeyboardShortcutsModal';
 import { useStore } from '../store/useStore';
+import { extractUniqueEdges } from '../utils/wireframeMesh';
 
 interface ConfigPanelProps {
   onOpenShortcutsModal: (isFloating?: boolean) => void;
@@ -43,8 +44,9 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
 
   // Calculate project metrics
   const totalObjects = project.objects.length;
-  const totalVertices = project.objects.reduce((acc, o) => acc + (o.stats?.vertices || o.vertices.length || 0), 0);
-  const totalFaces = project.objects.reduce((acc, o) => acc + (o.stats?.faces || o.faces.length || 0), 0);
+  const totalVertices = project.objects.reduce((acc, o) => acc + (o.stats?.vertices || o.vertices?.length || 0), 0);
+  const totalEdges = project.objects.reduce((acc, o) => acc + extractUniqueEdges(o).length, 0);
+  const totalFaces = project.objects.reduce((acc, o) => acc + (o.stats?.faces || o.faces?.length || 0), 0);
   const totalMaterials = project.materials.length;
 
   return (
@@ -327,8 +329,12 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
                 <span className="text-sm font-bold text-white font-mono">{totalVertices.toLocaleString()}</span>
               </div>
               <div className="p-2 bg-zinc-900/80 rounded-xl border border-zinc-800 text-center">
+                <span className="text-[9px] text-zinc-400 uppercase font-bold block">Aristas Totales</span>
+                <span className="text-sm font-bold text-cyan-400 font-mono">{totalEdges.toLocaleString()}</span>
+              </div>
+              <div className="p-2 bg-zinc-900/80 rounded-xl border border-zinc-800 text-center col-span-2">
                 <span className="text-[9px] text-zinc-400 uppercase font-bold block">Caras Poligonales</span>
-                <span className="text-sm font-bold text-white font-mono">{totalFaces.toLocaleString()}</span>
+                <span className="text-sm font-bold text-amber-400 font-mono">{totalFaces.toLocaleString()}</span>
               </div>
             </div>
           )}

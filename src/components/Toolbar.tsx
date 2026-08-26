@@ -43,6 +43,16 @@ import { RenderModal } from './RenderModal';
 import { CodeExporterModal } from './CodeExporterModal';
 import { WireframeModal } from './WireframeModal';
 import { VOLUMETRIC_PRESETS } from '../utils/volumetricRaymarch';
+import {
+  PARTICLE_PRESETS,
+  SPACE_WARP_PRESETS,
+  DEFAULT_PARTICLE_CONFIG,
+  DEFAULT_SPACE_WARP_CONFIG,
+} from '../utils/particleSystem';
+import {
+  GPGPU_SWARM_PRESETS,
+  DEFAULT_GPGPU_SWARM_CONFIG,
+} from '../utils/gpgpuSwarm';
 
 // ── Import helper: BufferGeometry → CSGObject ─────────────────────────────────
 const textureToDataURL = (texture: THREE.Texture): string | undefined => {
@@ -483,7 +493,7 @@ export const Toolbar: React.FC = () => {
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
-    'primitivo'|'nurbs'|'volumetric'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
+    'primitivo'|'nurbs'|'volumetric'|'particles'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
   >('primitivo');
   const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'malla'|'acciones'>('seleccion');
 
@@ -1184,8 +1194,9 @@ export const Toolbar: React.FC = () => {
                   className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl"
                   style={{
                     top: mainCreateRef.current?.getBoundingClientRect().bottom,
-                    left: Math.min(mainCreateRef.current?.getBoundingClientRect().left??0, window.innerWidth-408),
-                    width: 400,
+                    left: Math.min(mainCreateRef.current?.getBoundingClientRect().left??0, window.innerWidth-448),
+                    width: 440,
+                    maxWidth: '95vw',
                     maxHeight: '88vh',
                   }}
                 >
@@ -1196,11 +1207,12 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   {/* Tab strip */}
-                  <div className="grid grid-cols-6 border-b border-zinc-800">
+                  <div className="grid grid-cols-7 border-b border-zinc-800">
                     {([
                       {id:'primitivo', label:'Figuras',      icon:'⬛'},
                       {id:'nurbs',     label:'NURBS',        icon:'〰️'},
-                      {id:'volumetric',label:'Volúmenes 3D', icon:'🔥'},
+                      {id:'particles', label:'Partículas',   icon:'✨'},
+                      {id:'volumetric',label:'Volúmenes',    icon:'🔥'},
                       {id:'dibujar',   label:'Dibujar',      icon:'✏️'},
                       {id:'geometria', label:'Geometría',    icon:'⬡'},
                       {id:'generar',   label:'Generar',      icon:'🌀'},
@@ -1218,6 +1230,133 @@ export const Toolbar: React.FC = () => {
                   </div>
 
                   <div className="p-4 space-y-3 max-h-[70vh] overflow-y-auto" style={{scrollbarWidth:'thin',scrollbarColor:'#3f3f46 transparent'}}>
+
+                    {/* ════ PARTÍCULAS Y FUERZAS ESPACIALES (FX) ════ */}
+                    {createTab==='particles'&&(
+                      <div className="space-y-4">
+                        <PTitle icon="✨" title="Sistemas de Partículas y Enjambres GPGPU" desc="Enjambres acelerados por GPU (hasta 262k partículas con Curl Noise y Atractores), emisores animados y fuerzas espaciales."/>
+                        
+                        {/* Enjambre GPGPU */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
+                              <Zap size={13} className="text-cyan-400"/> Enjambre de Partículas GPGPU (GPU Curl Noise)
+                            </span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-400 border border-cyan-800/60 font-mono font-bold">262k+ GPU</span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-2">
+                            {GPGPU_SWARM_PRESETS.map((s) => (
+                              <button key={s.id} onClick={() => {
+                                addObject('GPGPU_SWARM');
+                                setTimeout(() => {
+                                  const selId = useStore.getState().selectedObjectId;
+                                  if (selId) {
+                                    const cfg = { ...DEFAULT_GPGPU_SWARM_CONFIG, ...s.config };
+                                    useStore.getState().updateObject(selId, {
+                                      name: `${s.name} ${useStore.getState().project.objects.length}`,
+                                      isGpgpuSwarm: true,
+                                      gpgpuSwarmConfig: cfg,
+                                      color: cfg.colorStart || '#38bdf8',
+                                      parameters: { isGpgpuSwarm: true, gpgpuSwarmConfig: cfg }
+                                    });
+                                    useStore.getState().saveHistory();
+                                  }
+                                }, 20);
+                                setShowMainCreate(false);
+                              }}
+                                className="flex items-center gap-2.5 p-2.5 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-cyan-500/50 transition-all group cursor-pointer text-left">
+                                <div className="text-2xl drop-shadow-md flex-shrink-0 group-hover:scale-110 transition-transform">{s.icon}</div>
+                                <div className="min-w-0">
+                                  <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-cyan-200 leading-tight truncate">{s.name}</span>
+                                  <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300 line-clamp-1">{s.desc}</span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Emisores */}
+                        <div className="space-y-2 pt-2 border-t border-zinc-800/60">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider flex items-center gap-1.5">
+                              <Sparkles size={13} className="text-purple-400"/> Emisores de Partículas (PF Source)
+                            </span>
+                            <span className="text-[9px] text-zinc-400 font-mono">Tiempo Real</span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-2">
+                            {PARTICLE_PRESETS.map((p) => (
+                              <button key={p.id} onClick={() => {
+                                addObject('PARTICLE_SYSTEM');
+                                setTimeout(() => {
+                                  const selId = useStore.getState().selectedObjectId;
+                                  if (selId) {
+                                    const cfg = { ...DEFAULT_PARTICLE_CONFIG, ...p.config };
+                                    useStore.getState().updateObject(selId, {
+                                      name: `${p.name} ${useStore.getState().project.objects.length}`,
+                                      isParticleSystem: true,
+                                      particleConfig: cfg,
+                                      color: cfg.colorStart || '#38bdf8',
+                                      parameters: { isParticleSystem: true, particleConfig: cfg }
+                                    });
+                                    useStore.getState().saveHistory();
+                                  }
+                                }, 20);
+                                setShowMainCreate(false);
+                              }}
+                                className="flex items-center gap-2.5 p-2.5 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-purple-500/50 transition-all group cursor-pointer text-left">
+                                <div className="text-2xl drop-shadow-md flex-shrink-0 group-hover:scale-110 transition-transform">{p.icon}</div>
+                                <div className="min-w-0">
+                                  <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-white leading-tight truncate">{p.name}</span>
+                                  <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300 line-clamp-1">{p.desc}</span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Space Warps */}
+                        <div className="space-y-2 pt-2 border-t border-zinc-800/60">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold text-indigo-300 uppercase tracking-wider flex items-center gap-1.5">
+                              <Wind size={13} className="text-indigo-400"/> Fuerzas & Deformadores Espaciales (Space Warps)
+                            </span>
+                            <span className="text-[9px] text-zinc-400 font-mono">Física 3D</span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            {SPACE_WARP_PRESETS.map((w) => (
+                              <button key={w.id} onClick={() => {
+                                addObject('SPACE_WARP');
+                                setTimeout(() => {
+                                  const selId = useStore.getState().selectedObjectId;
+                                  if (selId) {
+                                    const cfg = { ...DEFAULT_SPACE_WARP_CONFIG, ...w.config };
+                                    useStore.getState().updateObject(selId, {
+                                      name: `${w.name} ${useStore.getState().project.objects.length}`,
+                                      isSpaceWarp: true,
+                                      warpConfig: cfg,
+                                      color: '#a855f7',
+                                      parameters: { isSpaceWarp: true, warpConfig: cfg }
+                                    });
+                                    useStore.getState().saveHistory();
+                                  }
+                                }, 20);
+                                setShowMainCreate(false);
+                              }}
+                                className="flex items-center gap-2.5 p-2.5 bg-zinc-800/60 hover:bg-zinc-700/80 rounded-xl border border-zinc-700/50 hover:border-indigo-500/50 transition-all group cursor-pointer text-left">
+                                <div className="text-2xl drop-shadow-md flex-shrink-0 group-hover:scale-110 transition-transform">{w.icon}</div>
+                                <div className="min-w-0">
+                                  <span className="block text-[11px] font-bold text-zinc-200 group-hover:text-white leading-tight truncate">{w.name}</span>
+                                  <span className="block text-[9px] text-zinc-400 group-hover:text-zinc-300 line-clamp-1">{w.desc}</span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* ════ NURBS (SUPERFICIES & CURVAS) ════ */}
                     {createTab==='nurbs'&&(

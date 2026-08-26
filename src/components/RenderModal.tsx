@@ -25,6 +25,13 @@ import { setupTriplanarMaterial } from '../utils/TriplanarMaterial';
 import { createParallaxMaterial } from '../utils/ParallaxMaterial';
 import { createRaymarchedCloudMaterial } from '../utils/volumetricRaymarch';
 import { getUVDebugTexture } from '../utils/proceduralTextures';
+import { createGpgpuSwarmMesh, DEFAULT_GPGPU_SWARM_CONFIG } from '../utils/gpgpuSwarm';
+import {
+  ParticleSimulator,
+  DEFAULT_PARTICLE_CONFIG,
+  DEFAULT_SPACE_WARP_CONFIG,
+  SpaceWarpObjectData
+} from '../utils/particleSystem';
 
 interface RenderModalProps { onClose: () => void; }
 
@@ -494,10 +501,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
-      const mData: any = {
-        ...(refMat || {}),
-        ...(obj.material || {}),
-      };
+      const mData: any = refMat
+        ? { ...refMat, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+        : (obj.material || {});
 
       let finalMData = {
         ...mData,
@@ -616,11 +622,51 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         }
       }
 
-      if (!mesh) {
+      const isGpgpu = obj.type === 'GPGPU_SWARM' || obj.isGpgpuSwarm || obj.parameters?.isGpgpuSwarm;
+      const isParticle = obj.type === 'PARTICLE_SYSTEM' || obj.isParticleSystem || obj.parameters?.isParticleSystem;
+
+      if (isGpgpu) {
+        const swarmCfg = { ...DEFAULT_GPGPU_SWARM_CONFIG, ...(obj.parameters?.gpgpuSwarmConfig || {}), ...(obj.gpgpuSwarmConfig || {}) };
+        mesh = createGpgpuSwarmMesh(swarmCfg, obj.id);
+      } else if (isParticle) {
+        const pCfg = { ...DEFAULT_PARTICLE_CONFIG, ...(obj.parameters?.particleConfig || {}), ...(obj.particleConfig || {}) };
+        const particleSim = new ParticleSimulator(obj.id, pCfg);
+        particleSim.seekToTime(
+          currentTime,
+          (t) => {
+            const tr = getInterpolatedTransform(obj, t);
+            return {
+              position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+              quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+              scale: new THREE.Vector3(tr.scale[0], tr.scale[1], tr.scale[2])
+            };
+          },
+          (t) => {
+            const warps: SpaceWarpObjectData[] = [];
+            (project.objects || []).forEach(o => {
+              if (o.type === 'SPACE_WARP' || o.isSpaceWarp || o.parameters?.isSpaceWarp) {
+                const wCfg = { ...DEFAULT_SPACE_WARP_CONFIG, ...(o.parameters?.spaceWarpConfig || {}), ...(o.spaceWarpConfig || {}) };
+                const tr = getInterpolatedTransform(o, t);
+                warps.push({
+                  id: o.id,
+                  type: wCfg.warpType || 'WIND',
+                  position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+                  quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+                  config: wCfg
+                });
+              }
+            });
+            return warps;
+          }
+        );
+        mesh = particleSim.points;
+      } else if (!mesh) {
         try {
           const projectMaterials = project.materials || [];
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
-          const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
+          const mData: any = refMat
+            ? { ...refMat, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+            : (obj.material || {});
 
           let geo: THREE.BufferGeometry;
           const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || mData.isVolumetric || mData.volumetric?.enabled;
@@ -720,7 +766,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const lightPos = mainLight ? mainLight.position : new THREE.Vector3(4, 5, 4);
 
       scene.traverse((child: any) => {
-        if (child.isMesh && child.material) {
+        if ((child.isMesh || child.isPoints || child.isLine) && child.material) {
           const materials = Array.isArray(child.material) ? child.material : [child.material];
           materials.forEach((mat: any) => {
             if (mat && mat.uniforms) {
@@ -732,6 +778,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
               }
               if (mat.uniforms.uLightPosition) {
                 mat.uniforms.uLightPosition.value.copy(lightPos);
+              }
+              if (mat.uniforms.uLightPos) {
+                mat.uniforms.uLightPos.value.copy(lightPos);
               }
               if (mat.uniforms.uModelInverse) {
                 child.updateMatrixWorld(true);
@@ -863,10 +912,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     const loadMaterial = async (obj: any): Promise<THREE.Material> => {
       const projectMaterials = project.materials || [];
       const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
-      const mData: any = {
-        ...(refMat || {}),
-        ...(obj.material || {}),
-      };
+      const mData: any = refMat
+        ? { ...refMat, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+        : (obj.material || {});
 
       let finalMData = {
         ...mData,
@@ -934,8 +982,8 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       return mat;
     };
 
-    // Cargar objetos y mixers de animación GLTF
-    const loadedObjects: { mesh: THREE.Object3D; objData: any; mixer?: THREE.AnimationMixer }[] = [];
+    // Cargar objetos y mixers de animación GLTF y simuladores de partículas
+    const loadedObjects: { mesh: THREE.Object3D; objData: any; mixer?: THREE.AnimationMixer; particleSim?: ParticleSimulator | null }[] = [];
 
     for (const obj of project.objects) {
       if (!obj.visible) continue;
@@ -996,11 +1044,24 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
         }
       }
 
-      if (!mesh) {
+      const isGpgpu = obj.type === 'GPGPU_SWARM' || obj.isGpgpuSwarm || obj.parameters?.isGpgpuSwarm;
+      const isParticle = obj.type === 'PARTICLE_SYSTEM' || obj.isParticleSystem || obj.parameters?.isParticleSystem;
+      let particleSim: ParticleSimulator | null = null;
+
+      if (isGpgpu) {
+        const swarmCfg = { ...DEFAULT_GPGPU_SWARM_CONFIG, ...(obj.parameters?.gpgpuSwarmConfig || {}), ...(obj.gpgpuSwarmConfig || {}) };
+        mesh = createGpgpuSwarmMesh(swarmCfg, obj.id);
+      } else if (isParticle) {
+        const pCfg = { ...DEFAULT_PARTICLE_CONFIG, ...(obj.parameters?.particleConfig || {}), ...(obj.particleConfig || {}) };
+        particleSim = new ParticleSimulator(obj.id, pCfg);
+        mesh = particleSim.points;
+      } else if (!mesh) {
         try {
           const projectMaterials = project.materials || [];
           const refMat = obj.materialId ? projectMaterials.find((m: any) => m.id === obj.materialId) : null;
-          const mData: any = { ...(refMat || {}), ...(obj.material || {}) };
+          const mData: any = refMat
+            ? { ...refMat, ...(obj.material && (obj.material as any).userModified ? obj.material : {}) }
+            : (obj.material || {});
 
           let geo: THREE.BufferGeometry;
           const isVol = obj.type === 'VOLUME_CLOUD' || obj.isVolumetric || mData.isVolumetric || mData.volumetric?.enabled;
@@ -1021,7 +1082,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
       if (mesh) {
         scene.add(mesh);
-        loadedObjects.push({ mesh, objData: obj, mixer });
+        loadedObjects.push({ mesh, objData: obj, mixer, particleSim });
       }
     }
 
@@ -1070,10 +1131,40 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
 
       const frameTime = (frame / fps);
 
-      // 1. Actualizar animaciones GLTF y transformaciones de objetos
+      // 1. Actualizar animaciones GLTF, partículas y transformaciones de objetos
       loadedObjects.forEach(item => {
         if (item.mixer) {
           item.mixer.setTime(frameTime);
+        }
+        if (item.particleSim) {
+          item.particleSim.seekToTime(
+            frameTime,
+            (t) => {
+              const tr = getInterpolatedTransform(item.objData, t);
+              return {
+                position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+                quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+                scale: new THREE.Vector3(tr.scale[0], tr.scale[1], tr.scale[2])
+              };
+            },
+            (t) => {
+              const warps: SpaceWarpObjectData[] = [];
+              (project.objects || []).forEach(o => {
+                if (o.type === 'SPACE_WARP' || o.isSpaceWarp || o.parameters?.isSpaceWarp) {
+                  const wCfg = { ...DEFAULT_SPACE_WARP_CONFIG, ...(o.parameters?.spaceWarpConfig || {}), ...(o.spaceWarpConfig || {}) };
+                  const tr = getInterpolatedTransform(o, t);
+                  warps.push({
+                    id: o.id,
+                    type: wCfg.warpType || 'WIND',
+                    position: new THREE.Vector3(tr.position[0], tr.position[1], tr.position[2]),
+                    quaternion: new THREE.Quaternion().setFromEuler(new THREE.Euler(tr.rotation[0], tr.rotation[1], tr.rotation[2], 'XYZ')),
+                    config: wCfg
+                  });
+                }
+              });
+              return warps;
+            }
+          );
         }
         const tr = getInterpolatedTransform(item.objData, frameTime);
         item.mesh.position.fromArray(tr.position);
@@ -1096,7 +1187,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
       const lightPos = mainLight ? mainLight.position : new THREE.Vector3(4, 5, 4);
 
       scene.traverse((child: any) => {
-        if (child.isMesh && child.material) {
+        if ((child.isMesh || child.isPoints || child.isLine) && child.material) {
           const materials = Array.isArray(child.material) ? child.material : [child.material];
           materials.forEach((mat: any) => {
             if (mat && mat.uniforms) {
@@ -1108,6 +1199,9 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
               }
               if (mat.uniforms.uLightPosition) {
                 mat.uniforms.uLightPosition.value.copy(lightPos);
+              }
+              if (mat.uniforms.uLightPos) {
+                mat.uniforms.uLightPos.value.copy(lightPos);
               }
               if (mat.uniforms.uModelInverse) {
                 child.updateMatrixWorld(true);

@@ -15,20 +15,23 @@ export interface MeshFace {
 
 export type CSGOperation  = 'ADD' | 'SUBTRACT' | 'INTERSECT';
 export type PrimitiveType =
-  | 'CUBE' | 'SPHERE' | 'CYLINDER' | 'CONE'
+  | 'CUBE' | 'SPHERE' | 'GEOSPHERE' | 'CYLINDER' | 'CONE'
   | 'TORUS' | 'ICOSAHEDRON' | 'DODECAHEDRON'
   | 'PYRAMID' | 'PRISM' | 'CAPSULE' | 'TETRAHEDRON' | 'OCTAHEDRON'
   | 'TUBE' | 'WEDGE' | 'HEMISPHERE' | 'ARC' | 'STAR'
   | 'PLANE' | 'CIRCLE' | 'RING'
   | 'SHAPE' | 'MESH'
   | 'VOLUME_CLOUD'
+  | 'PARTICLE_SYSTEM' | 'SPACE_WARP' | 'GPGPU_SWARM'
   | 'NURBS_CURVE' | 'NURBS_SURFACE' | 'NURBS_CIRCLE' | 'NURBS_CYLINDER' | 'NURBS_CONE' | 'NURBS_SPHERE' | 'NURBS_TORUS';
 
 export type VolumetricMode = 'cloud' | 'fire' | 'explosion' | 'plasma' | 'smoke' | 'ice';
+export type CloudStructureType = 'cumulus' | 'stratocumulus' | 'cumulonimbus' | 'cirrus' | 'nebula' | 'pyroclastic';
 
 export interface VolumetricConfig {
   enabled?: boolean;
   mode?: VolumetricMode;   // 'cloud' | 'fire' | 'explosion' | 'plasma' | 'smoke' | 'ice'
+  cloudType?: CloudStructureType; // Advanced 2026 volumetric cloud preset
   density?: number;        // uCloudDensity (e.g. 1.5)
   lightIntensity?: number; // uLightIntensity (e.g. 1.2)
   scale?: number;         // uCloudScale (e.g. 2.0)
@@ -44,10 +47,150 @@ export interface VolumetricConfig {
   windDirection?: [number, number, number]; // Wind vector
   blending?: 'normal' | 'additive'; // Additive blending for fire / plasma
   turbulentFlame?: boolean; // Flame upward turbulence & heat dissipation
+  
+  // ── 2026 Advanced Atmospheric Scattering & Cloud Shaping ──
+  silverLining?: number;   // Mie forward scattering peak (0.0 to 3.0)
+  anisotropy?: number;     // Henyey-Greenstein phase eccentricity g (0.1 to 0.9)
+  anisotropyG?: number;    // Alias for anisotropy g parameter
+  coverage?: number;       // Cloud coverage volume fill (0.0 to 1.0)
+  ambientBoost?: number;   // Dual-scattering internal diffuse luminescence (0.0 to 1.0)
+  detailOctaves?: number;  // Fractal Worley-Perlin octave count (2 to 6)
+  altitudeFade?: number | [number, number]; // Base and top soft clipping
+}
+
+export type ParticleEmitterType = 'POINT' | 'BOX' | 'SPHERE' | 'CYLINDER' | 'RING' | 'PLANE' | 'CIRCLE' | 'MESH';
+export type ParticleVisualType = 'SPRAY' | 'SUPER_SPRAY' | 'SNOW' | 'BLIZZARD' | 'FIRE_SMOKE' | 'CLOUD_PUFF' | 'SPHERES' | 'STARS' | 'BUBBLES' | 'DUST';
+export type SpaceWarpForceType = 'GRAVITY' | 'WIND' | 'VORTEX' | 'PUSH' | 'WAVE' | 'RIPPLE' | 'DEFLECTOR' | 'DISPLACE' | 'MOTOR' | 'DRAG' | 'PBOMB';
+
+export interface ParticleSystemConfig {
+  emitterType: ParticleEmitterType;
+  emitterSize: [number, number, number];
+  particleType: ParticleVisualType;
+  count: number;              // Max active particles (e.g. 100 to 2000)
+  birthRate: number;          // Particles spawned per second
+  life: number;               // Lifespan in seconds (e.g. 3.0)
+  lifeVariation: number;      // Variation (0 to 1)
+  speed: number;              // Initial launch speed
+  speedVariation: number;     // Speed randomization (0 to 1)
+  spread: number;             // Cone / emitter spread angle in degrees (0 to 180)
+  particleSize: number;       // Size of billboard or geometry
+  sizeVariation: number;      // Size randomization
+  growth: number;             // Growth over life (-1 to 2)
+  fade: boolean;              // Fade alpha over lifespan
+  spin: number;               // Rotation angular speed
+  colorStart: string;         // Initial birth tint
+  colorEnd: string;           // Death tint
+  opacity: number;            // Max opacity
+  blending: 'normal' | 'additive';
+  affectedBySpaceWarps: boolean; // React to active space warps in scene
+  boundSpaceWarpIds?: string[];  // Specifically bound space warp IDs (or all if empty)
+}
+
+export interface SpaceWarpConfig {
+  warpType: SpaceWarpForceType;
+  strength: number;           // Force magnitude (can be negative for repulsion)
+  decay: number;              // Spatial distance decay (0 = infinite, 1 = quadratic)
+  range: number;              // Max effective radius/distance
+  windTurbulence: number;     // Wind turbulent noise amount
+  windFrequency: number;      // Wind noise temporal frequency
+  vortexAxial: number;        // Vortex upward pull along axis
+  vortexRadial: number;       // Vortex inward swirling pull
+  waveAmplitude: number;      // Wave height
+  waveLength: number;         // Distance between wave crests
+  waveSpeed: number;          // Oscillation speed
+  deflectorBounce: number;    // Restitution coefficient (0 to 1)
+  deflectorFriction: number;  // Surface friction drag (0 to 1)
+  iconSize?: number;          // Gizmo display size
+}
+
+export type GpgpuSwarmMode =
+  | 'curl_noise'
+  | 'lorenz_attractor'
+  | 'vortex_blackhole'
+  | 'galaxy_spiral'
+  | 'double_helix'
+  | 'torus_knot'
+  | 'spherical_flow'
+  | 'cyber_neon'
+  | 'mesh_surface'
+  | 'magnetic_dipole'
+  | 'harmonic_wave';
+
+export type GpgpuColorMode =
+  | 'velocity'
+  | 'position'
+  | 'rainbow'
+  | 'monochrome'
+  | 'radial'
+  | 'temperature'
+  | 'cyber_neon'
+  | 'aurora'
+  | 'sunset'
+  | 'ocean';
+
+export type GpgpuParticleShape =
+  | 'glow_disc'
+  | 'point'
+  | 'star'
+  | 'sparkle'
+  | 'ring'
+  | 'lit_sphere'
+  | 'square'
+  | 'streak';
+
+export type GpgpuMeshTarget =
+  | 'none'
+  | 'suzanne'
+  | 'stanford_bunny'
+  | 'torus_knot'
+  | 'skull'
+  | 'human_torso'
+  | 'sphere'
+  | 'cube'
+  | 'scene_object';
+
+export type GpgpuMouseMode = 'attract' | 'repel' | 'vortex' | 'wave';
+
+export interface GpgpuSwarmConfig {
+  enabled?: boolean;
+  mode: GpgpuSwarmMode;
+  count: number;              // Total simulated particles (e.g. 10,000 to 262,144)
+  particleSize: number;       // Visual point size (e.g. 1.0 to 32.0)
+  noiseFrequency: number;     // Curl noise spatial frequency (0.05 to 2.5)
+  noiseSpeed: number;         // Time speed of turbulence evolution (0.1 to 3.0)
+  curlOctaves: number;        // Detail octaves (1 to 4)
+  attractionStrength: number; // Core center pull force (-5.0 to 10.0)
+  swirlForce: number;         // Orbital angular swirl momentum (0.0 to 8.0)
+  damping: number;            // Velocity friction coefficient (0.80 to 0.99)
+  speed: number;              // Global time/speed multiplier (0.1 to 5.0)
+  boundingRadius: number;     // Boundary containment / wrap radius
+  particleShape: GpgpuParticleShape;
+  colorStart: string;         // Primary birth / core tint
+  colorEnd: string;           // Outer / high-velocity accent tint
+  colorMode: GpgpuColorMode;
+  opacity: number;            // 0.1 to 1.0
+  blending: 'additive' | 'normal';
+  interactiveMouse: boolean;  // React to 3D mouse pointer in scene
+  mouseMode?: GpgpuMouseMode; // 'attract' | 'repel' | 'vortex' | 'wave'
+  mouseForce: number;         // Mouse attraction/repulsion strength
+  mouseRadius: number;        // Radius of mouse influence in 3D
+  trailLength: number;        // Motion velocity stretch factor
+  velocityStretch?: number;   // Stretch factor along velocity vector
+  lightReactivity?: number;   // 0.0 to 1.0 realistic 3D lighting shading
+  meshTarget?: GpgpuMeshTarget; // Base 3D model for particles
+  targetObjectId?: string;    // ID of a scene CSGObject to morph to
+  surfaceAttraction?: number; // 0.0 to 1.0 how tightly particles hug mesh surface
+  surfaceDispersion?: number; // 0.0 to 5.0 turbulent scatter away from mesh surface
+  pulseSpeed?: number;        // Audio / beat pulse frequency
+  pulseAmplitude?: number;    // Audio / beat pulse wave amplitude
+  lorenzSigma?: number;       // For Lorenz mode (default 10.0)
+  lorenzRho?: number;         // For Lorenz mode (default 28.0)
+  lorenzBeta?: number;        // For Lorenz mode (default 2.666)
 }
 
 export interface ShapeParameters {
   segments?:        number;
+  heightSegments?:  number;
   radialSegments?:  number;
   tubularSegments?: number;
   radius?:          number;
@@ -62,6 +205,24 @@ export interface ShapeParameters {
   sphereType?:      'UV' | 'ICO';
   shapeType?:       'line' | 'rect' | 'bezier' | 'custom';
   closed?:          boolean;
+
+  // ── 3ds Max GeoSphere Parameters ──
+  geodesicBaseType?: 'ICOSAHEDRON' | 'OCTAHEDRON' | 'TETRAHEDRON';
+  geodesicFrequency?: number; // Subdivisions per polyhedron edge (1 to 32)
+  geodesicHemisphere?: boolean; // Geodesic dome cutoff
+  
+  // ── 3ds Max Sphere Primitive Parameters ──
+  hemisphere?:      number;  // 0.0 (full sphere) to 1.0 (flat plane), 0.5 = Dome
+  chopSquash?:      'chop' | 'squash'; // 'chop' deletes bottom vertices, 'squash' compresses them into base plane
+  sliceOn?:         boolean; // Slice pie cutter
+  sliceFrom?:       number;  // Start angle in degrees (0 to 360)
+  sliceTo?:         number;  // End angle in degrees (0 to 360)
+  baseToPivot?:     boolean; // Aligns bottom pole to Y=0 origin pivot
+  smooth?:          boolean; // Smooth shading vs faceted
+
+  // ── Space Warps and Particle Systems ──
+  particleConfig?:  ParticleSystemConfig;
+  warpConfig?:      SpaceWarpConfig;
 
   // NURBS Parametric Data
   nurbsCurve?:      NurbsCurveData;
@@ -229,6 +390,69 @@ export interface MaterialData {
   volumetric?: VolumetricConfig;
   isIce?: boolean;
   iceConfig?: IceShaderConfig;
+  isCSM?: boolean;
+  csmConfig?: CSMConfig;
+  isGlass?: boolean;
+  glassConfig?: GlassMaterialConfig;
+}
+
+export type CSMBaseMaterialType = 'MeshPhysicalMaterial' | 'MeshStandardMaterial' | 'MeshToonMaterial' | 'MeshLambertMaterial' | 'MeshBasicMaterial';
+
+export type CSMPresetType =
+  | 'custom'
+  | 'wave_distortion'
+  | 'hologram_shield'
+  | 'volcanic_magma'
+  | 'bio_organic_flesh'
+  | 'quantum_crystal'
+  | 'twist_vortex'
+  | 'digital_wire_glitch'
+  | 'comic_halftone';
+
+export interface CSMConfig {
+  enabled?: boolean;
+  baseMaterial?: CSMBaseMaterialType;
+  preset?: CSMPresetType;
+  vertexShader?: string;
+  fragmentShader?: string;
+  timeSpeed?: number;
+  displacementScale?: number;
+  noiseFrequency?: number;
+  colorAccent?: string;
+  glowIntensity?: number;
+  wireframeOverlay?: boolean;
+  roughnessMod?: number;
+  metalnessMod?: number;
+}
+
+export type GlassPresetType =
+  | 'newton_dispersion_prism'
+  | 'diamond_spectral'
+  | 'frosted_mist_glass'
+  | 'liquid_wave_glass'
+  | 'smoked_obsidian'
+  | 'handblown_bubbles'
+  | 'dichroic_rainbow'
+  | 'warm_amber_liquid'
+  | 'custom';
+
+export interface GlassMaterialConfig {
+  enabled?: boolean;
+  preset?: GlassPresetType;
+  dispersion?: number; // 0.0 to 0.2 (Cauchy spectral dispersion)
+  chromaticAberration?: number; // 0.0 to 0.15 (RGB wavelength split offset)
+  distortion?: number; // 0.0 to 1.0 (Surface waviness / fluid distortion)
+  distortionSpeed?: number; // 0.0 to 4.0
+  distortionFrequency?: number; // 0.5 to 10.0
+  frostedBlur?: number; // 0.0 to 1.0 (Subsurface scattering & micro-roughness)
+  internalBubbles?: boolean;
+  bubbleDensity?: number; // 0.0 to 3.0 (3D procedural air inclusions)
+  bubbleScale?: number; // 5.0 to 50.0
+  causticIntensity?: number; // 0.0 to 2.0 (Internal caustic highlights)
+  rimGlow?: number; // 0.0 to 2.0 (Schlick Fresnel edge brilliance)
+  rimColor?: string; // Hex color for Fresnel edge
+  beerLambertAbsorption?: number; // Attenuation density
+  thinFilmIridescence?: number; // 0.0 to 1.0 (Rainbow oil film interference)
 }
 
 export interface IceShaderConfig {
@@ -293,6 +517,13 @@ export interface CSGObject {
   uvDebug?: boolean;
   isVolumetric?: boolean;
   volumetric?: VolumetricConfig;
+  isParticleSystem?: boolean;
+  particleConfig?: ParticleSystemConfig;
+  isSpaceWarp?: boolean;
+  warpConfig?: SpaceWarpConfig;
+  spaceWarpConfig?: SpaceWarpConfig;
+  isGpgpuSwarm?: boolean;
+  gpgpuSwarmConfig?: GpgpuSwarmConfig;
   color:    string;
   opacity?: number;
   visible:  boolean;
@@ -470,6 +701,12 @@ export interface AppState {
   setDrawLockAxis: (axis: 'FREE' | 'ORTHO_90' | 'X' | 'Y' | 'Z') => void;
   insertVertexMode: boolean;
   setInsertVertexMode: (enabled: boolean) => void;
+  loopCutMode: boolean;
+  setLoopCutMode: (enabled: boolean) => void;
+  loopCutCuts: number;
+  setLoopCutCuts: (cuts: number) => void;
+  loopCutSlide: number;
+  setLoopCutSlide: (slide: number) => void;
   showCSG:        boolean;
   gridSnapEnabled: boolean;
   moveReferenceMode: boolean;
