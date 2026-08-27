@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore';
 import { CSGObject } from '../types';
 import { Exporter } from '../utils/exporters';
 import { extractUniqueEdges, type WireframeOptions } from '../utils/wireframeMesh';
+import { safeFixed } from '../utils/numberUtils';
 import {
   Grid,
   Boxes,
@@ -215,7 +216,7 @@ export const WireframeModal: React.FC<WireframeModalProps> = ({
                     Grosor / Radio del Alambre:
                   </span>
                   <span className="font-mono text-emerald-400 font-bold bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-                    {radius.toFixed(3)} m
+                    {safeFixed(radius, 3)} m
                   </span>
                 </div>
                 <input

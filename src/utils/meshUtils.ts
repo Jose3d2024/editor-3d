@@ -919,6 +919,16 @@ export function dissolveCoplanarFaces(
     fPlaneD.push(d);
   });
 
+  // Build vertex-to-face adjacency map to protect shared boundary vertices
+  const vertToFaces = new Map<number, Set<number>>();
+  triFaces.forEach(([i0, i1, i2], fIdx) => {
+    [i0, i1, i2].forEach(v => {
+      let set = vertToFaces.get(v);
+      if (!set) { set = new Set(); vertToFaces.set(v, set); }
+      set.add(fIdx);
+    });
+  });
+
   // Build edge-to-face adjacency map
   const edgeToFaces = new Map<string, number[]>();
   triFaces.forEach(([i0, i1, i2], fIdx) => {
@@ -1084,46 +1094,6 @@ export function dissolveCoplanarFaces(
     return tris;
   };
 
-  // Helper to remove redundant collinear vertices along straight perimeter edges
-  const simplifyCollinear = (loopIndices: number[], collinearDeg = 3.5): number[] => {
-    if (loopIndices.length <= 3) return loopIndices;
-    const cosCollinear = Math.cos((collinearDeg * Math.PI) / 180);
-    let current = [...loopIndices];
-    let changed = true;
-    let pass = 0;
-
-    while (changed && current.length > 3 && pass < 10) {
-      changed = false;
-      pass++;
-      const nextLoop: number[] = [];
-      const n = current.length;
-
-      for (let i = 0; i < n; i++) {
-        const prevIdx = current[(i - 1 + n) % n];
-        const currIdx = current[i];
-        const nextIdx = current[(i + 1) % n];
-
-        const pA = vertVectors[prevIdx];
-        const pB = vertVectors[currIdx];
-        const pC = vertVectors[nextIdx];
-
-        const d1 = new THREE.Vector3().subVectors(pB, pA).normalize();
-        const d2 = new THREE.Vector3().subVectors(pC, pB).normalize();
-
-        // If d1 and d2 have the exact same direction (angle between them < collinearDeg)
-        if (d1.dot(d2) >= cosCollinear) {
-          changed = true; // Skip point pB as it's redundant along the straight border
-        } else {
-          nextLoop.push(currIdx);
-        }
-      }
-      if (nextLoop.length >= 3) {
-        current = nextLoop;
-      }
-    }
-    return current;
-  };
-
   const finalFaces: MeshFace[] = [];
   let simplifiedClusterCount = 0;
 
@@ -1133,6 +1103,65 @@ export function dissolveCoplanarFaces(
       faceIndices.forEach(fi => finalFaces.push({ indices: triFaces[fi] }));
       return;
     }
+
+    const clusterFaceSet = new Set(faceIndices);
+
+    // CRITICAL: A vertex CAN ONLY be simplified/dropped if ALL its referencing faces in the mesh belong strictly to this cluster!
+    // If an adjacent face outside the cluster uses vertex v, v MUST be preserved on the boundary to prevent holes/disconnected sides!
+    const isVertexPurelyInternalToCluster = (vIdx: number) => {
+      const facesUsingV = vertToFaces.get(vIdx);
+      if (!facesUsingV) return true;
+      for (const f of facesUsingV) {
+        if (!clusterFaceSet.has(f)) return false; // Used by adjacent neighbor face -> MUST BE KEPT!
+      }
+      return true;
+    };
+
+    // Helper to remove redundant collinear vertices along straight perimeter edges
+    const simplifyCollinear = (loopIndices: number[], collinearDeg = 3.5): number[] => {
+      if (loopIndices.length <= 3) return loopIndices;
+      const cosCollinear = Math.cos((collinearDeg * Math.PI) / 180);
+      let current = [...loopIndices];
+      let changed = true;
+      let pass = 0;
+
+      while (changed && current.length > 3 && pass < 10) {
+        changed = false;
+        pass++;
+        const nextLoop: number[] = [];
+        const n = current.length;
+
+        for (let i = 0; i < n; i++) {
+          const prevIdx = current[(i - 1 + n) % n];
+          const currIdx = current[i];
+          const nextIdx = current[(i + 1) % n];
+
+          // Never drop currIdx if it is used by any face outside this cluster!
+          if (!isVertexPurelyInternalToCluster(currIdx)) {
+            nextLoop.push(currIdx);
+            continue;
+          }
+
+          const pA = vertVectors[prevIdx];
+          const pB = vertVectors[currIdx];
+          const pC = vertVectors[nextIdx];
+
+          const d1 = new THREE.Vector3().subVectors(pB, pA).normalize();
+          const d2 = new THREE.Vector3().subVectors(pC, pB).normalize();
+
+          // If d1 and d2 have the exact same direction (angle between them < collinearDeg)
+          if (d1.dot(d2) >= cosCollinear) {
+            changed = true; // Skip point pB as it's redundant along the straight border
+          } else {
+            nextLoop.push(currIdx);
+          }
+        }
+        if (nextLoop.length >= 3) {
+          current = nextLoop;
+        }
+      }
+      return current;
+    };
 
     // Multi-triangle cluster: extract directed boundary edges
     const directedEdgeCount = new Map<string, { from: number; to: number; count: number }>();
@@ -1241,9 +1270,9 @@ export function dissolveCoplanarFaces(
     let clusterSuccess = true;
     const clusterNewFaces: MeshFace[] = [];
 
-    // Process each boundary loop into a clean planar Quad / N-gon face
+    // Process each boundary loop into clean planar faces
     loops.forEach(rawLoop => {
-      // Simplify collinear points along straight borders
+      // Simplify collinear points along straight borders (only if not used by outside faces)
       const simplifiedLoop = simplifyCollinear(rawLoop, Math.max(1.0, angleToleranceDeg));
       if (simplifiedLoop.length < 3) return;
 
@@ -1263,7 +1292,28 @@ export function dissolveCoplanarFaces(
         ? [...simplifiedLoop]
         : [...simplifiedLoop].reverse();
 
-      clusterNewFaces.push({ indices: orientedIndices });
+      if (orientedIndices.length === 3) {
+        clusterNewFaces.push({ indices: orientedIndices });
+      } else if (orientedIndices.length === 4) {
+        clusterNewFaces.push({ indices: orientedIndices });
+      } else {
+        // Robust 2D planar triangulation for N-gons to prevent non-manifold rendering gaps
+        const pts2D = orientedIndices.map(vi => {
+          const p = vertVectors[vi];
+          return { x: p.dot(U), y: p.dot(V) };
+        });
+        const triIndices = triangulate2D(pts2D);
+        if (triIndices.length > 0) {
+          triIndices.forEach(([t0, t1, t2]) => {
+            clusterNewFaces.push({
+              indices: [orientedIndices[t0], orientedIndices[t1], orientedIndices[t2]]
+            });
+          });
+        } else {
+          // Keep N-gon face
+          clusterNewFaces.push({ indices: orientedIndices });
+        }
+      }
     });
 
     if (clusterSuccess && clusterNewFaces.length > 0 && clusterNewFaces.length < faceIndices.length) {

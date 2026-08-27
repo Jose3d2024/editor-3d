@@ -333,6 +333,7 @@ interface Store extends AppState {
   regularizeObject: (id: string, strength?: number, iterations?: number, featureAngleDeg?: number) => Promise<void>;
   isotropicRemeshObject: (id: string, targetEdgeLength?: number, iterations?: number) => Promise<void>;
   dissolveCoplanarObject: (id: string, angleToleranceDeg?: number) => Promise<void>;
+  optimizeCurvedObject: (id: string, ratio?: number, options?: { preserveCreases?: boolean; creaseAngleDeg?: number }) => Promise<void>;
   cleanIslandsObject: (id: string, minRatio?: number) => Promise<void>;
   offsetObject: (id: string, distance: number) => Promise<void>;
   repairObject: (id: string, tolerance?: number) => Promise<void>;
@@ -1586,25 +1587,24 @@ export const useStore = create<Store>()((set, get) => ({
   extrudeShape: (id, depth, axis = 'y') => {
     const { project } = get();
     const obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
 
-    // ── FIX: acepta SHAPE, PLANE, RING, CIRCLE ──────────────────
-    const extrudableTypes: string[] = ['SHAPE', 'PLANE', 'RING', 'CIRCLE'];
-    if (!obj || !extrudableTypes.includes(obj.type)) return;
-
-    let vertices: V3[];
-    let faces: MeshFace[];
+    let vertices: V3[] = [];
+    let faces: MeshFace[] = [];
     let profilePoints: V3[] | undefined;
 
-    if (obj.type === 'SHAPE') {
-      // ── SHAPE: usa el perfil 2D dibujado por el usuario ─────────
+    const isWireOrShape = obj.type === 'SHAPE' || !obj.faces || obj.faces.length === 0;
+
+    if (isWireOrShape && obj.vertices && obj.vertices.length >= 2) {
+      // ── Perfil 2D / Polilínea / Curva / Forma Plana ─────────
       const rawVerts = obj.vertices.map((v, i) => {
         const off = obj.vertexOffsets?.[i] ?? [0, 0, 0];
         return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
       });
 
-      const isBezier = obj.parameters.shapeType === 'bezier' && !!obj.bezierHandles?.length;
-      let isClosed = obj.parameters.closed ?? false;
-      const segs = Math.max(4, obj.parameters.segments ?? 20);
+      const isBezier = obj.parameters?.shapeType === 'bezier' && !!obj.bezierHandles?.length;
+      let isClosed = obj.parameters?.closed ?? (obj.type === 'SHAPE' ? (obj.parameters?.closed ?? false) : true);
+      const segs = Math.max(4, obj.parameters?.segments ?? 20);
 
       let profile: V3[];
       if (isBezier && obj.bezierHandles) {
@@ -1627,94 +1627,97 @@ export const useStore = create<Store>()((set, get) => ({
       }
 
       const n = profile.length;
-      if (n < 2) { console.warn('extrudeShape: insufficient profile points'); return; }
+      if (n >= 2) {
+        const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+        const ext: V3 = [0, 0, 0];
+        ext[axisIdx] = depth;
 
-      const axisIdx = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
-      const ext: V3 = [0, 0, 0];
-      ext[axisIdx] = depth;
+        vertices = [
+          ...profile,
+          ...profile.map(v => [v[0] + ext[0], v[1] + ext[1], v[2] + ext[2]] as V3),
+        ];
 
-      vertices = [
-        ...profile,
-        ...profile.map(v => [v[0] + ext[0], v[1] + ext[1], v[2] + ext[2]] as V3),
-      ];
+        faces = [];
+        const isNegative = depth < 0;
 
-      faces = [];
-      const isNegative = depth < 0;
+        if (isClosed && n >= 3) {
+          // Closed solid volume with side quads + triangulated end caps
+          for (let i = 0; i < n; i++) {
+            const j = (i + 1) % n;
+            if (isNegative) {
+              faces.push({ indices: [i, i + n, j + n, j] });
+            } else {
+              faces.push({ indices: [i, j, j + n, i + n] });
+            }
+          }
 
-      if (isClosed && n >= 3) {
-        // Closed solid volume with side quads + triangulated end caps
-        for (let i = 0; i < n; i++) {
-          const j = (i + 1) % n;
-          if (isNegative) {
-            faces.push({ indices: [i, i + n, j + n, j] });
+          // Create clean N-gon planar end caps without diagonal internal wireframe lines
+          const uIdx = axis === 'x' ? 1 : 0;
+          const vIdx = axis === 'x' ? 2 : (axis === 'y' ? 2 : 1);
+          const pts2D = profile.map(p => new THREE.Vector2(p[uIdx], p[vIdx]));
+          const isCCW = !THREE.ShapeUtils.isClockWise(pts2D);
+
+          const cap1Indices: number[] = [];
+          const cap2Indices: number[] = [];
+
+          if ((!isCCW && !isNegative) || (isCCW && isNegative)) {
+            for (let k = 0; k < n; k++) {
+              cap1Indices.push(n - 1 - k);
+              cap2Indices.push(k + n);
+            }
           } else {
-            faces.push({ indices: [i, j, j + n, i + n] });
+            for (let k = 0; k < n; k++) {
+              cap1Indices.push(k);
+              cap2Indices.push(2 * n - 1 - k);
+            }
           }
-        }
 
-        // Create clean N-gon planar end caps without diagonal internal wireframe lines
-        const uIdx = axis === 'x' ? 1 : 0;
-        const vIdx = axis === 'x' ? 2 : (axis === 'y' ? 2 : 1);
-        const pts2D = profile.map(p => new THREE.Vector2(p[uIdx], p[vIdx]));
-        const isCCW = !THREE.ShapeUtils.isClockWise(pts2D);
-
-        const cap1Indices: number[] = [];
-        const cap2Indices: number[] = [];
-
-        if ((!isCCW && !isNegative) || (isCCW && isNegative)) {
-          for (let k = 0; k < n; k++) {
-            cap1Indices.push(n - 1 - k);
-            cap2Indices.push(k + n);
-          }
+          faces.push({ indices: cap1Indices });
+          faces.push({ indices: cap2Indices });
         } else {
-          for (let k = 0; k < n; k++) {
-            cap1Indices.push(k);
-            cap2Indices.push(2 * n - 1 - k);
+          // Open line / polyline: extrude as a 3D curved surface / strip
+          for (let i = 0; i < n - 1; i++) {
+            const j = i + 1;
+            if (isNegative) {
+              faces.push({ indices: [i, i + n, j + n, j] });
+            } else {
+              faces.push({ indices: [i, j, j + n, i + n] });
+            }
           }
         }
 
-        faces.push({ indices: cap1Indices });
-        faces.push({ indices: cap2Indices });
-      } else {
-        // Open line / polyline: extrude as a 3D curved surface / strip
-        for (let i = 0; i < n - 1; i++) {
-          const j = i + 1;
-          if (isNegative) {
-            faces.push({ indices: [i, i + n, j + n, j] });
-          } else {
-            faces.push({ indices: [i, j, j + n, i + n] });
-          }
-        }
+        profilePoints = profile;
       }
+    }
 
-      profilePoints = profile;
-
-    } else {
-      // ── PLANE / RING / CIRCLE: extrude sólido genérico ──────────
+    if (vertices.length === 0 || faces.length === 0) {
+      // ── Sólido genérico / Primitiva / Objeto importado ──────────
       let tempObj = { ...obj };
       if (!tempObj.vertices || tempObj.vertices.length === 0) {
-        // Generar vértices/caras desde la primitiva si no existen
+        // Generar vértices/caras desde la geometría si no existen
         const geo = createBaseGeometry(tempObj);
         const pos = geo.getAttribute('position') as THREE.BufferAttribute;
         const index = geo.getIndex();
         
         const verts: V3[] = [];
-        for (let i = 0; i < pos.count; i++) {
-          verts.push([pos.getX(i), pos.getY(i), pos.getZ(i)] as V3);
+        if (pos) {
+          for (let i = 0; i < pos.count; i++) {
+            verts.push([pos.getX(i), pos.getY(i), pos.getZ(i)] as V3);
+          }
         }
         
-        const faces: MeshFace[] = [];
+        const fList: MeshFace[] = [];
         if (index) {
           for (let i = 0; i < index.count; i += 3) {
-            faces.push({ indices: [index.getX(i), index.getX(i + 1), index.getX(i + 2)] });
+            fList.push({ indices: [index.getX(i), index.getX(i + 1), index.getX(i + 2)] });
           }
-        } else {
+        } else if (pos) {
           for (let i = 0; i < pos.count; i += 3) {
-            faces.push({ indices: [i, i + 1, i + 2] });
+            fList.push({ indices: [i, i + 1, i + 2] });
           }
         }
         tempObj.vertices = verts;
-        tempObj.faces = faces;
+        tempObj.faces = fList;
       }
 
       const result = solidExtrudeMesh(tempObj, depth, axis);
@@ -2537,6 +2540,73 @@ export const useStore = create<Store>()((set, get) => ({
       }));
     } catch (e) {
       console.error('Error disolviendo caras coplanares:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  optimizeCurvedObject: async (id, ratio = 0.5, options = { preserveCreases: true, creaseAngleDeg: 40 }) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
+    const initialFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Optimización de Figuras Curvas & Tubulares',
+        subtitle: 'Decimando pasos redundantes y preservando redondez...',
+        progress: 35,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (obj.meshData) obj = await convertImportedToCSG(obj);
+      if (!obj.vertices || obj.vertices.length === 0) {
+        const { fromThreeGeometry } = await import('../utils/modifiers');
+        const geo = createBaseGeometry(obj);
+        const res = fromThreeGeometry(geo);
+        obj = {
+          ...obj,
+          vertices: res.vertices,
+          faces: res.faces,
+        };
+      }
+      const { optimizeCurvedMesh } = await import('../utils/modifiers_advanced');
+      const result = await optimizeCurvedMesh(obj, ratio, options);
+
+      const updatedObj: CSGObject = {
+        ...obj,
+        type: 'MESH',
+        parameters: {},
+        meshData: undefined,
+        vertices: result.vertices,
+        faces: result.faces,
+        vertexOffsets: {},
+        smoothShading: true,
+        stats: { vertices: result.vertices.length, faces: result.faces.length }
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory();
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Optimización de curvas completada! (${result.report.join(' · ')})`,
+          completed: true,
+          finalVertCount: result.vertices.length,
+          finalFaceCount: result.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error optimizando figuras curvas:', e);
       set({ meshProcessing: null });
     }
   },

@@ -5,6 +5,7 @@ import {
   Check, SlidersHorizontal, Sparkles, Sun, Eye, Layers 
 } from 'lucide-react';
 import { adjustTextureColors, AlbedoColorAdjustments } from '../utils/textureColorUtils';
+import { safeFixed } from '../utils/numberUtils';
 
 interface MapEditorModalProps {
   title: string;
@@ -328,7 +329,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                     <div className="space-y-1">
                       <div className="flex justify-between items-center text-[9px]">
                         <label className="text-zinc-400 font-semibold">Intensidad Tinte</label>
-                        <span className="font-mono text-indigo-400 font-bold">{(tintAmount * 100).toFixed(0)}%</span>
+                        <span className="font-mono text-indigo-400 font-bold">{safeFixed(tintAmount * 100, 0)}%</span>
                       </div>
                       <input 
                         type="range" min="0" max="1" step="0.02"
@@ -363,7 +364,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400 font-semibold">Saturación</span>
-                      <span className="font-mono text-zinc-200">{(saturation * 100).toFixed(0)}%</span>
+                      <span className="font-mono text-zinc-200">{safeFixed(saturation * 100, 0)}%</span>
                     </div>
                     <input 
                       type="range" min="0" max="2" step="0.05"
@@ -377,7 +378,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400 font-semibold">Brillo</span>
-                      <span className="font-mono text-zinc-200">{(brightness * 100).toFixed(0)}%</span>
+                      <span className="font-mono text-zinc-200">{safeFixed(brightness * 100, 0)}%</span>
                     </div>
                     <input 
                       type="range" min="0" max="2" step="0.05"
@@ -391,7 +392,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400 font-semibold">Contraste</span>
-                      <span className="font-mono text-zinc-200">{(contrast * 100).toFixed(0)}%</span>
+                      <span className="font-mono text-zinc-200">{safeFixed(contrast * 100, 0)}%</span>
                     </div>
                     <input 
                       type="range" min="0" max="2" step="0.05"
@@ -434,7 +435,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="p-3.5 bg-white/5 rounded-xl border border-white/5 space-y-2">
                     <div className="flex justify-between items-center">
                       <span className="text-[10px] text-zinc-300 font-bold uppercase">Intensidad del Mapa</span>
-                      <span className="text-[10px] font-mono text-indigo-400">{(intensity || 0).toFixed(2)}</span>
+                      <span className="text-[10px] font-mono text-indigo-400">{safeFixed(intensity, 2)}</span>
                     </div>
                     <input 
                       type="range" 
@@ -467,12 +468,12 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400">Repetir X</span>
-                      <span className="font-mono text-indigo-400">{repeat[0].toFixed(1)}x</span>
+                      <span className="font-mono text-indigo-400">{safeFixed(repeat?.[0], 1)}x</span>
                     </div>
                     <input 
                       type="range" min="0.1" max="10" step="0.1" 
-                      value={repeat[0]} 
-                      onChange={(e) => onRepeatChange?.([parseFloat(e.target.value), repeat[1]])}
+                      value={repeat?.[0] ?? 1} 
+                      onChange={(e) => onRepeatChange?.([parseFloat(e.target.value), repeat?.[1] ?? 1])}
                       className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
                   </div>
@@ -481,12 +482,12 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400">Repetir Y</span>
-                      <span className="font-mono text-indigo-400">{repeat[1].toFixed(1)}x</span>
+                      <span className="font-mono text-indigo-400">{safeFixed(repeat?.[1], 1)}x</span>
                     </div>
                     <input 
                       type="range" min="0.1" max="10" step="0.1" 
-                      value={repeat[1]} 
-                      onChange={(e) => onRepeatChange?.([repeat[0], parseFloat(e.target.value)])}
+                      value={repeat?.[1] ?? 1} 
+                      onChange={(e) => onRepeatChange?.([repeat?.[0] ?? 1, parseFloat(e.target.value)])}
                       className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
                   </div>
@@ -495,12 +496,12 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400">Desplazamiento X</span>
-                      <span className="font-mono text-indigo-400">{offset[0].toFixed(2)}</span>
+                      <span className="font-mono text-indigo-400">{safeFixed(offset?.[0], 2)}</span>
                     </div>
                     <input 
                       type="range" min="-1" max="1" step="0.01" 
-                      value={offset[0]} 
-                      onChange={(e) => onOffsetChange?.([parseFloat(e.target.value), offset[1]])}
+                      value={offset?.[0] ?? 0} 
+                      onChange={(e) => onOffsetChange?.([parseFloat(e.target.value), offset?.[1] ?? 0])}
                       className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
                   </div>
@@ -509,7 +510,7 @@ export const MapEditorModal: React.FC<MapEditorModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex justify-between items-center text-[9px]">
                       <span className="text-zinc-400">Desplazamiento Y</span>
-                      <span className="font-mono text-indigo-400">{offset[1].toFixed(2)}</span>
+                      <span className="font-mono text-indigo-400">{safeFixed(offset?.[1], 2)}</span>
                     </div>
                     <input 
                       type="range" min="-1" max="1" step="0.01" 

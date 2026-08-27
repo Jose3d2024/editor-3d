@@ -1,6 +1,7 @@
 import React from 'react';
 import { useStore } from '../store/useStore';
 import { Layers, Loader2, Sparkles, Box, Cpu, CheckCircle2, TrendingDown } from 'lucide-react';
+import { safeFixed } from '../utils/numberUtils';
 
 export const MeshProgressModal: React.FC = () => {
   const meshProcessing = useStore(state => state.meshProcessing);
@@ -20,11 +21,11 @@ export const MeshProgressModal: React.FC = () => {
   let faceReductionStr = '';
   if (completed && vertCount && finalVertCount !== undefined) {
     const vDiff = ((finalVertCount - vertCount) / vertCount) * 100;
-    vertReductionStr = `${vDiff > 0 ? '+' : ''}${vDiff.toFixed(1)}%`;
+    vertReductionStr = `${vDiff > 0 ? '+' : ''}${safeFixed(vDiff, 1)}%`;
   }
   if (completed && faceCount && finalFaceCount !== undefined) {
     const fDiff = ((finalFaceCount - faceCount) / faceCount) * 100;
-    faceReductionStr = `${fDiff > 0 ? '+' : ''}${fDiff.toFixed(1)}%`;
+    faceReductionStr = `${fDiff > 0 ? '+' : ''}${safeFixed(fDiff, 1)}%`;
   }
 
   return (

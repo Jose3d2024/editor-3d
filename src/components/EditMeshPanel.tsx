@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore';
 import { CSGObject } from '../types';
 import { WireframeModal } from './WireframeModal';
 import { extractUniqueEdges } from '../utils/wireframeMesh';
+import { safeFixed } from '../utils/numberUtils';
 import {
   Scissors,
   Layers,
@@ -71,6 +72,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
     dissolveSelectedEdges,
     deleteSelectedEdges,
     dissolveCoplanarObject,
+    optimizeCurvedObject,
     healObject,
     convertToWireframe,
     removeAllFaces,
@@ -516,7 +518,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           <div className="space-y-1.5 p-2 bg-zinc-900/60 rounded-lg border border-indigo-500/20">
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-zinc-400">Radio de Bisel:</span>
-              <span className="font-mono text-indigo-300">{bevelRadius.toFixed(2)}m</span>
+              <span className="font-mono text-indigo-300">{safeFixed(bevelRadius, 2)}m</span>
             </div>
             <input
               type="range"
@@ -573,7 +575,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
               <div>
                 <div className="flex justify-between text-zinc-400 mb-0.5">
                   <span>Deslizar:</span>
-                  <span className="font-mono text-cyan-300">{loopCutSlide.toFixed(2)}</span>
+                  <span className="font-mono text-cyan-300">{safeFixed(loopCutSlide, 2)}</span>
                 </div>
                 <input
                   type="range"
@@ -685,7 +687,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           <div className="space-y-1.5 p-2 bg-zinc-900/60 rounded-lg border border-amber-500/20">
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-zinc-400">Distancia Extrusión:</span>
-              <span className="font-mono text-amber-300">{extrudeAmount.toFixed(2)}m</span>
+              <span className="font-mono text-amber-300">{safeFixed(extrudeAmount, 2)}m</span>
             </div>
             <input
               type="range"
@@ -739,7 +741,7 @@ export const EditMeshPanel: React.FC<EditMeshPanelProps> = ({ object: propObject
           <div className="space-y-1.5 p-2 bg-zinc-900/60 rounded-lg border border-amber-500/20">
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-zinc-400">Factor Inset:</span>
-              <span className="font-mono text-amber-300">{insetAmount.toFixed(2)}</span>
+              <span className="font-mono text-amber-300">{safeFixed(insetAmount, 2)}</span>
             </div>
             <input
               type="range"

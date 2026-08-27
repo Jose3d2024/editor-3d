@@ -40,9 +40,10 @@ import {
   ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route,
   Spline, Waves, Orbit, Sparkles, RefreshCw, RotateCcw, ArrowRightLeft, GitMerge, FileDigit,
   SlidersHorizontal, Keyboard, Scissors, Combine, ArrowLeftRight, Cloud, Wind, Flame, Zap,
-  Activity, Shield, Magnet, Disc, Droplets
+  Activity, Shield, Magnet, Disc, Droplets, Lock, Unlock, CircleDot
 } from 'lucide-react';
 import { UnifiedBooleanOp } from '../utils/booleanOperations';
+import { safeFixed, safeNum, safeParseFixed } from '../utils/numberUtils';
 import { VOLUMETRIC_PRESETS, DEFAULT_VOLUMETRIC_CONFIG } from '../utils/volumetricRaymarch';
 import { DEFAULT_PARTICLE_CONFIG, DEFAULT_SPACE_WARP_CONFIG, PARTICLE_PRESETS, SPACE_WARP_PRESETS } from '../utils/particleSystem';
 import { DEFAULT_GPGPU_SWARM_CONFIG, GPGPU_SWARM_PRESETS } from '../utils/gpgpuSwarm';
@@ -180,7 +181,7 @@ export const NumRow: React.FC<{
           className="flex-1 h-1.5 accent-indigo-500 bg-zinc-800 rounded-full appearance-none cursor-pointer"
         />
         <span className="text-[10px] text-indigo-400 font-mono w-12 text-right flex-shrink-0 font-bold bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20">
-          {value % 1 === 0 ? value : value.toFixed(2)}{unit ?? ''}
+          {safeNum(value) % 1 === 0 ? safeNum(value) : safeFixed(value, 2)}{unit ?? ''}
         </span>
       </div>
     ) : (
@@ -202,39 +203,67 @@ const XYZRow: React.FC<{
   onChange: (v: [number, number, number]) => void;
   step?: number;
   min?: number;
-}> = ({ label, values, onChange, step = 0.01, min }) => (
-  <div className="space-y-2">
-    <div className="flex items-center justify-between">
-      <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-600">{label}</span>
+  lockable?: boolean;
+}> = ({ label, values, onChange, step = 0.01, min, lockable = label.toLowerCase().includes('escala') || label.toLowerCase().includes('scale') }) => {
+  const [locked, setLocked] = useState(false);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-zinc-600">{label}</span>
+        {lockable && (
+          <button
+            type="button"
+            onClick={() => setLocked(!locked)}
+            className={`flex items-center gap-1 text-[8.5px] px-1.5 py-0.5 rounded transition-all cursor-pointer ${
+              locked ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 font-bold' : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+            title={locked ? 'Desbloquear ejes para escalar por separado' : 'Bloquear ejes para escalar conjuntamente'}
+          >
+            {locked ? <Lock size={10} /> : <Unlock size={10} />}
+            <span>{locked ? 'Vinculado' : 'Libre'}</span>
+          </button>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {(['X', 'Y', 'Z'] as const).map((axis, i) => (
+          <div key={axis} className="relative group">
+            <div className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-1 h-3 rounded-full ${i===0?'bg-rose-500':i===1?'bg-emerald-500':'bg-sky-500'} opacity-50 group-focus-within:opacity-100 transition-opacity`}/>
+            <input
+              type="number" value={values[i]} step={step} min={min}
+              onChange={e => {
+                const v = parseFloat(e.target.value);
+                if (!isNaN(v)) {
+                  if (locked) {
+                    const ratio = values[i] !== 0 ? v / values[i] : 1;
+                    const next: [number, number, number] = [
+                      i === 0 ? v : values[0] * ratio,
+                      i === 1 ? v : values[1] * ratio,
+                      i === 2 ? v : values[2] * ratio
+                    ];
+                    onChange(next);
+                  } else {
+                    const next = [...values] as [number, number, number];
+                    next[i] = v;
+                    onChange(next);
+                  }
+                }
+              }}
+              className="w-full pl-5 pr-2 py-2 bg-zinc-900/50 border border-white/5 rounded-lg text-[10px] text-zinc-200 font-mono focus:outline-none focus:border-indigo-500/50 focus:bg-zinc-800 transition-all shadow-inner min-w-0"
+            />
+          </div>
+        ))}
+      </div>
     </div>
-    <div className="grid grid-cols-3 gap-2">
-      {(['X', 'Y', 'Z'] as const).map((axis, i) => (
-        <div key={axis} className="relative group">
-          <div className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-1 h-3 rounded-full ${i===0?'bg-rose-500':i===1?'bg-emerald-500':'bg-sky-500'} opacity-50 group-focus-within:opacity-100 transition-opacity`}/>
-          <input
-            type="number" value={values[i]} step={step} min={min}
-            onChange={e => {
-              const v = parseFloat(e.target.value);
-              if (!isNaN(v)) {
-                const next = [...values] as [number, number, number];
-                next[i] = v;
-                onChange(next);
-              }
-            }}
-            className="w-full pl-5 pr-2 py-2 bg-zinc-900/50 border border-white/5 rounded-lg text-[10px] text-zinc-200 font-mono focus:outline-none focus:border-indigo-500/50 focus:bg-zinc-800 transition-all shadow-inner min-w-0"
-          />
-        </div>
-      ))}
-    </div>
-  </div>
-);
+  );
+};
 
 const RotationXYZRow: React.FC<{
   label: string;
   values: [number, number, number];
   onChange: (v: [number, number, number]) => void;
 }> = ({ label, values, onChange }) => {
-  const degrees = values.map(r => parseFloat(((r * 180) / Math.PI).toFixed(1))) as [number, number, number];
+  const degrees = (values || [0, 0, 0]).map(r => safeParseFixed((safeNum(r) * 180) / Math.PI, 1)) as [number, number, number];
 
   const handleDegChange = (axisIdx: number, degVal: number) => {
     const nextRads = [...values] as [number, number, number];
@@ -580,7 +609,7 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                             ? 'bg-amber-500 text-zinc-950 ring-2 ring-amber-300'
                             : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                         }`}
-                        title={`Punto [${rIdx},${cIdx}] (x:${cp.point[0].toFixed(1)}, y:${cp.point[1].toFixed(1)}, z:${cp.point[2].toFixed(1)}, w:${cp.weight.toFixed(2)})`}
+                        title={`Punto [${rIdx},${cIdx}] (x:${safeFixed(cp?.point?.[0], 1)}, y:${safeFixed(cp?.point?.[1], 1)}, z:${safeFixed(cp?.point?.[2], 1)}, w:${safeFixed(cp?.weight, 2)})`}
                       >
                         {rIdx},{cIdx}
                       </button>
@@ -605,7 +634,7 @@ const NurbsSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
                     }`}
                   >
-                    P{idx} (w:{cp.weight.toFixed(1)})
+                    P{idx} (w:{safeFixed(cp?.weight, 1)})
                   </button>
                 );
               })}
@@ -2085,6 +2114,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     subdivideObject,
     applyNoiseObject,
     optimizeObject,
+    optimizeCurvedObject,
     regularizeObject,
     isotropicRemeshObject,
     dissolveCoplanarObject,
@@ -2122,6 +2152,10 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [remeshIters, setRemeshIters] = useState(2);
   const [coplanarTolerance, setCoplanarTolerance] = useState(3.5);
   const [islandRatio, setIslandRatio] = useState(0.05);
+
+  // Estados de Optimización de Curvas & Redondeados (Esferas, Tubos, Cilindros)
+  const [curvedOptRatio, setCurvedOptRatio] = useState(0.4);
+  const [curvedPreserveCreases, setCurvedPreserveCreases] = useState(true);
 
   // Estados del Deformador de Malla por Ruido
   const [noiseType, setNoiseType] = useState<MeshNoiseType>('VORONOI_CELLULAR');
@@ -2639,6 +2673,77 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               </button>
             </div>
           </div>
+
+          {/* Tarjeta de Optimización de Curvas & Redondeados (Esferas, Tubos, Cilindros) */}
+          <div className="space-y-2 bg-zinc-950/70 border border-cyan-500/30 p-2.5 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span className="text-[10px] text-cyan-300 font-bold tracking-tight">
+                  Optimizar Curvas & Redondeados
+                </span>
+              </div>
+              <span className="text-[9px] font-mono font-bold bg-cyan-950/80 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-600/40">
+                {Math.round(curvedOptRatio * 100)}% ({Math.round((1 - curvedOptRatio) * 100)}% menos)
+              </span>
+            </div>
+            
+            <p className="text-[8.5px] text-zinc-400 leading-tight">
+              Especial para esferas, tubos, cilindros y curvaturas: decima pasos redundantes y calcula normales suaves sin perder la redondez.
+            </p>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[9px] text-zinc-400">
+                <span>Ratio de Polígonos Retenidos</span>
+                <span className="font-mono text-cyan-300">{Math.round(curvedOptRatio * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min={0.05}
+                max={0.90}
+                step={0.05}
+                value={curvedOptRatio}
+                onChange={(e) => setCurvedOptRatio(parseFloat(e.target.value))}
+                className="w-full h-1.5 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+              />
+              <div className="grid grid-cols-4 gap-1 pt-0.5">
+                {[0.20, 0.40, 0.60, 0.80].map(r => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setCurvedOptRatio(r)}
+                    className={`py-0.5 text-[8px] font-mono font-bold rounded transition-colors cursor-pointer ${
+                      curvedOptRatio === r
+                        ? 'bg-cyan-600 text-white'
+                        : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {Math.round(r * 100)}%
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={curvedPreserveCreases}
+                  onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
+                  className="accent-cyan-500 w-3 h-3 rounded"
+                />
+                <span>Proteger tapas y aristas vivas</span>
+              </label>
+              <button
+                type="button"
+                onClick={() => optimizeCurvedObject(obj.id, curvedOptRatio, { preserveCreases: curvedPreserveCreases })}
+                className="py-1 px-2.5 bg-gradient-to-r from-cyan-700 to-cyan-600 hover:from-cyan-600 hover:to-cyan-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer"
+                title="Optimiza esferas, tubos y geometrías curvadas reduciendo pasos poligonales redundantes"
+              >
+                ⭕ Optimizar Curvas
+              </button>
+            </div>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-1 pt-1">
@@ -2659,25 +2764,31 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   );
 };
 
-// ─── OPTIMIZACIÓN Y DECIMACIÓN DE MALLA ──────────────────────────────────────────
+/// ─── OPTIMIZACIÓN Y DECIMACIÓN DE MALLA ──────────────────────────────────────────
 const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const {
     optimizeObject,
+    optimizeCurvedObject,
     selectedGLTFMeshes,
     setSelectedGLTFMeshes,
     isolateGLTFSelection,
     setIsolateGLTFSelection
   } = useStore();
 
+  const [optTab, setOptTab] = useState<'ALL' | 'CURVED'>('ALL');
   const [optimizeRatio, setOptimizeRatio] = useState(0.3);
+  const [curvedRatio, setCurvedRatio] = useState(0.4);
+  const [curvedPreserveCreases, setCurvedPreserveCreases] = useState(true);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [meshSortMode, setMeshSortMode] = useState<'desc' | 'asc' | 'default'>('desc');
   const [meshSearch, setMeshSearch] = useState('');
 
   const currentVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
   const currentFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
-  const targetFacesEst = Math.max(4, Math.round(currentFaces * optimizeRatio));
-  const reductionPercent = Math.round((1 - optimizeRatio) * 100);
+  
+  const activeRatio = optTab === 'ALL' ? optimizeRatio : curvedRatio;
+  const targetFacesEst = Math.max(4, Math.round(currentFaces * activeRatio));
+  const reductionPercent = Math.round((1 - activeRatio) * 100);
 
   const sortedAndFilteredMeshes = useMemo(() => {
     if (!obj.meshData?.meshes) return [];
@@ -2732,7 +2843,11 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const handleExecuteOptimize = async () => {
     setIsOptimizing(true);
     try {
-      await optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined);
+      if (optTab === 'CURVED') {
+        await optimizeCurvedObject(obj.id, curvedRatio, { preserveCreases: curvedPreserveCreases });
+      } else {
+        await optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined);
+      }
     } finally {
       setIsOptimizing(false);
     }
@@ -2741,82 +2856,165 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   return (
     <Section title="Optimizar Malla (Decimación)" icon={<Zap size={12} className="text-violet-400" />}>
       <div className="space-y-2.5">
+        {/* Selector de Modo */}
+        <div className="grid grid-cols-2 gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
+          <button
+            type="button"
+            onClick={() => setOptTab('ALL')}
+            className={`py-1 text-[9.5px] font-bold rounded-md transition-all cursor-pointer ${
+              optTab === 'ALL'
+                ? 'bg-violet-600 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            ⚡ General / Partes
+          </button>
+          <button
+            type="button"
+            onClick={() => setOptTab('CURVED')}
+            className={`py-1 text-[9.5px] font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              optTab === 'CURVED'
+                ? 'bg-cyan-600 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-cyan-300'
+            }`}
+          >
+            ⭕ Curvas & Tubos
+          </button>
+        </div>
+
         {/* Resumen de Polígonos Actuales vs Estimados */}
-        <div className="grid grid-cols-2 gap-1.5 p-2 bg-zinc-950/70 border border-violet-500/30 rounded-lg">
+        <div className={`grid grid-cols-2 gap-1.5 p-2 bg-zinc-950/70 border rounded-lg ${
+          optTab === 'CURVED' ? 'border-cyan-500/30' : 'border-violet-500/30'
+        }`}>
           <div className="flex flex-col">
             <span className="text-[9px] uppercase font-bold text-zinc-400">Polígonos Actuales</span>
             <span className="text-[12px] font-mono font-bold text-zinc-200">{currentFaces.toLocaleString()} caras</span>
             <span className="text-[8.5px] text-zinc-500">{currentVerts.toLocaleString()} vértices</span>
           </div>
           <div className="flex flex-col items-end">
-            <span className="text-[9px] uppercase font-bold text-violet-400">Objetivo Estimado</span>
-            <span className="text-[12px] font-mono font-bold text-violet-300">~{targetFacesEst.toLocaleString()} caras</span>
+            <span className={`text-[9px] uppercase font-bold ${optTab === 'CURVED' ? 'text-cyan-400' : 'text-violet-400'}`}>
+              Objetivo Estimado
+            </span>
+            <span className={`text-[12px] font-mono font-bold ${optTab === 'CURVED' ? 'text-cyan-300' : 'text-violet-300'}`}>
+              ~{targetFacesEst.toLocaleString()} caras
+            </span>
             <span className="text-[8.5px] font-bold text-emerald-400">-{reductionPercent}% reducción</span>
           </div>
         </div>
 
-        {/* Control Principal del Slider */}
-        <div className="space-y-1 bg-zinc-900/80 p-2 rounded-lg border border-zinc-800">
-          <div className="flex items-center justify-between text-[10px]">
-            <span className="text-zinc-300 font-bold">
-              {selectedGLTFMeshes.length > 0 ? 'Ratio Retenido (Selección)' : 'Ratio Retenido (Completo)'}
-            </span>
-            <span className="font-mono text-violet-300 font-bold">{Math.round(optimizeRatio * 100)}%</span>
-          </div>
-          
-          <input
-            type="range"
-            min={0.01}
-            max={0.95}
-            step={0.01}
-            value={optimizeRatio}
-            onChange={(e) => setOptimizeRatio(parseFloat(e.target.value))}
-            className="w-full h-1.5 accent-violet-500 bg-zinc-800 rounded cursor-pointer"
-          />
+        {optTab === 'CURVED' ? (
+          /* Modo Curvaturas: Esferas, Tubos, Cilindros */
+          <div className="space-y-2 bg-zinc-900/80 p-2.5 rounded-lg border border-cyan-500/30">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-cyan-300 font-bold">Ratio de Conservación Radial</span>
+              <span className="font-mono text-cyan-300 font-bold">{Math.round(curvedRatio * 100)}%</span>
+            </div>
+            
+            <p className="text-[8.5px] text-zinc-400 leading-tight">
+              Diseñado para esferas, cilindros, filetes y tubos de alta densidad poligonal: elimina los pasos angulares redundantes manteniendo la curvatura y redondez.
+            </p>
 
-          {/* Botones Rápidos de Porcentaje */}
-          <div className="grid grid-cols-4 gap-1 pt-1">
-            <button
-              onClick={() => setOptimizeRatio(0.05)}
-              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
-                optimizeRatio === 0.05 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
-              }`}
-              title="Reducción extrema al 5% de polígonos (-95%)"
-            >
-              5% Ultra
-            </button>
-            <button
-              onClick={() => setOptimizeRatio(0.15)}
-              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
-                optimizeRatio === 0.15 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
-              }`}
-              title="Reducción fuerte al 15% de polígonos (-85%)"
-            >
-              15%
-            </button>
-            <button
-              onClick={() => setOptimizeRatio(0.30)}
-              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
-                optimizeRatio === 0.30 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
-              }`}
-              title="Reducción equilibrada al 30% de polígonos (-70%)"
-            >
-              30% Medio
-            </button>
-            <button
-              onClick={() => setOptimizeRatio(0.50)}
-              className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
-                optimizeRatio === 0.50 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
-              }`}
-              title="Reducción suave al 50% de polígonos (-50%)"
-            >
-              50% Suave
-            </button>
+            <input
+              type="range"
+              min={0.05}
+              max={0.90}
+              step={0.05}
+              value={curvedRatio}
+              onChange={(e) => setCurvedRatio(parseFloat(e.target.value))}
+              className="w-full h-1.5 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+            />
+
+            <div className="grid grid-cols-4 gap-1 pt-0.5">
+              {[0.15, 0.30, 0.50, 0.75].map(r => (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => setCurvedRatio(r)}
+                  className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                    curvedRatio === r
+                      ? 'bg-cyan-600 border-cyan-400 text-white shadow'
+                      : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {Math.round(r * 100)}%
+                </button>
+              ))}
+            </div>
+
+            <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800">
+              <input
+                type="checkbox"
+                checked={curvedPreserveCreases}
+                onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
+                className="accent-cyan-500 w-3 h-3 rounded"
+              />
+              <span>Proteger tapas planas y aristas vivas (&gt; 40°)</span>
+            </label>
           </div>
-        </div>
+        ) : (
+          /* Modo General */
+          <div className="space-y-1 bg-zinc-900/80 p-2 rounded-lg border border-zinc-800">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-zinc-300 font-bold">
+                {selectedGLTFMeshes.length > 0 ? 'Ratio Retenido (Selección)' : 'Ratio Retenido (Completo)'}
+              </span>
+              <span className="font-mono text-violet-300 font-bold">{Math.round(optimizeRatio * 100)}%</span>
+            </div>
+            
+            <input
+              type="range"
+              min={0.01}
+              max={0.95}
+              step={0.01}
+              value={optimizeRatio}
+              onChange={(e) => setOptimizeRatio(parseFloat(e.target.value))}
+              className="w-full h-1.5 accent-violet-500 bg-zinc-800 rounded cursor-pointer"
+            />
+
+            {/* Botones Rápidos de Porcentaje */}
+            <div className="grid grid-cols-4 gap-1 pt-1">
+              <button
+                onClick={() => setOptimizeRatio(0.05)}
+                className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                  optimizeRatio === 0.05 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Reducción extrema al 5% de polígonos (-95%)"
+              >
+                5% Ultra
+              </button>
+              <button
+                onClick={() => setOptimizeRatio(0.15)}
+                className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                  optimizeRatio === 0.15 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Reducción fuerte al 15% de polígonos (-85%)"
+              >
+                15%
+              </button>
+              <button
+                onClick={() => setOptimizeRatio(0.30)}
+                className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                  optimizeRatio === 0.30 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Reducción equilibrada al 30% de polígonos (-70%)"
+              >
+                30% Medio
+              </button>
+              <button
+                onClick={() => setOptimizeRatio(0.50)}
+                className={`py-1 text-[9px] font-bold rounded border transition-colors cursor-pointer ${
+                  optimizeRatio === 0.50 ? 'bg-violet-600 border-violet-400 text-white shadow' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                }`}
+                title="Reducción suave al 50% de polígonos (-50%)"
+              >
+                50% Suave
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Selector de Partes si es GLTF */}
-        {obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
+        {optTab === 'ALL' && obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
           <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-2 space-y-1.5">
             <div className="flex justify-between items-center gap-1">
               <span className="text-[10px] text-zinc-300 font-bold flex items-center gap-1">
@@ -2850,7 +3048,7 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             {obj.meshData.meshes.length > 5 && (
               <input
                 type="text"
-                placeholder="Buscar parte por nombre..."
+                placeholder="Filtrar partes por nombre..."
                 value={meshSearch}
                 onChange={(e) => setMeshSearch(e.target.value)}
                 className="w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-[10px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
@@ -2905,14 +3103,22 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           className={`w-full py-2.5 px-3 rounded-lg text-[11px] font-bold flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer ${
             isOptimizing
               ? 'bg-zinc-800 text-zinc-400 cursor-wait animate-pulse'
-              : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-950/50 hover:shadow-violet-900/60 active:scale-98'
+              : optTab === 'CURVED'
+                ? 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-950/50 hover:shadow-cyan-900/60 active:scale-98'
+                : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-950/50 hover:shadow-violet-900/60 active:scale-98'
           }`}
         >
-          <Zap size={14} className={isOptimizing ? 'animate-spin' : 'text-amber-300'} />
+          {optTab === 'CURVED' ? (
+            <CircleDot size={14} className={isOptimizing ? 'animate-spin' : 'text-cyan-200'} />
+          ) : (
+            <Zap size={14} className={isOptimizing ? 'animate-spin' : 'text-amber-300'} />
+          )}
           <span>
             {isOptimizing
               ? 'Optimizando geometría...'
-              : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}
+              : optTab === 'CURVED'
+                ? `Optimizar Curvas y Redondeados (-${reductionPercent}%)`
+                : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}
           </span>
         </button>
       </div>
@@ -4916,12 +5122,12 @@ export const PropertiesPanel: React.FC = () => {
     box.getCenter(center);
 
     const targetSize = 3.0;
-    let scaleFactor = targetSize / maxDim;
-    scaleFactor = parseFloat(scaleFactor.toFixed(4));
+    let scaleFactor = maxDim > 0 ? targetSize / maxDim : 1;
+    scaleFactor = safeParseFixed(scaleFactor, 4, 1);
 
-    const posX = parseFloat((-center.x * scaleFactor).toFixed(3));
-    const posY = parseFloat((-box.min.y * scaleFactor).toFixed(3));
-    const posZ = parseFloat((-center.z * scaleFactor).toFixed(3));
+    const posX = safeParseFixed(-center.x * scaleFactor, 3, 0);
+    const posY = safeParseFixed(-box.min.y * scaleFactor, 3, 0);
+    const posZ = safeParseFixed(-center.z * scaleFactor, 3, 0);
 
     updateObject(targetObj.id, {
       transform: {

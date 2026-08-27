@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { MaterialData } from '../types';
+import { safeFixed } from '../utils/numberUtils';
 import {
   createNoiseTexture,
   createCheckerTexture,
@@ -131,7 +132,7 @@ export const ProceduralMapModal: React.FC<ProceduralMapModalProps> = ({ config, 
             {config.type === 'oak_planks' && config.mapKey === 'normalMap' && (
               <div>
                 <label className="block text-xs text-gray-400 mb-1">
-                  Intensidad del Relieve ({normalStrength.toFixed(1)})
+                  Intensidad del Relieve ({safeFixed(normalStrength, 1)})
                 </label>
                 <input
                   type="range" min="1" max="15" step="0.5"

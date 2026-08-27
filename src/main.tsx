@@ -2,6 +2,10 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { installGlobalNumberSafetyShims } from './utils/numberUtils';
+
+// Instala protecciones globales contra crashes de .toFixed() en Electron/Windows
+installGlobalNumberSafetyShims();
 
 // Suppress specific deprecation warnings from dependencies
 const originalWarn = console.warn;

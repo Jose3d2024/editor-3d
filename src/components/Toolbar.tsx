@@ -39,6 +39,7 @@ import {
   capOpenHoles, capSelectedFaces, revolveMesh, shapeToProfile, simplifyMesh,
 } from '../utils/modifiers_advanced';
 import { SiluetaTab } from './SiluetaTab';
+import { safeFixed, safeNum, safeParseFixed, safeVec3Key } from '../utils/numberUtils';
 import { RenderModal } from './RenderModal';
 import { CodeExporterModal } from './CodeExporterModal';
 import { WireframeModal } from './WireframeModal';
@@ -90,7 +91,7 @@ const bufferGeomToCSGObject = (
   const uniqueVerts: V3[] = [];
   const vertMap = new Map<string, number>();
   const getIdx = (x: number, y: number, z: number) => {
-    const key = `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`;
+    const key = safeVec3Key(x, y, z, 6);
     if (vertMap.has(key)) return vertMap.get(key)!;
     const idx = uniqueVerts.length;
     uniqueVerts.push([x, y, z]);
@@ -344,7 +345,7 @@ const MeshTab: React.FC<{
         </div>
         <CRow label="Factor">
           <input type="range" min={0.1} max={1} step={0.1} value={smoothFactor} onChange={e => setSmoothFactor(+e.target.value)} className="flex-1 accent-violet-500 h-1.5" />
-          <CVal>{smoothFactor.toFixed(1)}</CVal>
+          <CVal>{safeFixed(smoothFactor, 1)}</CVal>
         </CRow>
         <CRow label="Iteraciones">
           <input type="range" min={1} max={10} step={1} value={smoothIters} onChange={e => setSmoothIters(+e.target.value)} className="flex-1 accent-violet-500 h-1.5" />
@@ -628,9 +629,21 @@ export const Toolbar: React.FC = () => {
         return;
       }
       switch(e.key){
-        case 'g': setTransformMode('translate'); break;
-        case 'r': setTransformMode('rotate');    break;
-        case 's': setTransformMode('scale');     break;
+        case 'g': case 'w': 
+          setTransformMode(transformMode === 'translate' ? 'universal' : 'translate'); 
+          break;
+        case 'r':    
+          setTransformMode(transformMode === 'rotate' ? 'universal' : 'rotate'); 
+          break;
+        case 's':     
+          setTransformMode(transformMode === 'scale' ? 'universal' : 'scale'); 
+          break;
+        case 'u':
+          setTransformMode('universal');
+          break;
+        case 'Escape':
+          setTransformMode('universal');
+          break;
         case 'Tab':
           e.preventDefault();
           setEditMode(editMode==='OBJECT'?'FACE':'OBJECT');
@@ -810,7 +823,7 @@ export const Toolbar: React.FC = () => {
         let scaleFactor = 1.0;
         if (maxDim > 0 && (maxDim > 6.0 || maxDim < 0.2)) {
           scaleFactor = targetSize / maxDim;
-          scaleFactor = parseFloat(scaleFactor.toFixed(4));
+          scaleFactor = safeParseFixed(scaleFactor, 4, 1);
         }
 
         let posX = 0;
@@ -829,9 +842,9 @@ export const Toolbar: React.FC = () => {
         return {
           scale: [scaleFactor, scaleFactor, scaleFactor],
           position: [
-            parseFloat(posX.toFixed(3)),
-            parseFloat(posY.toFixed(3)),
-            parseFloat(posZ.toFixed(3)),
+            safeParseFixed(posX, 3, 0),
+            safeParseFixed(posY, 3, 0),
+            safeParseFixed(posZ, 3, 0),
           ],
         };
       };
@@ -1187,11 +1200,13 @@ export const Toolbar: React.FC = () => {
             <AnimatePresence>
               {showMainCreate && (
                 <motion.div
+                  drag
+                  dragMomentum={false}
                   initial={{opacity:0,y:-8,scale:0.97}}
                   animate={{opacity:1,y:0,scale:1}}
                   exit={{opacity:0,y:-8,scale:0.97}}
                   transition={{duration:0.15}}
-                  className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl"
+                  className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden"
                   style={{
                     top: mainCreateRef.current?.getBoundingClientRect().bottom,
                     left: Math.min(mainCreateRef.current?.getBoundingClientRect().left??0, window.innerWidth-448),
@@ -1201,9 +1216,12 @@ export const Toolbar: React.FC = () => {
                   }}
                 >
                   {/* Header */}
-                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800">
-                    <p className="text-[11px] font-bold text-zinc-200 uppercase tracking-widest">Panel de Creación</p>
-                    <button onClick={()=>setShowMainCreate(false)} className="text-zinc-600 hover:text-zinc-400"><X size={14}/></button>
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 cursor-grab active:cursor-grabbing select-none bg-zinc-950/40">
+                    <div className="flex items-center gap-1.5">
+                      <GripVertical size={13} className="text-zinc-500" />
+                      <p className="text-[11px] font-bold text-zinc-200 uppercase tracking-widest">Panel de Creación</p>
+                    </div>
+                    <button onClick={()=>setShowMainCreate(false)} className="text-zinc-500 hover:text-zinc-300"><X size={14}/></button>
                   </div>
 
                   {/* Tab strip */}
@@ -1653,11 +1671,13 @@ export const Toolbar: React.FC = () => {
             <AnimatePresence>
               {showMainEdit && (
                 <motion.div
+                  drag
+                  dragMomentum={false}
                   initial={{opacity:0,y:-8,scale:0.97}}
                   animate={{opacity:1,y:0,scale:1}}
                   exit={{opacity:0,y:-8,scale:0.97}}
                   transition={{duration:0.15}}
-                  className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl"
+                  className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden"
                   style={{
                     top: mainEditRef.current?.getBoundingClientRect().bottom,
                     left: Math.min(mainEditRef.current?.getBoundingClientRect().left??0, window.innerWidth-408),
@@ -1666,9 +1686,12 @@ export const Toolbar: React.FC = () => {
                   }}
                 >
                   {/* Header */}
-                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800">
-                    <p className="text-[11px] font-bold text-zinc-200 uppercase tracking-widest">Panel de Edición</p>
-                    <button onClick={()=>setShowMainEdit(false)} className="text-zinc-600 hover:text-zinc-400"><X size={14}/></button>
+                  <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 cursor-grab active:cursor-grabbing select-none bg-zinc-950/40">
+                    <div className="flex items-center gap-1.5">
+                      <GripVertical size={13} className="text-zinc-500" />
+                      <p className="text-[11px] font-bold text-zinc-200 uppercase tracking-widest">Panel de Edición</p>
+                    </div>
+                    <button onClick={()=>setShowMainEdit(false)} className="text-zinc-500 hover:text-zinc-300"><X size={14}/></button>
                   </div>
 
                   {/* Tab strip */}
@@ -1858,7 +1881,7 @@ export const Toolbar: React.FC = () => {
                             <>
                               <div className="flex items-center justify-between">
                                 <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Distancia</span>
-                                <span className="text-[11px] font-mono text-indigo-400">{extrudeDist.toFixed(2)}</span>
+                                <span className="text-[11px] font-mono text-indigo-400">{safeFixed(extrudeDist, 2)}</span>
                               </div>
                               <input
                                 type="range"
@@ -1904,7 +1927,7 @@ export const Toolbar: React.FC = () => {
                               </div>
                               <div className="flex items-center justify-between">
                                 <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Distancia</span>
-                                <span className="text-[11px] font-mono text-indigo-400">{extrudeDist.toFixed(2)}</span>
+                                <span className="text-[11px] font-mono text-indigo-400">{safeFixed(extrudeDist, 2)}</span>
                               </div>
                               <input
                                 type="range"
@@ -2284,20 +2307,37 @@ export const Toolbar: React.FC = () => {
               <ImageIcon size={14}/><span className="hidden sm:inline">Ref.</span><ChevronDown size={11}/>
             </button>
             {showRef&&refPanelRef.current&&(
-              <div className="fixed mt-1 bg-zinc-900 border border-zinc-700 rounded shadow-xl z-[100] w-64 p-3 space-y-3"
-                style={{top:refPanelRef.current.getBoundingClientRect().bottom,left:refPanelRef.current.getBoundingClientRect().left}}>
-                <div className="flex items-center justify-between">
-                  <p className="text-[10px] font-bold uppercase text-zinc-500">Imágenes de referencia</p>
-                  <button 
-                    onClick={() => setMoveReferenceMode(!moveReferenceMode)}
-                    className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${
-                      moveReferenceMode ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-                    }`}
-                    title="Activa para arrastrar las imágenes directamente en el canvas"
-                  >
-                    <Move size={10}/>
-                    {moveReferenceMode ? 'Moviendo...' : 'Mover'}
-                  </button>
+              <motion.div 
+                drag 
+                dragMomentum={false}
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                className="fixed mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl z-[220] w-72 p-3 space-y-3 max-h-[85vh] overflow-y-auto"
+                style={{
+                  top: Math.min(refPanelRef.current.getBoundingClientRect().bottom, window.innerHeight - 400),
+                  left: Math.min(refPanelRef.current.getBoundingClientRect().left, window.innerWidth - 300)
+                }}>
+                <div className="flex items-center justify-between cursor-grab active:cursor-grabbing pb-1 border-b border-zinc-800 select-none">
+                  <div className="flex items-center gap-1.5">
+                    <GripVertical size={13} className="text-zinc-500" />
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-300">Imágenes de Referencia</p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button 
+                      onClick={() => setMoveReferenceMode(!moveReferenceMode)}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${
+                        moveReferenceMode ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                      }`}
+                      title="Activa para arrastrar las imágenes directamente en el canvas"
+                    >
+                      <Move size={10}/>
+                      {moveReferenceMode ? 'Moviendo...' : 'Mover'}
+                    </button>
+                    <button onClick={() => setShowRef(false)} className="text-zinc-500 hover:text-zinc-300 p-0.5">
+                      <X size={13} />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Botón directo a Tallado Volumétrico desde 3 Bocetos */}
@@ -2325,7 +2365,7 @@ export const Toolbar: React.FC = () => {
                         </div>
                       </div>
                       {ref?.url&&(
-                        <div className="space-y-1.5">
+                        <div className="space-y-2 bg-zinc-950/60 p-2 rounded border border-zinc-800/80">
                           <div className="flex items-center gap-2"><span className="text-[9px] text-zinc-500 w-14">Opacidad</span><input type="range" min={0} max={1} step={0.05} value={ref.opacity??0.5} onChange={e=>setReference(view,{opacity:parseFloat(e.target.value)})} className="flex-1 h-1 accent-indigo-500"/><span className="text-[9px] text-zinc-400 w-7">{Math.round((ref.opacity??0.5)*100)}%</span></div>
                           <div className="flex items-center gap-2">
                             <span className="text-[9px] text-zinc-500 w-14">Tamaño</span>
@@ -2337,7 +2377,72 @@ export const Toolbar: React.FC = () => {
                               }} 
                               className="flex-1 h-1 accent-indigo-500"
                             />
-                            <span className="text-[9px] text-zinc-400 w-7">{(ref.scale?.[1] ?? ref.scale?.[0] ?? 5).toFixed(1)}</span>
+                            <span className="text-[9px] text-zinc-400 w-7">{safeFixed(ref.scale?.[1] ?? ref.scale?.[0] ?? 5, 1)}</span>
+                          </div>
+
+                          {/* ── Rotación y Espejo / Invertir ── */}
+                          <div className="flex flex-col gap-1.5 pt-1.5 border-t border-zinc-800/70">
+                            <span className="text-[9px] text-zinc-400 font-bold uppercase tracking-wider">Orientación y Espejo</span>
+                            
+                            {/* Botones de Rotación y Espejo */}
+                            <div className="grid grid-cols-4 gap-1">
+                              <button
+                                onClick={() => {
+                                  const current = ref.angle || 0;
+                                  setReference(view, { angle: (current - 90 + 360) % 360 });
+                                }}
+                                className="flex items-center justify-center gap-1 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[9px] text-zinc-300 font-medium border border-zinc-700"
+                                title="Rotar -90° (Sentido antihorario)"
+                              >
+                                <RotateCcw size={10} /> -90°
+                              </button>
+
+                              <button
+                                onClick={() => {
+                                  const current = ref.angle || 0;
+                                  setReference(view, { angle: (current + 90) % 360 });
+                                }}
+                                className="flex items-center justify-center gap-1 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-[9px] text-zinc-300 font-medium border border-zinc-700"
+                                title="Rotar +90° (Sentido horario)"
+                              >
+                                <RotateCw size={10} /> +90°
+                              </button>
+
+                              <button
+                                onClick={() => setReference(view, { flipX: !ref.flipX })}
+                                className={`flex items-center justify-center gap-1 py-1 rounded text-[9px] font-bold border transition-colors ${
+                                  ref.flipX ? 'bg-indigo-600 border-indigo-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+                                }`}
+                                title="Espejo horizontal (Invertir eje X)"
+                              >
+                                <FlipHorizontal size={10} /> Espejo
+                              </button>
+
+                              <button
+                                onClick={() => setReference(view, { flipY: !ref.flipY })}
+                                className={`flex items-center justify-center gap-1 py-1 rounded text-[9px] font-bold border transition-colors ${
+                                  ref.flipY ? 'bg-indigo-600 border-indigo-400 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+                                }`}
+                                title="Invertir vertical (Invertir eje Y)"
+                              >
+                                <FlipVertical size={10} /> Invertir
+                              </button>
+                            </div>
+
+                            {/* Slider de Rotación Fina */}
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] text-zinc-500 w-14">Giro</span>
+                              <input 
+                                type="range" 
+                                min={0} 
+                                max={360} 
+                                step={1} 
+                                value={ref.angle ?? 0} 
+                                onChange={e => setReference(view, { angle: parseFloat(e.target.value) })} 
+                                className="flex-1 h-1 accent-indigo-500"
+                              />
+                              <span className="text-[9px] text-zinc-400 w-7 font-mono">{(ref.angle ?? 0)}°</span>
+                            </div>
                           </div>
                           
                           <div className="flex flex-col gap-1 pt-1 border-t border-zinc-800/50">
@@ -2389,7 +2494,7 @@ export const Toolbar: React.FC = () => {
                     </div>
                   );
                 })}
-              </div>
+              </motion.div>
             )}
           </div>
         </div>
@@ -2593,17 +2698,32 @@ const Dropdown: React.FC<{
     <AnimatePresence>
       {isOpen && (
         <motion.div
+          drag
+          dragMomentum={false}
           initial={{ opacity: 0, y: -8, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -8, scale: 0.97 }}
           transition={{ duration: 0.15 }}
-          className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-2 flex flex-col gap-1"
+          className="fixed z-[200] mt-1 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-2 flex flex-col gap-1 max-h-[85vh] overflow-y-auto"
           style={{
             top: containerRef.current?.getBoundingClientRect().bottom,
             left: Math.min(containerRef.current?.getBoundingClientRect().left ?? 0, window.innerWidth - width - 10),
             width,
           }}
         >
+          {/* Draggable header bar */}
+          <div className="flex items-center justify-between px-1 pb-1 mb-1 border-b border-zinc-800/80 cursor-grab active:cursor-grabbing select-none">
+            <div className="flex items-center gap-1">
+              <GripVertical size={11} className="text-zinc-500" />
+              <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-400">Menú</span>
+            </div>
+            <button 
+              onClick={(e) => { e.stopPropagation(); setIsOpen(false); }}
+              className="text-zinc-500 hover:text-zinc-300 p-0.5"
+            >
+              <X size={11} />
+            </button>
+          </div>
           {children}
         </motion.div>
       )}
@@ -2880,7 +3000,7 @@ const AdvancedTab: React.FC<{
       <div className="text-[9px] text-zinc-400 bg-zinc-800/50 rounded p-2">Crea volumen a partir de formas 2D o caras de malla.</div>
       {editMode === 'FACE' ? (
         <>
-          <CRow label="Distancia"><input type="range" min={0.01} max={2} step={0.01} value={extrudeDist} onChange={e=>setExtrudeDist(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{extrudeDist.toFixed(2)}</CVal></CRow>
+          <CRow label="Distancia"><input type="range" min={0.01} max={2} step={0.01} value={extrudeDist} onChange={e=>setExtrudeDist(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{safeFixed(extrudeDist, 2)}</CVal></CRow>
           <button disabled={!canExtrudeFaces} onClick={()=>{
             if(!selectedObjectId)return;
             useStore.getState().extrudeFaces(selectedObjectId,selectedFaceIndices,extrudeDist);
@@ -2891,7 +3011,7 @@ const AdvancedTab: React.FC<{
       ) : (
         <>
           <CRow label="Eje"><div className="flex gap-1">{(['x','y','z'] as const).map(ax=>(<button key={ax} onClick={()=>setExtrudeAxis(ax)} className={`px-3 py-1 rounded text-[10px] font-bold uppercase transition-colors ${extrudeAxis===ax?'bg-indigo-600 text-white':'bg-zinc-700 text-zinc-400'}`}>{ax}</button>))}</div></CRow>
-          <CRow label="Distancia"><input type="range" min={0.01} max={2} step={0.01} value={extrudeDist} onChange={e=>setExtrudeDist(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{extrudeDist.toFixed(2)}</CVal></CRow>
+          <CRow label="Distancia"><input type="range" min={0.01} max={2} step={0.01} value={extrudeDist} onChange={e=>setExtrudeDist(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{safeFixed(extrudeDist, 2)}</CVal></CRow>
           <button disabled={!isExtrudable} onClick={()=>{
             if(!selectedObjectId)return;
             useStore.getState().extrudeShape(selectedObjectId,extrudeDist,extrudeAxis);
@@ -2903,7 +3023,7 @@ const AdvancedTab: React.FC<{
     </>)}
     {advTab==='chamfer'&&(<>
       <div className="text-[9px] text-zinc-400 bg-zinc-800/50 rounded p-2">Aristas vivas → <b>caras planas inclinadas</b>. Detecta aristas por ángulo diedro.</div>
-      <CRow label="Distancia"><input type="range" min={0.01} max={0.5} step={0.01} value={advChamferD} onChange={e=>setAdvChamferD(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{advChamferD.toFixed(2)}</CVal></CRow>
+      <CRow label="Distancia"><input type="range" min={0.01} max={0.5} step={0.01} value={advChamferD} onChange={e=>setAdvChamferD(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{safeFixed(advChamferD, 2)}</CVal></CRow>
       <CRow label="Umbral °"><input type="range" min={10} max={80} step={5} value={advChamferA} onChange={e=>setAdvChamferA(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{advChamferA}°</CVal></CRow>
       <button disabled={!hasSel} onClick={()=>{if(!selectedObject)return;const r=chamfer3DEdges(selectedObject,advChamferD,advChamferA);onModify(r.vertices,r.faces);}}
         className={`w-full py-2 rounded text-[11px] font-bold transition-colors ${hasSel?'bg-violet-600 hover:bg-violet-500 text-white':'bg-zinc-700 text-zinc-500 cursor-not-allowed'}`}>
@@ -2912,7 +3032,7 @@ const AdvancedTab: React.FC<{
     </>)}
     {advTab==='offset'&&(<>
       <div className="text-[9px] text-zinc-400 bg-zinc-800/50 rounded p-2">Infla o deflacta la malla. <b>+</b> = hacia afuera · <b>−</b> = hacia adentro.</div>
-      <CRow label="Distancia"><input type="range" min={-0.5} max={0.5} step={0.01} value={advOffsetD} onChange={e=>setAdvOffsetD(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{advOffsetD>0?'+':''}{advOffsetD.toFixed(2)}</CVal></CRow>
+      <CRow label="Distancia"><input type="range" min={-0.5} max={0.5} step={0.01} value={advOffsetD} onChange={e=>setAdvOffsetD(+e.target.value)} className="flex-1 accent-violet-500 h-1.5"/><CVal>{advOffsetD>0?'+':''}{safeFixed(advOffsetD, 2)}</CVal></CRow>
       <button disabled={!hasSel} onClick={()=>{if(!selectedObject)return;useStore.getState().offsetObject(selectedObject.id,advOffsetD);}}
         className={`w-full py-2 rounded text-[11px] font-bold transition-colors ${hasSel?'bg-violet-600 hover:bg-violet-500 text-white':'bg-zinc-700 text-zinc-500 cursor-not-allowed'}`}>
         ⊡ Aplicar Offset

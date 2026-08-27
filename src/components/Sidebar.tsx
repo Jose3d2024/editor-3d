@@ -6,12 +6,14 @@ import {
   AlignCenterHorizontal, AlignCenterVertical, AlignStartHorizontal,
   AlignEndHorizontal, AlignStartVertical, AlignEndVertical,
   CheckCircle, AlertTriangle, Wrench, Wand2, Maximize2,
-  Move, RotateCw, Download, FileDown, Split, Grid
+  Move, RotateCw, Download, FileDown, Split, Grid,
+  Lock, Unlock
 } from 'lucide-react';
 import { CSGOperation, PrimitiveType } from '../types';
 import { validateMesh } from '../utils/modifiers';
 import { Exporter } from '../utils/exporters';
 import { hasChildrenOrSubObjects } from '../utils/ungroup';
+import { safeFixed, safeNum, safeParseFixed } from '../utils/numberUtils';
 
 // ─── Section accordion ────────────────────────────────────────────────────────
 const Section = ({ title, icon: Icon, children, defaultOpen = true, badge }: {
@@ -50,7 +52,7 @@ const PropRow = ({
         <label className="text-[9px] uppercase text-zinc-500 font-bold">{label}</label>
         <input
           type="number"
-          value={isNaN(value) ? '' : (integer ? Math.round(value) : +value.toFixed(3))}
+          value={isNaN(value) ? '' : (integer ? Math.round(safeNum(value)) : safeParseFixed(value, 3, 0))}
           min={min} max={max} step={step}
           onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(clamp(v)); }}
           className="w-16 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-[10px] text-right focus:outline-none focus:border-indigo-500"
@@ -68,36 +70,67 @@ const PropRow = ({
 
 // ─── XYZ precise numeric input row ───────────────────────────────────────────
 const XYZRow = ({
-  label, values, onChange, step = 0.01, min = -Infinity, max = Infinity,
+  label, values, onChange, step = 0.01, min = -Infinity, max = Infinity, lockable = label.toLowerCase().includes('escala') || label.toLowerCase().includes('scale')
 }: {
   label: string;
   values: [number, number, number];
   onChange: (v: [number, number, number]) => void;
   step?: number; min?: number; max?: number;
-}) => (
-  <div className="flex flex-col gap-1">
-    <label className="text-[9px] uppercase text-zinc-500 font-bold">{label}</label>
-    <div className="grid grid-cols-3 gap-1">
-      {(['X', 'Y', 'Z'] as const).map((ax, i) => (
-        <div key={ax} className="flex items-center gap-1">
-          <span className="text-[9px] font-bold" style={{ color: i===0?'#f87171':i===1?'#4ade80':'#60a5fa' }}>{ax}</span>
-          <input
-            type="number" step={step}
-            value={+values[i].toFixed(4)}
-            onChange={e => {
-              const v = parseFloat(e.target.value);
-              if (isNaN(v)) return;
-              const next: [number,number,number] = [...values] as any;
-              next[i] = Math.min(max, Math.max(min, v));
-              onChange(next);
-            }}
-            className="w-full bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
-          />
-        </div>
-      ))}
+  lockable?: boolean;
+}) => {
+  const [locked, setLocked] = useState(false);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <label className="text-[9px] uppercase text-zinc-500 font-bold">{label}</label>
+        {lockable && (
+          <button
+            type="button"
+            onClick={() => setLocked(!locked)}
+            className={`flex items-center gap-0.5 text-[8px] px-1 py-0.5 rounded transition-all cursor-pointer ${
+              locked ? 'bg-amber-500/20 text-amber-400 font-bold' : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+            title={locked ? 'Desbloquear ejes para escalar por separado' : 'Bloquear ejes para escalar conjuntamente'}
+          >
+            {locked ? <Lock size={9} /> : <Unlock size={9} />}
+            <span>{locked ? 'Bloqueado' : 'Libre'}</span>
+          </button>
+        )}
+      </div>
+      <div className="grid grid-cols-3 gap-1">
+        {(['X', 'Y', 'Z'] as const).map((ax, i) => (
+          <div key={ax} className="flex items-center gap-1">
+            <span className="text-[9px] font-bold" style={{ color: i===0?'#f87171':i===1?'#4ade80':'#60a5fa' }}>{ax}</span>
+            <input
+              type="number" step={step}
+              value={safeParseFixed(values?.[i], 4, 0)}
+              onChange={e => {
+                const v = parseFloat(e.target.value);
+                if (isNaN(v)) return;
+                const clamped = Math.min(max, Math.max(min, v));
+                if (locked) {
+                  const ratio = values[i] !== 0 ? clamped / values[i] : 1;
+                  const next: [number, number, number] = [
+                    i === 0 ? clamped : Math.min(max, Math.max(min, values[0] * ratio)),
+                    i === 1 ? clamped : Math.min(max, Math.max(min, values[1] * ratio)),
+                    i === 2 ? clamped : Math.min(max, Math.max(min, values[2] * ratio))
+                  ];
+                  onChange(next);
+                } else {
+                  const next: [number,number,number] = [...values] as any;
+                  next[i] = clamped;
+                  onChange(next);
+                }
+              }}
+              className="w-full bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-[10px] focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+        ))}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ─── Geometry params per primitive type ──────────────────────────────────────
 const PARAM_DEFS: Record<PrimitiveType, {
@@ -439,7 +472,7 @@ export const Sidebar: React.FC = () => {
                 {/* Rotation shown in degrees for usability */}
                 <XYZRow
                   label="Rotación (°)"
-                  values={(selectedObject.transform.rotation as [number,number,number]).map(r => parseFloat((r * 180 / Math.PI).toFixed(2))) as [number,number,number]}
+                  values={(selectedObject.transform.rotation as [number,number,number]).map(r => safeParseFixed((safeNum(r) * 180 / Math.PI), 2, 0)) as [number,number,number]}
                   step={0.5} min={-360} max={360}
                   onChange={v => {
                     const rad = v.map(d => d * Math.PI / 180) as [number,number,number];
@@ -499,7 +532,7 @@ export const Sidebar: React.FC = () => {
                               <span className="text-[8px] font-bold flex-shrink-0" style={{ color: ai===0?'#f87171':ai===1?'#4ade80':'#60a5fa' }}>{ax}</span>
                               <input
                                 type="number" step={0.001}
-                                value={+cur[ai].toFixed(3)}
+                                value={safeParseFixed(cur[ai], 3, 0)}
                                 onChange={e => {
                                   const val = parseFloat(e.target.value);
                                   if (isNaN(val)) return;

@@ -500,6 +500,8 @@ export interface CSGObject {
   faces:          MeshFace[];
   vertexOffsets?: Record<number, V3>;
   wireframeEdges?: [number, number][];
+  edges?: [number, number][];
+  wireframeAsTubes?: boolean;
   isWireframeOnly?: boolean;
 
   // Bézier cúbico: un handle por punto ancla (solo para SHAPE + shapeType=bezier)
@@ -549,6 +551,9 @@ export interface ReferenceImage {
   scale:    V3;
   opacity:  number;
   locked:   boolean;
+  flipX?:   boolean; // Espejo horizontal
+  flipY?:   boolean; // Espejo vertical / invertir
+  angle?:   number;  // Rotación en grados
 }
 
 export interface CameraObject {

@@ -56,6 +56,20 @@ export interface BlueprintImageConfig {
 
   // Puntos de Control Manuales (Ajuste fino de silueta vectorial)
   manualControlPoints?: [number, number][][] | null; // Bucles poligonales editados manualmente en espacio [-1, 1]
+
+  // Detección y vaciado de huecos interiores (espacio entre patas, ventanas, recortes cerrados)
+  autoDetectHoles?: boolean;    // Detectar y vaciar automáticamente regiones cerradas internas que coincidan con el color de fondo
+  holeSeeds?: [number, number][]; // Semillas de coordenadas de vaciado [nx, ny] en espacio normalizado [-1, 1]
+  
+  // Calibración de Mapeo de Texturas y Proyección UV
+  texOffsetX?: number;          // Desplazamiento U de la textura (-1.0 a +1.0)
+  texOffsetY?: number;          // Desplazamiento V de la textura (-1.0 a +1.0)
+  texScaleX?: number;           // Escala U de la textura (0.2 a 3.0, default 1.0)
+  texScaleY?: number;           // Escala V de la textura (0.2 a 3.0, default 1.0)
+  texFlipH?: boolean;           // Invertir textura horizontalmente
+  texFlipV?: boolean;           // Invertir textura verticalmente
+  texMirrorOpposite?: boolean;  // Reflejar simétricamente en caras opuestas (default true)
+  invertNormalY?: boolean;      // Invertir canal Y del mapa de normales (OpenGL vs DirectX)
 }
 
 export interface BlueprintCarverOptions {
@@ -81,6 +95,7 @@ export interface ProcessedSilhouette {
   contours: [number, number][][]; // Múltiples bucles poligonales exactos en espacio [-1, 1]
   aspect: number;
   cleanedPixelsCount: number;
+  boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number };
 }
 
 /**
@@ -487,6 +502,136 @@ export function processSilhouette(
         solidMask[i] = 1;
       }
     }
+
+    // 3.1 DETECCIÓN INTELIGENTE DE HUECOS DE FONDO INTERIORES (espacio entre patas, ventanas, calados)
+    const autoHoles = config.autoDetectHoles !== false;
+    if (autoHoles) {
+      // Buscar píxeles interiores que NO sean líneas del dibujo y cuyo color RGB sea muy cercano al color de fondo
+      const potentialHoles = new Uint8Array(W * H);
+      const holeTol = Math.max(18, threshold * 0.95);
+
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const idx = y * W + x;
+          // Solo evaluar píxeles que actualmente están marcados como sólidos pero no eran líneas originales
+          if (solidMask[idx] === 1 && initialFeatureMap[idx] === 0) {
+            const pIdx = idx * 4;
+            const r = data[pIdx];
+            const g = data[pIdx + 1];
+            const b = data[pIdx + 2];
+            const a = data[pIdx + 3];
+
+            if (a < 30) {
+              potentialHoles[idx] = 1;
+            } else {
+              const cDist = Math.hypot(r - bgR, g - bgG, b - bgB);
+              const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+              const bgLum = 0.299 * bgR + 0.587 * bgG + 0.114 * bgB;
+              if (cDist < holeTol && Math.abs(lum - bgLum) < holeTol * 0.8) {
+                potentialHoles[idx] = 1;
+              }
+            }
+          }
+        }
+      }
+
+      // Conectar regiones de huecos y eliminar aquellas que tengan al menos tamaño mínimo (ej: 6 píxeles)
+      const visitedHoles = new Uint8Array(W * H);
+      const hQueueX = new Int32Array(W * H);
+      const hQueueY = new Int32Array(W * H);
+
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const startIdx = y * W + x;
+          if (potentialHoles[startIdx] === 1 && visitedHoles[startIdx] === 0) {
+            let hHead = 0;
+            let hTail = 0;
+            hQueueX[hTail] = x;
+            hQueueY[hTail] = y;
+            visitedHoles[startIdx] = 1;
+            hTail++;
+
+            const compIndices: number[] = [startIdx];
+
+            while (hHead < hTail) {
+              const cx = hQueueX[hHead];
+              const cy = hQueueY[hHead];
+              hHead++;
+
+              for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  const nx = cx + dx;
+                  const ny = cy + dy;
+                  if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+                    const nIdx = ny * W + nx;
+                    if (potentialHoles[nIdx] === 1 && visitedHoles[nIdx] === 0) {
+                      visitedHoles[nIdx] = 1;
+                      hQueueX[hTail] = nx;
+                      hQueueY[hTail] = ny;
+                      hTail++;
+                      compIndices.push(nIdx);
+                    }
+                  }
+                }
+              }
+            }
+
+            // Si la región de hueco tiene al menos 6 píxeles, vaciarla de la máscara sólida
+            if (compIndices.length >= 6) {
+              for (const idx of compIndices) {
+                solidMask[idx] = 0;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 3.2 SEMILLAS MANUALES DE VACIADO DE HUECO (Hole Seeds / Cuentagotas de Huecos)
+    if (config.holeSeeds && config.holeSeeds.length > 0) {
+      for (const seed of config.holeSeeds) {
+        const px = Math.round(((seed[0] + 1) / 2) * (W - 1));
+        const py = Math.round(((1 - seed[1]) / 2) * (H - 1));
+        if (px >= 0 && px < W && py >= 0 && py < H) {
+          // Flood fill de vaciado desde el punto clicado deteniéndose en trazos
+          const seedVisited = new Uint8Array(W * H);
+          const sQueueX = new Int32Array(W * H);
+          const sQueueY = new Int32Array(W * H);
+          let sHead = 0;
+          let sTail = 0;
+
+          const seedIdx = py * W + px;
+          seedVisited[seedIdx] = 1;
+          sQueueX[sTail] = px;
+          sQueueY[sTail] = py;
+          sTail++;
+          solidMask[seedIdx] = 0;
+
+          while (sHead < sTail) {
+            const cx = sQueueX[sHead];
+            const cy = sQueueY[sHead];
+            sHead++;
+
+            const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+            for (const [dx, dy] of dirs) {
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+                const nIdx = ny * W + nx;
+                if (seedVisited[nIdx] === 0 && initialFeatureMap[nIdx] === 0) {
+                  seedVisited[nIdx] = 1;
+                  solidMask[nIdx] = 0;
+                  sQueueX[sTail] = nx;
+                  sQueueY[sTail] = ny;
+                  sTail++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   } else {
     solidMask = initialFeatureMap;
   }
@@ -527,6 +672,28 @@ export function processSilhouette(
     }
   }
 
+  // Calcular el Bounding Box normalizado de los píxeles sólidos en [0, 1]
+  let minPxX = W, maxPxX = 0, minPxY = H, maxPxY = 0;
+  let hasAnySolid = false;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (mask[y * W + x] === 1) {
+        hasAnySolid = true;
+        if (x < minPxX) minPxX = x;
+        if (x > maxPxX) maxPxX = x;
+        if (y < minPxY) minPxY = y;
+        if (y > maxPxY) maxPxY = y;
+      }
+    }
+  }
+
+  const boundsNormalized = hasAnySolid ? {
+    minU: Math.max(0, (minPxX - 1) / (W - 1)),
+    maxU: Math.min(1, (maxPxX + 1) / (W - 1)),
+    minV: Math.max(0, 1 - (maxPxY + 1) / (H - 1)),
+    maxV: Math.min(1, 1 - (minPxY - 1) / (H - 1)),
+  } : { minU: 0, minV: 0, maxU: 1, maxV: 1 };
+
   // 7. Si hay puntos de control manuales suministrados por el usuario, usarlos como contornos
   let finalContours = extractMultiContoursFromMask(mask, W, H);
   let finalMask = mask;
@@ -565,7 +732,8 @@ export function processSilhouette(
     sdf: finalSdf,
     contours: finalContours,
     aspect: W / H,
-    cleanedPixelsCount: cleanedCount
+    cleanedPixelsCount: cleanedCount,
+    boundsNormalized
   };
 }
 
@@ -749,71 +917,80 @@ function computeSDF(
 }
 
 /**
- * Extrae todos los bucles de contorno perimetrales de la máscara sin cruces falsos
+ * Extrae todos los bucles de contorno perimetrales de la máscara sin cruces falsos usando Moore-Neighbor Tracing y RDP
  */
 function extractMultiContoursFromMask(
   mask: Uint8Array,
   W: number,
   H: number
 ): [number, number][][] {
-  const isBorder = new Uint8Array(W * H);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (mask[y * W + x] === 1) {
-        if (
-          x === 0 || x === W - 1 || y === 0 || y === H - 1 ||
-          mask[y * W + (x - 1)] === 0 || mask[y * W + (x + 1)] === 0 ||
-          mask[(y - 1) * W + x] === 0 || mask[(y + 1) * W + x] === 0
-        ) {
-          isBorder[y * W + x] = 1;
-        }
-      }
-    }
-  }
-
-  const visited = new Uint8Array(W * H);
   const allContours: [number, number][][] = [];
+  const processedIsland = new Uint8Array(W * H);
 
+  // 8 vecinos en sentido horario
   const dx = [0, 1, 1, 1, 0, -1, -1, -1];
   const dy = [-1, -1, 0, 1, 1, 1, 0, -1];
 
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
-      if (isBorder[y * W + x] === 1 && visited[y * W + x] === 0) {
+      // Encontrar inicio de frontera exterior: píxel sólido con píxel vacío a la izquierda
+      if (mask[y * W + x] === 1 && mask[y * W + (x - 1)] === 0 && processedIsland[y * W + x] === 0) {
         const loopPts: [number, number][] = [];
         let currX = x;
         let currY = y;
-        let dir = 7;
-        const maxSteps = W * H;
+        let backtrackDir = 6; // Venimos desde el Oeste
+        const startX = x;
+        const startY = y;
+        let secondX = -1;
+        let secondY = -1;
         let step = 0;
+        const maxSteps = W * H * 2;
 
         while (step < maxSteps) {
           step++;
-          visited[currY * W + currX] = 1;
           const nx = (currX / (W - 1)) * 2 - 1;
           const ny = 1 - (currY / (H - 1)) * 2;
           loopPts.push([nx, ny]);
+          processedIsland[currY * W + currX] = 1;
 
-          let found = false;
+          let foundNext = false;
+          let nextX = currX;
+          let nextY = currY;
+          let nextBacktrack = 0;
+
           for (let i = 0; i < 8; i++) {
-            const checkDir = (dir + i) % 8;
+            const checkDir = (backtrackDir + i) % 8;
             const tx = currX + dx[checkDir];
             const ty = currY + dy[checkDir];
 
-            if (tx >= 0 && tx < W && ty >= 0 && ty < H && isBorder[ty * W + tx] === 1) {
-              currX = tx;
-              currY = ty;
-              dir = (checkDir + 5) % 8;
-              found = true;
+            if (tx >= 0 && tx < W && ty >= 0 && ty < H && mask[ty * W + tx] === 1) {
+              nextX = tx;
+              nextY = ty;
+              nextBacktrack = (checkDir + 5) % 8;
+              foundNext = true;
               break;
             }
           }
 
-          if (!found || (currX === x && currY === y)) break;
+          if (!foundNext) break;
+
+          if (step === 1) {
+            secondX = nextX;
+            secondY = nextY;
+          } else if (currX === startX && currY === startY && nextX === secondX && nextY === secondY) {
+            break;
+          }
+
+          currX = nextX;
+          currY = nextY;
+          backtrackDir = nextBacktrack;
         }
 
-        if (loopPts.length >= 6) {
-          allContours.push(resamplePolygon2D(loopPts, Math.min(128, Math.max(24, loopPts.length))));
+        if (loopPts.length >= 8) {
+          const simplified = rdpSimplify(loopPts, 0.005);
+          if (simplified.length >= 4) {
+            allContours.push(simplified);
+          }
         }
       }
     }
@@ -826,15 +1003,118 @@ function extractMultiContoursFromMask(
   return allContours;
 }
 
-function resamplePolygon2D(pts: [number, number][], n: number): [number, number][] {
-  if (pts.length <= n) return pts;
-  const result: [number, number][] = [];
-  const step = pts.length / n;
-  for (let i = 0; i < n; i++) {
-    const idx = Math.min(pts.length - 1, Math.floor(i * step));
-    result.push(pts[idx]);
+/**
+ * Simplificación Ramer-Douglas-Peucker para polígonos 2D
+ */
+function rdpSimplify(pts: [number, number][], epsilon: number): [number, number][] {
+  if (pts.length <= 2) return pts;
+  let dmax = 0;
+  let index = 0;
+  const start = pts[0];
+  const end = pts[pts.length - 1];
+
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpendicularDistance(pts[i], start, end);
+    if (d > dmax) {
+      index = i;
+      dmax = d;
+    }
   }
-  return result;
+
+  if (dmax > epsilon) {
+    const rec1 = rdpSimplify(pts.slice(0, index + 1), epsilon);
+    const rec2 = rdpSimplify(pts.slice(index), epsilon);
+    return rec1.slice(0, rec1.length - 1).concat(rec2);
+  } else {
+    return [start, end];
+  }
+}
+
+function perpendicularDistance(p: [number, number], lineStart: [number, number], lineEnd: [number, number]): number {
+  const dx = lineEnd[0] - lineStart[0];
+  const dy = lineEnd[1] - lineStart[1];
+  const mag = Math.hypot(dx, dy);
+  if (mag === 0) return Math.hypot(p[0] - lineStart[0], p[1] - lineStart[1]);
+  return Math.abs(dy * p[0] - dx * p[1] + lineEnd[0] * lineStart[1] - lineEnd[1] * lineStart[0]) / mag;
+}
+
+/**
+ * Fusiona múltiples BufferGeometry de Three.js en una sola
+ */
+function mergeBufferGeometries(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+  if (geos.length === 0) return null;
+  if (geos.length === 1) return geos[0];
+
+  const merged = new THREE.BufferGeometry();
+  let totalVerts = 0;
+  let totalIndices = 0;
+
+  for (const g of geos) {
+    const pos = g.getAttribute('position');
+    if (pos) totalVerts += pos.count;
+    if (g.index) totalIndices += g.index.count;
+    else if (pos) totalIndices += pos.count;
+  }
+
+  const positions = new Float32Array(totalVerts * 3);
+  const indices = totalIndices > 0 ? (totalVerts < 65535 ? new Uint16Array(totalIndices) : new Uint32Array(totalIndices)) : null;
+
+  let vOffset = 0;
+  let iOffset = 0;
+  let vertBase = 0;
+
+  for (const g of geos) {
+    const pos = g.getAttribute('position');
+    if (!pos) continue;
+
+    positions.set(pos.array as Float32Array, vOffset);
+    vOffset += pos.array.length;
+
+    if (indices) {
+      if (g.index) {
+        for (let i = 0; i < g.index.count; i++) {
+          indices[iOffset++] = vertBase + g.index.getX(i);
+        }
+      } else {
+        for (let i = 0; i < pos.count; i++) {
+          indices[iOffset++] = vertBase + i;
+        }
+      }
+    }
+    vertBase += pos.count;
+  }
+
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  if (indices) merged.setIndex(new THREE.BufferAttribute(indices, 1));
+  merged.computeVertexNormals();
+  return merged;
+}
+
+/**
+ * Convierte un BufferGeometry de Three.js al formato estándar del editor { vertices, faces }
+ */
+function bufferGeoToMeshData(geo: THREE.BufferGeometry): { vertices: V3[]; faces: MeshFace[] } {
+  geo.computeVertexNormals();
+  const posAttr = geo.getAttribute('position');
+  const vertices: V3[] = [];
+  const faces: MeshFace[] = [];
+
+  for (let i = 0; i < posAttr.count; i++) {
+    vertices.push([posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)]);
+  }
+
+  if (geo.index) {
+    const idxAttr = geo.index;
+    for (let i = 0; i < idxAttr.count; i += 3) {
+      faces.push({ indices: [idxAttr.getX(i), idxAttr.getX(i + 1), idxAttr.getX(i + 2)] });
+    }
+  } else {
+    for (let i = 0; i < vertices.length; i += 3) {
+      faces.push({ indices: [i, i + 1, i + 2] });
+    }
+  }
+
+  return { vertices, faces };
 }
 
 /**
@@ -986,69 +1266,229 @@ export async function carveModelFromBlueprints(
   // ── MODO 2: HARD-SURFACE CSG (Intersección Booleana de Prismas Exactos) ──
   if (mode === 'HARD_SURFACE_CSG') {
     const [dimX, dimY, dimZ] = dimensions;
-    const prisms: THREE.Mesh[] = [];
+    
+    // 1. Crear el sólido 3D extruido para cada vista activa
+    const viewGeometries: { key: BlueprintViewKey; geo: THREE.BufferGeometry }[] = [];
 
     if (processedViews.front && processedViews.front.contours.length > 0) {
-      for (const loop of processedViews.front.contours) {
-        const geo = createExtrudedContourGeo(loop, 'z', dimX, dimY, dimZ);
-        if (geo) prisms.push(new THREE.Mesh(geo));
-      }
-    }
-
-    if (processedViews.top && processedViews.top.contours.length > 0) {
-      for (const loop of processedViews.top.contours) {
-        const geo = createExtrudedContourGeo(loop, 'y', dimX, dimY, dimZ);
-        if (geo) prisms.push(new THREE.Mesh(geo));
-      }
+      const geos = processedViews.front.contours
+        .map(loop => createExtrudedContourGeo(loop, 'z', dimX, dimY, dimZ))
+        .filter((g): g is THREE.BufferGeometry => !!g);
+      const merged = mergeBufferGeometries(geos);
+      if (merged) viewGeometries.push({ key: 'front', geo: merged });
     }
 
     if (processedViews.side && processedViews.side.contours.length > 0) {
-      for (const loop of processedViews.side.contours) {
-        const geo = createExtrudedContourGeo(loop, 'x', dimX, dimY, dimZ);
-        if (geo) prisms.push(new THREE.Mesh(geo));
-      }
+      const geos = processedViews.side.contours
+        .map(loop => createExtrudedContourGeo(loop, 'x', dimX, dimY, dimZ))
+        .filter((g): g is THREE.BufferGeometry => !!g);
+      const merged = mergeBufferGeometries(geos);
+      if (merged) viewGeometries.push({ key: 'side', geo: merged });
     }
 
-    if (prisms.length === 0) {
+    if (processedViews.top && processedViews.top.contours.length > 0) {
+      const geos = processedViews.top.contours
+        .map(loop => createExtrudedContourGeo(loop, 'y', dimX, dimY, dimZ))
+        .filter((g): g is THREE.BufferGeometry => !!g);
+      const merged = mergeBufferGeometries(geos);
+      if (merged) viewGeometries.push({ key: 'top', geo: merged });
+    }
+
+    if (viewGeometries.length === 0) {
       return carveModelFromBlueprints({ ...options, mode: 'VISUAL_HULL' });
     }
 
+    // CASO 1: Si sólo hay 1 vista cargada (ej. sólo Vista Lateral), devolver su geometría directamente
+    if (viewGeometries.length === 1) {
+      return bufferGeoToMeshData(viewGeometries[0].geo);
+    }
+
+    // CASO 2: Si hay 2 o más vistas, realizar la intersección booleana CSG entre vistas
     try {
-      let resultCSG = CSG.fromMesh(prisms[0]);
-      for (let i = 1; i < prisms.length; i++) {
-        const nextCSG = CSG.fromMesh(prisms[i]);
+      let resultCSG = CSG.fromMesh(new THREE.Mesh(viewGeometries[0].geo));
+      for (let i = 1; i < viewGeometries.length; i++) {
+        const nextCSG = CSG.fromMesh(new THREE.Mesh(viewGeometries[i].geo));
         resultCSG = resultCSG.intersect(nextCSG);
       }
 
       const finalMesh = CSG.toMesh(resultCSG, new THREE.Matrix4());
       const geo = finalMesh.geometry as THREE.BufferGeometry;
       const posAttr = geo.getAttribute('position');
-      const vertices: V3[] = [];
-      const faces: MeshFace[] = [];
 
-      for (let i = 0; i < posAttr.count; i++) {
-        vertices.push([posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)]);
-      }
-
-      if (geo.index) {
-        const idxAttr = geo.index;
-        for (let i = 0; i < idxAttr.count; i += 3) {
-          faces.push({ indices: [idxAttr.getX(i), idxAttr.getX(i + 1), idxAttr.getX(i + 2)] });
-        }
+      if (posAttr && posAttr.count >= 12) {
+        return bufferGeoToMeshData(geo);
       } else {
-        for (let i = 0; i < vertices.length; i += 3) {
-          faces.push({ indices: [i, i + 1, i + 2] });
-        }
+        // Si CSG produjo un volumen vacío/degenerado por desalineación, fallback a Visual Hull de alta fidelidad
+        return carveModelFromBlueprints({ ...options, mode: 'VISUAL_HULL', smoothIterations: 0 });
       }
-
-      return { vertices, faces };
     } catch (e) {
-      console.warn('CSG intersection fallback to Visual Hull:', e);
-      return carveModelFromBlueprints({ ...options, mode: 'VISUAL_HULL' });
+      console.warn('CSG intersection fallback to High-Def Hard-Surface Visual Hull:', e);
+      return carveModelFromBlueprints({ ...options, mode: 'VISUAL_HULL', smoothIterations: 0 });
     }
   }
 
   return null;
+}
+
+/**
+ * Genera coordenadas UV de alta precisión para modelos creados a partir de bocetos ortográficos.
+ * Proyecta la textura y mapas PBR alineados 1:1 con la silueta original de la vista seleccionada
+ * (Frontal, Lateral o Superior) y asegura que las caras mapeen de forma coherente sin estiramientos.
+ */
+export function generateBlueprintUVs(
+  obj: { vertices: V3[]; faces: MeshFace[] },
+  viewKey: 'front' | 'side' | 'top' | 'auto' = 'auto',
+  _customDimensions?: V3,
+  viewConfig?: BlueprintImageConfig,
+  boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number }
+): { vertices: V3[]; faces: MeshFace[] } {
+  const vertices = obj.vertices;
+  if (!vertices || vertices.length === 0 || !obj.faces || obj.faces.length === 0) return obj;
+
+  // 1. Calcular el bounding box exacto de la malla
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  vertices.forEach(v => {
+    if (!v) return;
+    for (let i = 0; i < 3; i++) {
+      if (v[i] < min[i]) min[i] = v[i];
+      if (v[i] > max[i]) max[i] = v[i];
+    }
+  });
+
+  const size = [
+    Math.max(1e-4, max[0] - min[0]),
+    Math.max(1e-4, max[1] - min[1]),
+    Math.max(1e-4, max[2] - min[2]),
+  ];
+
+  // Configuración de calibración de textura
+  const scaleX = Math.max(0.01, viewConfig?.texScaleX ?? 1.0);
+  const scaleY = Math.max(0.01, viewConfig?.texScaleY ?? 1.0);
+  const offsetX = viewConfig?.texOffsetX ?? 0.0;
+  const offsetY = viewConfig?.texOffsetY ?? 0.0;
+  const flipH = viewConfig?.texFlipH ?? false;
+  const flipV = viewConfig?.texFlipV ?? false;
+  const mirrorOpposite = viewConfig?.texMirrorOpposite ?? false;
+
+  const bounds = boundsNormalized || { minU: 0, minV: 0, maxU: 1, maxV: 1 };
+  const bSpanU = Math.max(1e-4, bounds.maxU - bounds.minU);
+  const bSpanV = Math.max(1e-4, bounds.maxV - bounds.minV);
+
+  const faces = obj.faces.map(face => {
+    if (!face || !face.indices || face.indices.length < 3) return face;
+
+    // Calcular la normal de la cara
+    const i0 = face.indices[0];
+    const i1 = face.indices[1];
+    const i2 = face.indices[2];
+    const vert0 = i0 !== undefined ? vertices[i0] : null;
+    const vert1 = i1 !== undefined ? vertices[i1] : null;
+    const vert2 = i2 !== undefined ? vertices[i2] : null;
+
+    let normalX = 0, normalY = 0, normalZ = 0;
+    if (vert0 && vert1 && vert2) {
+      const v0 = new THREE.Vector3(...vert0);
+      const v1 = new THREE.Vector3(...vert1);
+      const v2 = new THREE.Vector3(...vert2);
+      const normal = new THREE.Vector3().crossVectors(
+        v1.clone().sub(v0),
+        v2.clone().sub(v0)
+      ).normalize();
+
+      if (normal.lengthSq() > 1e-6) {
+        normalX = normal.x;
+        normalY = normal.y;
+        normalZ = normal.z;
+      }
+    }
+
+    const absX = Math.abs(normalX);
+    const absY = Math.abs(normalY);
+    const absZ = Math.abs(normalZ);
+
+    const uvs: [number, number][] = face.indices.map(vIdx => {
+      const v = vertices[vIdx] || [0, 0, 0];
+      const [x, y, z] = v;
+      let rawU = 0.5;
+      let rawV = 0.5;
+
+      if (viewKey === 'side') {
+        // Vista Lateral (Proyección principal en X)
+        if (absX >= 0.25) {
+          // Caras laterales (+X derecha, -X izquierda)
+          if (mirrorOpposite) {
+            rawU = normalX >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+          } else {
+            rawU = (max[2] - z) / size[2];
+          }
+          rawV = (y - min[1]) / size[1];
+        } else {
+          // Caras de contorno / grosor perimetral
+          rawU = (x - min[0]) / size[0];
+          rawV = (absY >= absZ) ? (max[2] - z) / size[2] : (y - min[1]) / size[1];
+        }
+      } else if (viewKey === 'front') {
+        // Vista Frontal (Proyección principal en Z)
+        if (absZ >= 0.25) {
+          // Caras frontales y posteriores
+          if (mirrorOpposite) {
+            rawU = normalZ >= 0 ? (x - min[0]) / size[0] : (max[0] - x) / size[0];
+          } else {
+            rawU = (x - min[0]) / size[0];
+          }
+          rawV = (y - min[1]) / size[1];
+        } else {
+          // Caras de contorno perimetral
+          rawU = (z - min[2]) / size[2];
+          rawV = (absY >= absX) ? (x - min[0]) / size[0] : (y - min[1]) / size[1];
+        }
+      } else if (viewKey === 'top') {
+        // Vista Superior (Proyección principal en Y)
+        if (absY >= 0.25) {
+          rawU = (x - min[0]) / size[0];
+          rawV = normalY >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+        } else {
+          rawV = (y - min[1]) / size[1];
+          rawU = (absX >= absZ) ? (max[2] - z) / size[2] : (x - min[0]) / size[0];
+        }
+      } else {
+        // Modo Auto / Triplanar Ortográfico
+        if (absX >= absY && absX >= absZ) {
+          rawU = (mirrorOpposite && normalX < 0) ? (z - min[2]) / size[2] : (max[2] - z) / size[2];
+          rawV = (y - min[1]) / size[1];
+        } else if (absY >= absX && absY >= absZ) {
+          rawU = (x - min[0]) / size[0];
+          rawV = normalY >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+        } else {
+          rawU = (mirrorOpposite && normalZ < 0) ? (max[0] - x) / size[0] : (x - min[0]) / size[0];
+          rawV = (y - min[1]) / size[1];
+        }
+      }
+
+      // 1. Aplicar transformaciones de usuario (Escala centrada y Desplazamiento)
+      let uNorm = (rawU - 0.5) / scaleX + 0.5 - offsetX;
+      let vNorm = (rawV - 0.5) / scaleY + 0.5 - offsetY;
+
+      // 2. Invertir ejes si se solicitó
+      if (flipH) uNorm = 1.0 - uNorm;
+      if (flipV) vNorm = 1.0 - vNorm;
+
+      // 3. Mapear al espacio de silueta real recortado si está disponible
+      let finalU = bounds.minU + uNorm * bSpanU;
+      let finalV = bounds.minV + vNorm * bSpanV;
+
+      // Clamping seguro entre 0 y 1
+      finalU = Math.max(0.0001, Math.min(0.9999, finalU));
+      finalV = Math.max(0.0001, Math.min(0.9999, finalV));
+
+      return [finalU, finalV] as [number, number];
+    });
+
+    return { ...face, uvs };
+  });
+
+  return { vertices, faces };
 }
 
 /**
@@ -1103,7 +1543,8 @@ export function drawBlueprintPreview(
   viewTransform: { zoom: number; panX: number; panY: number } = { zoom: 1, panX: 0, panY: 0 },
   selectedPointInfo: { loopIdx: number; ptIdx: number } | null = null,
   isEditPointsMode: boolean = false,
-  hoveredPointInfo: { loopIdx: number; ptIdx: number } | null = null
+  hoveredPointInfo: { loopIdx: number; ptIdx: number } | null = null,
+  holeSeeds: [number, number][] = []
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -1253,6 +1694,36 @@ export function drawBlueprintPreview(
         ctx.stroke();
         ctx.restore();
       }
+    });
+  }
+
+  // 4. Dibujar Semillas de Huecos marcadas por el usuario (Marcadores rojos de vaciado)
+  if (holeSeeds && holeSeeds.length > 0) {
+    holeSeeds.forEach(seed => {
+      const cx = ((seed[0] + 1) / 2) * (W - 1);
+      const cy = ((1 - seed[1]) / 2) * (H - 1);
+      const r = Math.max(5, 8 / zoom);
+
+      ctx.save();
+      // Círculo de corte
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
+      ctx.fill();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = Math.max(1.5, 2 / zoom);
+      ctx.stroke();
+
+      // Cruz de corte
+      ctx.beginPath();
+      ctx.moveTo(cx - r * 0.55, cy - r * 0.55);
+      ctx.lineTo(cx + r * 0.55, cy + r * 0.55);
+      ctx.moveTo(cx + r * 0.55, cy - r * 0.55);
+      ctx.lineTo(cx - r * 0.55, cy + r * 0.55);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(1.2, 1.8 / zoom);
+      ctx.stroke();
+      ctx.restore();
     });
   }
 

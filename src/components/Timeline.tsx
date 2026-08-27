@@ -5,6 +5,7 @@ import {
   ChevronDown, Layers, Repeat, Sparkles
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { safeFixed } from '../utils/numberUtils';
 
 // ── Constantes de layout ───────────────────────────────────────────────────
 const ROW_H        = 22;   // px por fila de objeto
@@ -271,7 +272,7 @@ export const Timeline: React.FC<TimelineProps> = ({ onToggleCollapse }) => {
     updateTimeFromPointer(e.clientX, e.currentTarget);
   }, [updateTimeFromPointer]);
 
-  const fmt = (t: number) => t.toFixed(2);
+  const fmt = (t: number) => safeFixed(t, 2);
 
   // ── Tick labels ────────────────────────────────────────────────────────
   const tickCount = Math.min(Math.floor(duration) + 1, 11);

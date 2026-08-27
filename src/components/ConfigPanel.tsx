@@ -7,6 +7,7 @@ import {
 import { SHORTCUTS_DATA, CATEGORIES, ShortcutItem } from './KeyboardShortcutsModal';
 import { useStore } from '../store/useStore';
 import { extractUniqueEdges } from '../utils/wireframeMesh';
+import { safeFixed } from '../utils/numberUtils';
 
 interface ConfigPanelProps {
   onOpenShortcutsModal: (isFloating?: boolean) => void;
@@ -195,7 +196,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
               <div className="space-y-1">
                 <div className="flex justify-between text-[10px]">
                   <span className="text-zinc-400">Sensibilidad de Órbita</span>
-                  <span className="text-zinc-200 font-mono font-bold">{orbitSpeed.toFixed(1)}x</span>
+                  <span className="text-zinc-200 font-mono font-bold">{safeFixed(orbitSpeed, 1)}x</span>
                 </div>
                 <input
                   type="range"

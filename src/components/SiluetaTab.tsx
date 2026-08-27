@@ -18,6 +18,7 @@ import {
   ensureCCW,
 } from '../utils/silhouettes';
 import type { V3, MeshFace } from '../types';
+import { safeFixed } from '../utils/numberUtils';
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -231,7 +232,7 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
         <span className="text-[9px] text-zinc-500 w-16 flex-shrink-0">Tamaño 3D</span>
         <input type="range" min={0.5} max={5} step={0.1} value={boxSize}
           onChange={e => setBoxSize(+e.target.value)} className="flex-1 h-1 accent-violet-500"/>
-        <span className="text-[9px] text-zinc-300 font-mono w-8 text-right">{boxSize.toFixed(1)}</span>
+        <span className="text-[9px] text-zinc-300 font-mono w-8 text-right">{safeFixed(boxSize, 1)}</span>
       </div>
 
       {!allReady && (

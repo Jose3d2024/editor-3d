@@ -101,10 +101,10 @@ export class Exporter {
     let object3D: THREE.Object3D;
     let originalAnimations: THREE.AnimationClip[] = [];
 
-    const isWireOnly = forceWireframeTubes || obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
+    const shouldConvertToTubes = forceWireframeTubes || (obj.wireframeAsTubes === true && wireframeOptions?.mode !== 'LINES');
 
-    if (isWireOnly && !obj.meshData) {
-      // Generar tubos 3D sólidos para que STL/OBJ/GLTF exporten la celosía con volumen real
+    if (shouldConvertToTubes && !obj.meshData) {
+      // Generar tubos 3D sólidos solo si se especificó la opción de tubos 3D
       const wireGeo = createWireframeTubesGeometry(obj, wireframeOptions || { radius: 0.035, radialSegments: 6, addJointSpheres: true });
       object3D = new THREE.Mesh(wireGeo, customMaterial || new THREE.MeshStandardMaterial({ color: obj.color || '#4ade80', roughness: 0.3 }));
     } else if (obj.meshData) {
@@ -142,6 +142,37 @@ export class Exporter {
         const geometry = createBaseGeometry(obj);
         object3D = new THREE.Mesh(geometry, customMaterial || new THREE.MeshStandardMaterial({ color: obj.color || '#ffffff' }));
       }
+    } else if (!obj.faces || obj.faces.length === 0) {
+      // Objeto alámbrico / trazado / curva: exportar como líneas reales de la escena
+      const posArr: number[] = [];
+      const verts = obj.vertices || [];
+      if (obj.edges && obj.edges.length > 0) {
+        obj.edges.forEach(([i1, i2]) => {
+          const v1 = verts[i1], v2 = verts[i2];
+          if (v1 && v2) {
+            const off1 = obj.vertexOffsets?.[i1] || [0, 0, 0];
+            const off2 = obj.vertexOffsets?.[i2] || [0, 0, 0];
+            posArr.push(v1[0] + off1[0], v1[1] + off1[1], v1[2] + off1[2]);
+            posArr.push(v2[0] + off2[0], v2[1] + off2[1], v2[2] + off2[2]);
+          }
+        });
+      } else if (verts.length > 1) {
+        for (let i = 0; i < verts.length; i++) {
+          const next = (i + 1) % verts.length;
+          if (!obj.parameters?.closed && i === verts.length - 1) break;
+          const v1 = verts[i], v2 = verts[next];
+          const off1 = obj.vertexOffsets?.[i] || [0, 0, 0];
+          const off2 = obj.vertexOffsets?.[next] || [0, 0, 0];
+          posArr.push(v1[0] + off1[0], v1[1] + off1[1], v1[2] + off1[2]);
+          posArr.push(v2[0] + off2[0], v2[1] + off2[1], v2[2] + off2[2]);
+        }
+      }
+      const lineGeo = new THREE.BufferGeometry();
+      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+      object3D = new THREE.LineSegments(
+        lineGeo,
+        new THREE.LineBasicMaterial({ color: obj.color || '#4ade80' })
+      );
     } else {
       const geometry = createBaseGeometry(obj);
       object3D = new THREE.Mesh(geometry, customMaterial || new THREE.MeshStandardMaterial({ color: obj.color || '#ffffff' }));

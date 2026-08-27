@@ -186,7 +186,8 @@ export interface GeneratedPBRSet {
  */
 export function generateFullPBRMapsFromSource(
   sourceUrl: string,
-  normalStrength = 2.5
+  normalStrength = 1.2,
+  invertNormalY = false
 ): Promise<GeneratedPBRSet> {
   return new Promise((resolve) => {
     if (!sourceUrl) {
@@ -258,9 +259,9 @@ export function generateFullPBRMapsFromSource(
           const dX = (tr + 2 * r + br) - (tl + 2 * l + bl);
           const dY = (bl + 2 * b + br) - (tl + 2 * t + tr);
 
-          // Vector normal calculation (Tangent space OpenGL)
+          // Vector normal calculation (OpenGL vs DirectX toggle)
           let nx = -dX * normalStrength;
-          let ny = -dY * normalStrength;
+          let ny = (invertNormalY ? dY : -dY) * normalStrength;
           let nz = 1.0;
 
           const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1.0;

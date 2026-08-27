@@ -1158,6 +1158,131 @@ export async function simplifyMesh(
   }
 }
 
+/**
+ * Optimización especializada para figuras curvas, radiales y redondeadas
+ * (Esferas, Cilindros, Tubos, Toroides, Filetes y Geometrías Orgánicas Torneadas).
+ * 
+ * Elimina los pasos/anillos poligonales redundantes a lo largo de las curvaturas
+ * conservando la redondez y la silueta circular, recalculando normales suaves.
+ * 
+ * @param obj Objeto CSG o malla
+ * @param ratio Ratio de polígonos objetivo (ej: 0.3 para reducir al 30% / -70%)
+ * @param options Opciones adicionales como proteger aristas vivas / tapas
+ */
+export async function optimizeCurvedMesh(
+  obj: CSGObject,
+  ratio: number = 0.5,
+  options: { preserveCreases?: boolean; creaseAngleDeg?: number } = {}
+): Promise<{ vertices: V3[]; faces: MeshFace[]; report: string[] }> {
+  if (!obj.vertices || obj.vertices.length === 0) {
+    return { vertices: [], faces: [], report: ['Sin geometría'] };
+  }
+
+  // 1. Preparar geometría con offsets horneados
+  const baseVertices = obj.vertices.map((v, i) => {
+    const off = obj.vertexOffsets?.[i] || [0, 0, 0];
+    return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+  });
+
+  let geometry = new THREE.BufferGeometry();
+  const positions: number[] = [];
+  baseVertices.forEach(([x, y, z]) => positions.push(x, y, z));
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+  const indices: number[] = [];
+  obj.faces.forEach(f => {
+    if (f.indices.length === 3) {
+      indices.push(f.indices[0], f.indices[1], f.indices[2]);
+    } else if (f.indices.length === 4) {
+      indices.push(f.indices[0], f.indices[1], f.indices[2]);
+      indices.push(f.indices[0], f.indices[2], f.indices[3]);
+    } else if (f.indices.length > 4) {
+      for (let i = 1; i < f.indices.length - 1; i++) {
+        indices.push(f.indices[0], f.indices[i], f.indices[i + 1]);
+      }
+    }
+  });
+
+  geometry.setIndex(indices);
+
+  // 2. Pre-soldar costuras duplicadas para desbloquear la topología de esferas y tubos
+  geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
+
+  const initialTris = geometry.index ? geometry.index.count / 3 : 0;
+  if (initialTris < 8) {
+    return {
+      vertices: obj.vertices,
+      faces: obj.faces,
+      report: ['Malla con muy pocos triángulos para optimizar']
+    };
+  }
+
+  const targetRatio = Math.max(0.02, Math.min(0.98, ratio));
+  const targetTris = Math.max(6, Math.floor(initialTris * targetRatio));
+  const amountToRemove = initialTris - targetTris;
+
+  let simplifiedGeo: THREE.BufferGeometry | null = null;
+  let methodUsed = '';
+
+  // Intento 1: Decimación adaptativa con QEM (SimplifyModifier) ideal para preservar redondez
+  try {
+    const modifier = new SimplifyModifier();
+    simplifiedGeo = modifier.modify(geometry, amountToRemove);
+    methodUsed = 'SimplifyModifier (QEM Curvatura)';
+  } catch (eMod) {
+    console.warn('Fallback a Meshopt en optimizeCurvedMesh:', eMod);
+  }
+
+  // Si falló o no redujo suficiente, probar Meshopt con tolerancias suaves
+  if (!simplifiedGeo || (simplifiedGeo.index && simplifiedGeo.index.count / 3 >= initialTris * 0.98)) {
+    try {
+      const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
+      const indexAttr = geometry.index as THREE.BufferAttribute;
+      if (posAttr && indexAttr) {
+        const posArray = new Float32Array(posAttr.array);
+        const indexArray = new Uint32Array(indexAttr.array);
+        const targetCount = targetTris * 3;
+
+        const flags = options.preserveCreases ? ['LockBorder'] : [];
+        let meshoptRes = Meshopt.simplify(indexArray, posArray, 3, targetCount, 0.4, flags as any);
+        if (!meshoptRes || !meshoptRes[0] || meshoptRes[0].length >= indexArray.length) {
+          meshoptRes = Meshopt.simplify(indexArray, posArray, 3, targetCount, 1.2, []);
+        }
+
+        if (meshoptRes && meshoptRes[0] && meshoptRes[0].length > 0) {
+          const resGeo = geometry.clone();
+          resGeo.setIndex(new THREE.BufferAttribute(meshoptRes[0], 1));
+          simplifiedGeo = resGeo;
+          methodUsed = 'Meshopt (Tolerancia Suave)';
+        }
+      }
+    } catch (eMeshopt) {
+      console.warn('Error en Meshopt fallback:', eMeshopt);
+    }
+  }
+
+  const finalGeo = simplifiedGeo || geometry;
+
+  // 3. Recalcular normales suaves para que la superficie curva se vea perfectamente redonda
+  if (finalGeo.hasAttribute('normal')) {
+    finalGeo.deleteAttribute('normal');
+  }
+  finalGeo.computeVertexNormals();
+
+  const csgResult = fromThreeGeometry(finalGeo);
+  const finalTrisCount = csgResult.faces.length;
+  const reductionPct = initialTris > 0 ? Math.round(((initialTris - finalTrisCount) / initialTris) * 100) : 0;
+
+  return {
+    vertices: csgResult.vertices,
+    faces: csgResult.faces,
+    report: [
+      `Curvas y cilindros optimizados (${methodUsed})`,
+      `De ${initialTris.toLocaleString()} a ${finalTrisCount.toLocaleString()} triángulos (-${reductionPct}%)`
+    ]
+  };
+}
+
 /** Helper para convertir BufferGeometry a CSGObject */
 function convertBufferGeometryToCSG(geometry: THREE.BufferGeometry, originalObj: CSGObject): CSGObject {
   const posAttr = geometry.getAttribute('position');

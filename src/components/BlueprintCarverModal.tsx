@@ -49,11 +49,15 @@ import {
   ZoomOut,
   MousePointer,
   Crosshair,
-  Plus
+  Plus,
+  Minus,
+  Minimize2,
+  Palette
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import {
   carveModelFromBlueprints,
+  generateBlueprintUVs,
   loadCanvasImageData,
   processSilhouette,
   analyzeImageCharacteristics,
@@ -64,7 +68,17 @@ import {
   BlueprintImageConfig,
   ProcessedSilhouette
 } from '../utils/blueprintCarver';
-import { V3, MeshFace, CSGObject } from '../types';
+import { V3, MeshFace, CSGObject, MaterialData } from '../types';
+import { safeParseFixed } from '../utils/numberUtils';
+import { generateFullPBRMapsFromSource, GeneratedPBRSet } from '../utils/textureColorUtils';
+import { generateUVs } from '../utils/modifiers';
+import {
+  buildUnifiedMultiViewPBRAtlas,
+  generateMultiViewAtlasUVs,
+  prepareViewPBRData,
+  MultiViewAtlasResult,
+  ViewPBRData
+} from '../utils/blueprintAtlasPBR';
 
 interface BlueprintCarverModalProps {
   isOpen: boolean;
@@ -74,7 +88,13 @@ interface BlueprintCarverModalProps {
 export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOpen, onClose }) => {
   const project = useStore(state => state.project);
 
-  const addGenObject = (vertices: V3[], faces: MeshFace[], name: string) => {
+  const addGenObject = (
+    vertices: V3[],
+    faces: MeshFace[],
+    name: string,
+    materialId?: string,
+    material?: MaterialData
+  ) => {
     const obj: CSGObject = {
       id: Math.random().toString(36).substr(2, 9),
       name,
@@ -84,7 +104,9 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       parameters: { isBlueprintCarved: true },
       vertices,
       faces,
-      color: '#6366f1',
+      color: material?.color || '#6366f1',
+      materialId: materialId || undefined,
+      material: material || undefined,
       opacity: 1,
       visible: true,
       keyframes: [],
@@ -125,7 +147,17 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       dilation: 1,
       blurRadius: 1,
       denoiseIslandSize: 15,
-      thinFeatureBoost: 45
+      thinFeatureBoost: 45,
+      autoDetectHoles: true,
+      holeSeeds: [],
+      texScaleX: 1.0,
+      texScaleY: 1.0,
+      texOffsetX: 0,
+      texOffsetY: 0,
+      texFlipH: false,
+      texFlipV: false,
+      texMirrorOpposite: false,
+      invertNormalY: false
     },
     top: {
       url: null,
@@ -152,7 +184,17 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       dilation: 1,
       blurRadius: 1,
       denoiseIslandSize: 15,
-      thinFeatureBoost: 45
+      thinFeatureBoost: 45,
+      autoDetectHoles: true,
+      holeSeeds: [],
+      texScaleX: 1.0,
+      texScaleY: 1.0,
+      texOffsetX: 0,
+      texOffsetY: 0,
+      texFlipH: false,
+      texFlipV: false,
+      texMirrorOpposite: false,
+      invertNormalY: false
     },
     side: {
       url: null,
@@ -179,13 +221,39 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       dilation: 1,
       blurRadius: 1,
       denoiseIslandSize: 15,
-      thinFeatureBoost: 45
+      thinFeatureBoost: 45,
+      autoDetectHoles: true,
+      holeSeeds: [],
+      texScaleX: 1.0,
+      texScaleY: 1.0,
+      texOffsetX: 0,
+      texOffsetY: 0,
+      texFlipH: false,
+      texFlipV: false,
+      texMirrorOpposite: false,
+      invertNormalY: false
     }
   });
 
   const [activeTab, setActiveTab] = useState<'front' | 'top' | 'side'>('front');
   const [isEyedropperActive, setIsEyedropperActive] = useState(false);
-  const [subSection, setSubSection] = useState<'detection' | 'scale' | 'filters' | 'transform'>('detection');
+  const [isHolePickerActive, setIsHolePickerActive] = useState(false);
+  const [subSection, setSubSection] = useState<'detection' | 'scale' | 'filters' | 'transform' | 'pbr'>('detection');
+
+  // ── Generación de Textura & Mapas PBR desde Bocetos Ortográficos ──
+  const [isGeneratingPBR, setIsGeneratingPBR] = useState(false);
+  const [pbrNormalStrength, setPbrNormalStrength] = useState<number>(2.5);
+  const [applyPBRMaterialToCarve, setApplyPBRMaterialToCarve] = useState<boolean>(true);
+  const [textureTargetMode, setTextureTargetMode] = useState<'atlas' | 'view'>('atlas');
+  const [viewPBRDataMap, setViewPBRDataMap] = useState<Partial<Record<'front' | 'top' | 'side', ViewPBRData>>>({});
+  const [atlasPBRResult, setAtlasPBRResult] = useState<MultiViewAtlasResult | null>(null);
+  const [atlasPBRMaterial, setAtlasPBRMaterial] = useState<MaterialData | null>(null);
+  const [generatedPBRMaterials, setGeneratedPBRMaterials] = useState<{
+    front: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
+    top: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
+    side: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
+  }>({ front: null, top: null, side: null });
+  const [selectedPBRViewKey, setSelectedPBRViewKey] = useState<'front' | 'top' | 'side'>('front');
 
   // ── Estado de Zoom & Pan 2D para cada vista ──
   const [viewTransforms, setViewTransforms] = useState<{
@@ -296,9 +364,9 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     return () => { isMounted = false; };
   }, [
     isOpen,
-    viewConfigs.front.url, viewConfigs.front.threshold, viewConfigs.front.detectionMode, viewConfigs.front.fillInterior, viewConfigs.front.customBgColor, viewConfigs.front.invert, viewConfigs.front.dilation, viewConfigs.front.flipH, viewConfigs.front.flipV, viewConfigs.front.rotation, viewConfigs.front.scaleX, viewConfigs.front.scaleY, viewConfigs.front.scaleUniform, viewConfigs.front.preserveAspectRatio, viewConfigs.front.offsetX, viewConfigs.front.offsetY, viewConfigs.front.contrast, viewConfigs.front.brightness, viewConfigs.front.grayscale, viewConfigs.front.sharpen, viewConfigs.front.denoiseIslandSize, viewConfigs.front.thinFeatureBoost,
-    viewConfigs.top.url, viewConfigs.top.threshold, viewConfigs.top.detectionMode, viewConfigs.top.fillInterior, viewConfigs.top.customBgColor, viewConfigs.top.invert, viewConfigs.top.dilation, viewConfigs.top.flipH, viewConfigs.top.flipV, viewConfigs.top.rotation, viewConfigs.top.scaleX, viewConfigs.top.scaleY, viewConfigs.top.scaleUniform, viewConfigs.top.preserveAspectRatio, viewConfigs.top.offsetX, viewConfigs.top.offsetY, viewConfigs.top.contrast, viewConfigs.top.brightness, viewConfigs.top.grayscale, viewConfigs.top.sharpen, viewConfigs.top.denoiseIslandSize, viewConfigs.top.thinFeatureBoost,
-    viewConfigs.side.url, viewConfigs.side.threshold, viewConfigs.side.detectionMode, viewConfigs.side.fillInterior, viewConfigs.side.customBgColor, viewConfigs.side.invert, viewConfigs.side.dilation, viewConfigs.side.flipH, viewConfigs.side.flipV, viewConfigs.side.rotation, viewConfigs.side.scaleX, viewConfigs.side.scaleY, viewConfigs.side.scaleUniform, viewConfigs.side.preserveAspectRatio, viewConfigs.side.offsetX, viewConfigs.side.offsetY, viewConfigs.side.contrast, viewConfigs.side.brightness, viewConfigs.side.grayscale, viewConfigs.side.sharpen, viewConfigs.side.denoiseIslandSize, viewConfigs.side.thinFeatureBoost
+    viewConfigs.front.url, viewConfigs.front.threshold, viewConfigs.front.detectionMode, viewConfigs.front.fillInterior, viewConfigs.front.customBgColor, viewConfigs.front.invert, viewConfigs.front.dilation, viewConfigs.front.flipH, viewConfigs.front.flipV, viewConfigs.front.rotation, viewConfigs.front.scaleX, viewConfigs.front.scaleY, viewConfigs.front.scaleUniform, viewConfigs.front.preserveAspectRatio, viewConfigs.front.offsetX, viewConfigs.front.offsetY, viewConfigs.front.contrast, viewConfigs.front.brightness, viewConfigs.front.grayscale, viewConfigs.front.sharpen, viewConfigs.front.denoiseIslandSize, viewConfigs.front.thinFeatureBoost, viewConfigs.front.autoDetectHoles, JSON.stringify(viewConfigs.front.holeSeeds),
+    viewConfigs.top.url, viewConfigs.top.threshold, viewConfigs.top.detectionMode, viewConfigs.top.fillInterior, viewConfigs.top.customBgColor, viewConfigs.top.invert, viewConfigs.top.dilation, viewConfigs.top.flipH, viewConfigs.top.flipV, viewConfigs.top.rotation, viewConfigs.top.scaleX, viewConfigs.top.scaleY, viewConfigs.top.scaleUniform, viewConfigs.top.preserveAspectRatio, viewConfigs.top.offsetX, viewConfigs.top.offsetY, viewConfigs.top.contrast, viewConfigs.top.brightness, viewConfigs.top.grayscale, viewConfigs.top.sharpen, viewConfigs.top.denoiseIslandSize, viewConfigs.top.thinFeatureBoost, viewConfigs.top.autoDetectHoles, JSON.stringify(viewConfigs.top.holeSeeds),
+    viewConfigs.side.url, viewConfigs.side.threshold, viewConfigs.side.detectionMode, viewConfigs.side.fillInterior, viewConfigs.side.customBgColor, viewConfigs.side.invert, viewConfigs.side.dilation, viewConfigs.side.flipH, viewConfigs.side.flipV, viewConfigs.side.rotation, viewConfigs.side.scaleX, viewConfigs.side.scaleY, viewConfigs.side.scaleUniform, viewConfigs.side.preserveAspectRatio, viewConfigs.side.offsetX, viewConfigs.side.offsetY, viewConfigs.side.contrast, viewConfigs.side.brightness, viewConfigs.side.grayscale, viewConfigs.side.sharpen, viewConfigs.side.denoiseIslandSize, viewConfigs.side.thinFeatureBoost, viewConfigs.side.autoDetectHoles, JSON.stringify(viewConfigs.side.holeSeeds)
   ]);
 
   // ── Redibujar canvas 2D con Zoom, Pan y Puntos de Control ──
@@ -312,7 +380,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         viewTransforms.front,
         selectedPoint,
         isEditPointsMode,
-        hoveredPoint
+        hoveredPoint,
+        viewConfigs.front.holeSeeds || []
       );
     }
     if (activeTab === 'top' && canvasTopRef.current) {
@@ -324,7 +393,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         viewTransforms.top,
         selectedPoint,
         isEditPointsMode,
-        hoveredPoint
+        hoveredPoint,
+        viewConfigs.top.holeSeeds || []
       );
     }
     if (activeTab === 'side' && canvasSideRef.current) {
@@ -336,10 +406,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         viewTransforms.side,
         selectedPoint,
         isEditPointsMode,
-        hoveredPoint
+        hoveredPoint,
+        viewConfigs.side.holeSeeds || []
       );
     }
-  }, [rawImages, processedSilhouettes, activeTab, viewTransforms, selectedPoint, hoveredPoint, isEditPointsMode]);
+  }, [rawImages, processedSilhouettes, activeTab, viewTransforms, selectedPoint, hoveredPoint, isEditPointsMode, viewConfigs.front.holeSeeds, viewConfigs.top.holeSeeds, viewConfigs.side.holeSeeds]);
 
   // ── Controles de Zoom 2D ──
   const handleZoom = (key: 'front' | 'top' | 'side', delta: number) => {
@@ -347,7 +418,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       ...prev,
       [key]: {
         ...prev[key],
-        zoom: Math.max(0.5, Math.min(5.0, +(prev[key].zoom + delta).toFixed(2)))
+        zoom: Math.max(0.5, Math.min(5.0, safeParseFixed(prev[key].zoom + delta, 2, 1)))
       }
     }));
   };
@@ -751,36 +822,75 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }));
   };
 
-  // ── Manejador de Clic en Canvas para Cuentagotas ──
+  // ── Manejador de Clic en Canvas para Cuentagotas y Selector de Huecos ──
   const handleCanvasClick = (key: 'front' | 'top' | 'side', e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isEyedropperActive) return;
-    const canvas = e.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const clickY = e.clientY - rect.top;
+    if (isEyedropperActive) {
+      const canvas = e.currentTarget;
+      const rect = canvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
 
-    const imgData = rawImages[key];
-    if (!imgData) return;
+      const imgData = rawImages[key];
+      if (!imgData) return;
 
-    const scaleX = imgData.width / rect.width;
-    const scaleY = imgData.height / rect.height;
+      const scaleX = imgData.width / rect.width;
+      const scaleY = imgData.height / rect.height;
 
-    const px = Math.min(imgData.width - 1, Math.max(0, Math.floor(clickX * scaleX)));
-    const py = Math.min(imgData.height - 1, Math.max(0, Math.floor(clickY * scaleY)));
+      const px = Math.min(imgData.width - 1, Math.max(0, Math.floor(clickX * scaleX)));
+      const py = Math.min(imgData.height - 1, Math.max(0, Math.floor(clickY * scaleY)));
 
-    const idx = (py * imgData.width + px) * 4;
-    const r = imgData.data[idx];
-    const g = imgData.data[idx + 1];
-    const b = imgData.data[idx + 2];
+      const idx = (py * imgData.width + px) * 4;
+      const r = imgData.data[idx];
+      const g = imgData.data[idx + 1];
+      const b = imgData.data[idx + 2];
 
+      setViewConfigs(prev => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
+          customBgColor: [r, g, b]
+        }
+      }));
+      setIsEyedropperActive(false);
+      return;
+    }
+
+    if (isHolePickerActive) {
+      const canvas = e.currentTarget;
+      const rect = canvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+
+      const transform = viewTransforms[key];
+      const zoom = transform.zoom || 1;
+      const panX = transform.panX || 0;
+      const panY = transform.panY || 0;
+
+      const normX = Math.max(0, Math.min(1, (clickX - panX) / (rect.width * zoom)));
+      const normY = Math.max(0, Math.min(1, (clickY - panY) / (rect.height * zoom)));
+
+      const currentSeeds = viewConfigs[key].holeSeeds || [];
+      const updatedSeeds: [number, number][] = [...currentSeeds, [normX, normY]];
+
+      setViewConfigs(prev => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
+          holeSeeds: updatedSeeds
+        }
+      }));
+      return;
+    }
+  };
+
+  const handleClearHoleSeeds = (key: 'front' | 'top' | 'side') => {
     setViewConfigs(prev => ({
       ...prev,
       [key]: {
         ...prev[key],
-        customBgColor: [r, g, b]
+        holeSeeds: []
       }
     }));
-    setIsEyedropperActive(false);
   };
 
   // ── Inicializar Escena Three.js para Mini-Visor 3D ──
@@ -895,35 +1005,135 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
           previewMeshRef.current.geometry.dispose();
         }
 
+        // Determinar modo de mapeo UV y material a previsualizar
+        const isAtlasActive = applyPBRMaterialToCarve && textureTargetMode === 'atlas' && !!atlasPBRMaterial;
+        const activeViewGenerated = applyPBRMaterialToCarve && textureTargetMode === 'view'
+          ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab])
+          : null;
+
+        const boundsMap = {
+          front: processedSilhouettes.front?.boundsNormalized,
+          top: processedSilhouettes.top?.boundsNormalized,
+          side: processedSilhouettes.side?.boundsNormalized
+        };
+
+        // Generar coordenadas UV precisas:
+        // - Si está activo el Atlas Multi-Vista: mapea cada cara según su orientación (Frontal, Lateral, Superior) al cuadrante exacto del Atlas con escalado y compensación
+        // - Si está en modo vista individual: proyecta ortográficamente sobre esa vista con soporte de offset, escala y espejo
+        let uvMesh;
+        if (isAtlasActive) {
+          uvMesh = generateMultiViewAtlasUVs(
+            meshData,
+            atlasPBRResult?.activeViews || ['side', 'top', 'front'],
+            dimensions,
+            viewConfigs,
+            boundsMap
+          );
+        } else {
+          const targetViewKey = selectedPBRViewKey || activeTab;
+          const viewCfg = viewConfigs[targetViewKey];
+          const bNorm = boundsMap[targetViewKey];
+          uvMesh = generateBlueprintUVs(meshData, targetViewKey, dimensions, viewCfg, bNorm);
+        }
+
         const geo = new THREE.BufferGeometry();
         const positions: number[] = [];
+        const uvs: number[] = [];
         const indices: number[] = [];
+        const vertMap = new Map<string, number>();
 
-        meshData.vertices.forEach(v => {
-          positions.push(v[0], v[1], v[2]);
-        });
+        uvMesh.faces.forEach(face => {
+          if (!face.indices || face.indices.length < 3) return;
+          const faceVertIndices: number[] = [];
 
-        meshData.faces.forEach(f => {
-          if (f.indices.length === 3) {
-            indices.push(f.indices[0], f.indices[1], f.indices[2]);
-          } else if (f.indices.length === 4) {
-            indices.push(f.indices[0], f.indices[1], f.indices[2]);
-            indices.push(f.indices[0], f.indices[2], f.indices[3]);
+          face.indices.forEach((posIdx, i) => {
+            const uv = face.uvs?.[i] || [0.5, 0.5];
+            const key = `${posIdx}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`;
+            if (vertMap.has(key)) {
+              faceVertIndices.push(vertMap.get(key)!);
+            } else {
+              const newIdx = positions.length / 3;
+              const v = uvMesh.vertices[posIdx] || [0, 0, 0];
+              positions.push(v[0], v[1], v[2]);
+              uvs.push(uv[0], uv[1]);
+              vertMap.set(key, newIdx);
+              faceVertIndices.push(newIdx);
+            }
+          });
+
+          if (faceVertIndices.length === 3) {
+            indices.push(faceVertIndices[0], faceVertIndices[1], faceVertIndices[2]);
+          } else if (faceVertIndices.length === 4) {
+            indices.push(faceVertIndices[0], faceVertIndices[1], faceVertIndices[2]);
+            indices.push(faceVertIndices[0], faceVertIndices[2], faceVertIndices[3]);
+          } else {
+            for (let i = 1; i < faceVertIndices.length - 1; i++) {
+              indices.push(faceVertIndices[0], faceVertIndices[i], faceVertIndices[i + 1]);
+            }
           }
         });
 
         geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setAttribute('uv2', new THREE.Float32BufferAttribute(uvs, 2));
         if (indices.length > 0) {
           geo.setIndex(indices);
         }
         geo.computeVertexNormals();
 
-        const mat = new THREE.MeshStandardMaterial({
-          color: 0x4f46e5,
-          roughness: 0.22,
-          metalness: 0.18,
-          side: THREE.DoubleSide
-        });
+        // Configurar material PBR (Atlas Multi-Vista o Vista Individual)
+        let mat: THREE.Material;
+        const activeMaterial = isAtlasActive ? atlasPBRMaterial : activeViewGenerated?.material;
+
+        if (activeMaterial) {
+          const m = activeMaterial;
+          const texLoader = new THREE.TextureLoader();
+          const pbrMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            roughness: m.roughness ?? 0.45,
+            metalness: m.metalness ?? 0.08,
+            side: THREE.DoubleSide
+          });
+
+          if (m.map) {
+            const tex = texLoader.load(m.map, () => {
+              pbrMat.needsUpdate = true;
+            });
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.wrapS = THREE.ClampToEdgeWrapping;
+            tex.wrapT = THREE.ClampToEdgeWrapping;
+            pbrMat.map = tex;
+          }
+          if (m.normalMap) {
+            const nTex = texLoader.load(m.normalMap, () => {
+              pbrMat.needsUpdate = true;
+            });
+            pbrMat.normalMap = nTex;
+            pbrMat.normalScale = new THREE.Vector2(1, 1);
+          }
+          if (m.roughnessMap) {
+            const rTex = texLoader.load(m.roughnessMap, () => {
+              pbrMat.needsUpdate = true;
+            });
+            pbrMat.roughnessMap = rTex;
+          }
+          if (m.aoMap) {
+            const aoTex = texLoader.load(m.aoMap, () => {
+              pbrMat.needsUpdate = true;
+            });
+            pbrMat.aoMap = aoTex;
+            pbrMat.aoMapIntensity = 1.0;
+          }
+          pbrMat.needsUpdate = true;
+          mat = pbrMat;
+        } else {
+          mat = new THREE.MeshStandardMaterial({
+            color: 0x4f46e5,
+            roughness: 0.22,
+            metalness: 0.18,
+            side: THREE.DoubleSide
+          });
+        }
 
         const newMesh = new THREE.Mesh(geo, mat);
         sceneRef.current.add(newMesh);
@@ -955,8 +1165,245 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     resolution,
     dimensions,
     smoothIterations,
-    smoothFactor
+    smoothFactor,
+    generatedPBRMaterials,
+    selectedPBRViewKey,
+    applyPBRMaterialToCarve,
+    textureTargetMode,
+    atlasPBRMaterial
   ]);
+
+  // ── Generar Material y Mapas PBR para una Vista Individual ──
+  const handleGeneratePBRFromBlueprint = async (viewKey: 'front' | 'top' | 'side') => {
+    const cfg = viewConfigs[viewKey];
+    if (!cfg.url) {
+      setStatusMsg('Carga primero una imagen en esta vista para generar los mapas PBR');
+      return;
+    }
+    setIsGeneratingPBR(true);
+    const viewName = viewKey === 'front' ? 'Frontal' : viewKey === 'top' ? 'Superior' : 'Lateral';
+    setStatusMsg(`⚡ Extrayendo mapas Normal, Bump, Rugosidad y AO de la imagen (${viewName})...`);
+
+    try {
+      const vData = await prepareViewPBRData(cfg.url, cfg, pbrNormalStrength);
+      if (!vData) throw new Error('No se pudo procesar la imagen de la vista');
+
+      const updatedViewDataMap = {
+        ...viewPBRDataMap,
+        [viewKey]: vData
+      };
+      setViewPBRDataMap(updatedViewDataMap);
+
+      const newMatId = 'mat_pbr_' + Math.random().toString(36).substr(2, 9);
+      const newMaterial: MaterialData = {
+        id: newMatId,
+        name: `Material PBR - Boceto ${viewName}`,
+        category: 'imported',
+        color: '#ffffff',
+        roughness: 0.45,
+        metalness: 0.08,
+        emissive: '#000000',
+        emissiveIntensity: 0,
+        map: vData.alignedImageUrl,
+        normalMap: vData.pbrSet.normalMap,
+        displacementMap: vData.pbrSet.displacementMap,
+        displacementScale: 0.05,
+        roughnessMap: vData.pbrSet.roughnessMap,
+        aoMap: vData.pbrSet.aoMap,
+        aoMapIntensity: 1.0,
+        metalnessMap: vData.pbrSet.metalnessMap,
+        normalScale: 1.0,
+        mapRepeat: [1, 1],
+        mapOffset: [0, 0],
+        mapRotation: 0,
+        opacity: 1,
+        transparent: false,
+        useORM: false,
+        uvwMapping: 'UV',
+      };
+
+      // Añadir a la biblioteca de materiales
+      useStore.getState().addMaterial(newMaterial);
+
+      setGeneratedPBRMaterials(prev => ({
+        ...prev,
+        [viewKey]: {
+          materialId: newMatId,
+          material: newMaterial,
+          pbrSet: vData.pbrSet
+        }
+      }));
+      setSelectedPBRViewKey(viewKey);
+      setApplyPBRMaterialToCarve(true);
+
+      // Si hay más de una vista con imagen cargada, crear o actualizar automáticamente el Atlas Multi-Vista
+      const loadedKeys = (['front', 'top', 'side'] as const).filter(k => !!viewConfigs[k].url);
+      if (loadedKeys.length > 1) {
+        setStatusMsg(`🎨 Combinando ${loadedKeys.length} vistas en el Atlas Multi-Vista PBR...`);
+        
+        // Preparar las que falten
+        for (const k of loadedKeys) {
+          if (!updatedViewDataMap[k] && viewConfigs[k].url) {
+            const data = await prepareViewPBRData(viewConfigs[k].url!, viewConfigs[k], pbrNormalStrength);
+            if (data) updatedViewDataMap[k] = data;
+          }
+        }
+        setViewPBRDataMap(updatedViewDataMap);
+
+        const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048);
+        if (atlasRes) {
+          const atlasMat: MaterialData = {
+            id: atlasRes.materialId,
+            name: atlasRes.materialName,
+            category: 'imported',
+            color: '#ffffff',
+            roughness: 0.45,
+            metalness: 0.08,
+            emissive: '#000000',
+            emissiveIntensity: 0,
+            map: atlasRes.albedoAtlasUrl,
+            normalMap: atlasRes.normalAtlasUrl,
+            displacementMap: atlasRes.displacementAtlasUrl,
+            displacementScale: 0.05,
+            roughnessMap: atlasRes.roughnessAtlasUrl,
+            aoMap: atlasRes.aoAtlasUrl,
+            aoMapIntensity: 1.0,
+            metalnessMap: atlasRes.metalnessAtlasUrl,
+            normalScale: 1.0,
+            mapRepeat: [1, 1],
+            mapOffset: [0, 0],
+            mapRotation: 0,
+            opacity: 1,
+            transparent: false,
+            useORM: false,
+            uvwMapping: 'UV',
+          };
+          useStore.getState().addMaterial(atlasMat);
+          setAtlasPBRResult(atlasRes);
+          setAtlasPBRMaterial(atlasMat);
+          setTextureTargetMode('atlas');
+        }
+      }
+
+      setStatusMsg(`✓ Material PBR guardado y Atlas actualizado con éxito`);
+      setTimeout(() => {
+        update3DPreview();
+      }, 100);
+    } catch (err: any) {
+      console.error('Error generando mapas PBR:', err);
+      setStatusMsg('Error al extraer los mapas PBR desde la imagen');
+    } finally {
+      setIsGeneratingPBR(false);
+    }
+  };
+
+  // ── Generar o Re-construir el Atlas Multi-Vista PBR Directamente ──
+  const handleGenerateUnifiedAtlasPBR = async () => {
+    const loadedKeys = (['front', 'top', 'side'] as const).filter(k => !!viewConfigs[k].url);
+    if (loadedKeys.length === 0) {
+      setStatusMsg('Carga primero al menos 1 o más vistas con bocetos');
+      return;
+    }
+
+    setIsGeneratingPBR(true);
+    setStatusMsg(`🎨 Sintetizando mapas PBR y horneando Atlas Multi-Vista (${loadedKeys.length} vistas)...`);
+
+    try {
+      const updatedViewDataMap = { ...viewPBRDataMap };
+
+      for (const k of loadedKeys) {
+        if (!updatedViewDataMap[k] || !updatedViewDataMap[k]?.alignedImageUrl) {
+          const vData = await prepareViewPBRData(viewConfigs[k].url!, viewConfigs[k], pbrNormalStrength);
+          if (vData) {
+            updatedViewDataMap[k] = vData;
+            
+            // También crear material individual
+            const vName = k === 'front' ? 'Frontal' : k === 'top' ? 'Superior' : 'Lateral';
+            const newMatId = 'mat_pbr_' + Math.random().toString(36).substr(2, 9);
+            const newMaterial: MaterialData = {
+              id: newMatId,
+              name: `Material PBR - Boceto ${vName}`,
+              category: 'imported',
+              color: '#ffffff',
+              roughness: 0.45,
+              metalness: 0.08,
+              emissive: '#000000',
+              emissiveIntensity: 0,
+              map: vData.alignedImageUrl,
+              normalMap: vData.pbrSet.normalMap,
+              displacementMap: vData.pbrSet.displacementMap,
+              displacementScale: 0.05,
+              roughnessMap: vData.pbrSet.roughnessMap,
+              aoMap: vData.pbrSet.aoMap,
+              aoMapIntensity: 1.0,
+              metalnessMap: vData.pbrSet.metalnessMap,
+              normalScale: 1.0,
+              mapRepeat: [1, 1],
+              mapOffset: [0, 0],
+              mapRotation: 0,
+              opacity: 1,
+              transparent: false,
+              useORM: false,
+              uvwMapping: 'UV',
+            };
+            useStore.getState().addMaterial(newMaterial);
+            setGeneratedPBRMaterials(prev => ({
+              ...prev,
+              [k]: { materialId: newMatId, material: newMaterial, pbrSet: vData.pbrSet }
+            }));
+          }
+        }
+      }
+
+      setViewPBRDataMap(updatedViewDataMap);
+
+      const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048);
+      if (!atlasRes) throw new Error('No se pudo generar el Atlas Multi-Vista');
+
+      const atlasMat: MaterialData = {
+        id: atlasRes.materialId,
+        name: atlasRes.materialName,
+        category: 'imported',
+        color: '#ffffff',
+        roughness: 0.45,
+        metalness: 0.08,
+        emissive: '#000000',
+        emissiveIntensity: 0,
+        map: atlasRes.albedoAtlasUrl,
+        normalMap: atlasRes.normalAtlasUrl,
+        displacementMap: atlasRes.displacementAtlasUrl,
+        displacementScale: 0.05,
+        roughnessMap: atlasRes.roughnessAtlasUrl,
+        aoMap: atlasRes.aoAtlasUrl,
+        aoMapIntensity: 1.0,
+        metalnessMap: atlasRes.metalnessAtlasUrl,
+        normalScale: 1.0,
+        mapRepeat: [1, 1],
+        mapOffset: [0, 0],
+        mapRotation: 0,
+        opacity: 1,
+        transparent: false,
+        useORM: false,
+        uvwMapping: 'UV',
+      };
+
+      useStore.getState().addMaterial(atlasMat);
+      setAtlasPBRResult(atlasRes);
+      setAtlasPBRMaterial(atlasMat);
+      setTextureTargetMode('atlas');
+      setApplyPBRMaterialToCarve(true);
+
+      setStatusMsg(`✓ Atlas Multi-Vista PBR horneado con éxito (${atlasRes.activeViews.length} vistas combinadas)`);
+      setTimeout(() => {
+        update3DPreview();
+      }, 100);
+    } catch (err: any) {
+      console.error('Error horneando Atlas PBR:', err);
+      setStatusMsg('Error al generar el Atlas Multi-Vista PBR');
+    } finally {
+      setIsGeneratingPBR(false);
+    }
+  };
 
   // Actualizar Bounding Cage al cambiar dimensiones
   useEffect(() => {
@@ -1074,12 +1521,12 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     let depthZ = 2.0;
 
     if (frontSil && frontSil.aspect) {
-      widthX = parseFloat((baseH * frontSil.aspect).toFixed(2));
+      widthX = safeParseFixed(baseH * frontSil.aspect, 2, 2.0);
     }
     if (sideSil && sideSil.aspect) {
-      depthZ = parseFloat((baseH * sideSil.aspect).toFixed(2));
+      depthZ = safeParseFixed(baseH * sideSil.aspect, 2, 2.0);
     } else if (topSil && topSil.aspect && frontSil && frontSil.aspect) {
-      depthZ = parseFloat((widthX / topSil.aspect).toFixed(2));
+      depthZ = safeParseFixed(widthX / topSil.aspect, 2, 2.0);
     }
 
     setDimensions([Math.max(0.2, widthX), baseH, Math.max(0.2, depthZ)]);
@@ -1114,7 +1561,64 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         return;
       }
 
-      addGenObject(result.vertices, result.faces, 'Modelo Tallado por Bocetos');
+      const isAtlasActive = applyPBRMaterialToCarve && textureTargetMode === 'atlas' && !!atlasPBRMaterial;
+      const activeViewGenerated = applyPBRMaterialToCarve && textureTargetMode === 'view'
+        ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab] || generatedPBRMaterials.front || generatedPBRMaterials.side || generatedPBRMaterials.top)
+        : null;
+
+      const boundsMap = {
+        front: processedSilhouettes.front?.boundsNormalized,
+        top: processedSilhouettes.top?.boundsNormalized,
+        side: processedSilhouettes.side?.boundsNormalized
+      };
+
+      let uvMesh;
+      let targetMat: MaterialData | undefined = undefined;
+      let targetMatId: string | undefined = undefined;
+
+      if (isAtlasActive && atlasPBRMaterial) {
+        uvMesh = generateMultiViewAtlasUVs(
+          { vertices: result.vertices, faces: result.faces },
+          atlasPBRResult?.activeViews || ['side', 'top', 'front'],
+          dimensions,
+          viewConfigs,
+          boundsMap
+        );
+        targetMat = atlasPBRMaterial;
+        targetMatId = atlasPBRMaterial.id;
+      } else if (activeViewGenerated && activeViewGenerated.material) {
+        const targetViewKey = selectedPBRViewKey || activeTab;
+        const viewCfg = viewConfigs[targetViewKey];
+        const bNorm = boundsMap[targetViewKey];
+        uvMesh = generateBlueprintUVs(
+          { vertices: result.vertices, faces: result.faces },
+          targetViewKey,
+          dimensions,
+          viewCfg,
+          bNorm
+        );
+        targetMat = activeViewGenerated.material;
+        targetMatId = activeViewGenerated.materialId;
+      } else {
+        const targetViewKey = selectedPBRViewKey || activeTab;
+        const viewCfg = viewConfigs[targetViewKey];
+        const bNorm = boundsMap[targetViewKey];
+        uvMesh = generateBlueprintUVs(
+          { vertices: result.vertices, faces: result.faces },
+          'auto',
+          dimensions,
+          viewCfg,
+          bNorm
+        );
+      }
+
+      addGenObject(
+        uvMesh.vertices,
+        uvMesh.faces,
+        isAtlasActive ? 'Modelo Tallado (Atlas Multi-Vista PBR)' : 'Modelo Tallado por Bocetos',
+        targetMatId,
+        targetMat
+      );
       onClose();
     } catch (err: any) {
       alert('Error en el tallado: ' + (err?.message || String(err)));
@@ -1263,6 +1767,32 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                     <div className="flex items-center gap-1.5 shrink-0">
                       {cfg.url && (
                         <>
+                          <button
+                            onClick={() => {
+                              setIsHolePickerActive(!isHolePickerActive);
+                              if (isEyedropperActive) setIsEyedropperActive(false);
+                            }}
+                            className={`px-2 py-1 rounded border text-[9.5px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm ${
+                              isHolePickerActive
+                                ? 'bg-rose-600 border-rose-400 text-white shadow-rose-500/30 ring-1 ring-rose-300'
+                                : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-300'
+                            }`}
+                            title="Haz clic en huecos cerrados o zonas entre patas para recortar y vaciar el fondo"
+                          >
+                            <Scissors size={11} className={isHolePickerActive ? 'text-white' : 'text-rose-400'} />
+                            <span>{isHolePickerActive ? 'Vaciando Hueco (Clic)' : 'Vaciar Hueco'}</span>
+                          </button>
+
+                          {cfg.holeSeeds && cfg.holeSeeds.length > 0 && (
+                            <button
+                              onClick={() => handleClearHoleSeeds(key)}
+                              className="px-1.5 py-1 rounded bg-rose-950/80 hover:bg-rose-900 border border-rose-700/60 text-rose-200 text-[9px] font-bold transition-colors cursor-pointer"
+                              title="Eliminar todos los puntos de vaciado de huecos colocados manualmente"
+                            >
+                              Limpiar ({cfg.holeSeeds.length})
+                            </button>
+                          )}
+
                           <button
                             onClick={() => setIsEditPointsMode(!isEditPointsMode)}
                             className={`px-2 py-1 rounded border text-[9.5px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm ${
@@ -1488,42 +2018,59 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                   {/* Sub-Pestañas de Configuración de la Vista */}
                   {cfg.url && (
                     <div className="space-y-2 pt-1 border-t border-zinc-800/80 flex-shrink-0">
-                      <div className="grid grid-cols-4 gap-1 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800 text-[9.5px] font-bold">
+                      <div className="grid grid-cols-5 gap-0.5 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800 text-[9px] font-bold">
                         <button
                           onClick={() => setSubSection('detection')}
-                          className={`py-0.5 px-1 rounded transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 ${
                             subSection === 'detection' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                           }`}
+                          title="Extracción y detección de silueta"
                         >
-                          <Feather size={10} />
+                          <Feather size={9} />
                           <span className="truncate">Silueta</span>
                         </button>
                         <button
                           onClick={() => setSubSection('scale')}
-                          className={`py-0.5 px-1 rounded transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 ${
                             subSection === 'scale' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                           }`}
+                          title="Escala y proporciones"
                         >
-                          <Scale size={10} />
+                          <Scale size={9} />
                           <span className="truncate">Escala</span>
                         </button>
                         <button
                           onClick={() => setSubSection('filters')}
-                          className={`py-0.5 px-1 rounded transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 ${
                             subSection === 'filters' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                           }`}
+                          title="Filtros de brillo, contraste y nitidez"
                         >
-                          <Sun size={10} />
+                          <Sun size={9} />
                           <span className="truncate">Filtros</span>
                         </button>
                         <button
                           onClick={() => setSubSection('transform')}
-                          className={`py-0.5 px-1 rounded transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 ${
                             subSection === 'transform' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                           }`}
+                          title="Giro 90°, espejos y B&N"
                         >
-                          <SlidersHorizontal size={10} />
-                          <span className="truncate">Giro/B&N</span>
+                          <SlidersHorizontal size={9} />
+                          <span className="truncate">Giro</span>
+                        </button>
+                        <button
+                          onClick={() => setSubSection('pbr')}
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 relative ${
+                            subSection === 'pbr' ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                          title="Crear textura y mapas PBR (Normal, Bump, Rugosidad, AO) desde esta imagen"
+                        >
+                          <Palette size={9} className="text-amber-300" />
+                          <span className="truncate">PBR</span>
+                          {generatedPBRMaterials[key] && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute top-0.5 right-0.5 ring-1 ring-black" />
+                          )}
                         </button>
                       </div>
 
@@ -1624,26 +2171,42 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                             </div>
                           </div>
 
-                          {/* Opciones de Relleno y Cuentagotas */}
-                          <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                          {/* Opciones de Relleno, Huecos y Cuentagotas */}
+                          <div className="grid grid-cols-3 gap-1 pt-0.5">
                             <button
                               onClick={() => setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], fillInterior: !prev[key].fillInterior } }))}
-                              className={`px-2 py-1 rounded border text-[9px] font-semibold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                              className={`px-1.5 py-1 rounded border text-[8.5px] font-semibold transition-all cursor-pointer flex items-center justify-center gap-0.5 truncate ${
                                 cfg.fillInterior ? 'bg-emerald-950 border-emerald-500 text-emerald-200' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-750'
                               }`}
+                              title="Rellena contornos cerrados para convertirlos en sólidos"
                             >
-                              <Check size={10} className={cfg.fillInterior ? 'text-emerald-400' : 'opacity-0'} />
-                              <span>Rellenar Interior</span>
+                              <Check size={9} className={cfg.fillInterior ? 'text-emerald-400' : 'opacity-0'} />
+                              <span className="truncate">Rellenar</span>
                             </button>
 
                             <button
-                              onClick={() => setIsEyedropperActive(!isEyedropperActive)}
-                              className={`px-2 py-1 rounded border text-[9px] font-semibold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                              onClick={() => setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], autoDetectHoles: !(prev[key].autoDetectHoles !== false) } }))}
+                              className={`px-1.5 py-1 rounded border text-[8.5px] font-semibold transition-all cursor-pointer flex items-center justify-center gap-0.5 truncate ${
+                                cfg.autoDetectHoles !== false ? 'bg-rose-950 border-rose-500 text-rose-200' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-750'
+                              }`}
+                              title="Detecta y vacía automáticamente islas cerradas del color del fondo (como huecos entre patas)"
+                            >
+                              <Scissors size={9} className={cfg.autoDetectHoles !== false ? 'text-rose-400' : 'text-zinc-500'} />
+                              <span className="truncate">Huecos Fondo</span>
+                            </button>
+
+                            <button
+                              onClick={() => {
+                                setIsEyedropperActive(!isEyedropperActive);
+                                if (isHolePickerActive) setIsHolePickerActive(false);
+                              }}
+                              className={`px-1.5 py-1 rounded border text-[8.5px] font-semibold transition-all cursor-pointer flex items-center justify-center gap-0.5 truncate ${
                                 isEyedropperActive ? 'bg-amber-950 border-amber-500 text-amber-200' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
                               }`}
+                              title="Haz clic en cualquier punto del fondo en el canvas para seleccionarlo"
                             >
-                              <Pipette size={10} className="text-amber-400" />
-                              <span>Cuentagotas Fondo</span>
+                              <Pipette size={9} className="text-amber-400" />
+                              <span className="truncate">Cuentagotas</span>
                             </button>
                           </div>
                         </div>
@@ -1651,59 +2214,105 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
                       {/* SUBSECCIÓN 2: ESCALA, PROPORCIONES Y ENCUADRE */}
                       {subSection === 'scale' && (
-                        <div className="space-y-1.5 animate-in fade-in duration-150 text-[10px]">
-                          <div className="flex items-center justify-between p-1.5 rounded-lg bg-zinc-950/70 border border-zinc-800">
-                            <span className="text-[9.5px] font-bold text-zinc-200">Mantener Proporción Real</span>
+                        <div className="space-y-2 animate-in fade-in duration-150 text-[10px]">
+                          {/* Candado de Bloqueo Conjunto de Escala X e Y */}
+                          <div className="flex items-center justify-between p-1.5 rounded-lg bg-zinc-950/80 border border-zinc-800">
+                            <div className="flex items-center gap-1.5">
+                              {cfg.lockAspectRatio !== false ? (
+                                <Lock size={12} className="text-amber-400" />
+                              ) : (
+                                <Unlock size={12} className="text-zinc-500" />
+                              )}
+                              <span className="text-[9.5px] font-bold text-zinc-200">
+                                {cfg.lockAspectRatio !== false ? 'Escala Conjunta (Bloqueada)' : 'Escala Independiente (Libre)'}
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => setViewConfigs(prev => {
+                                const currentLocked = prev[key].lockAspectRatio !== false;
+                                const newLocked = !currentLocked;
+                                return {
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    lockAspectRatio: newLocked,
+                                    // Al activar el candado, sincronizar Y con X
+                                    ...(newLocked ? { scaleY: prev[key].scaleX ?? 1.0 } : {})
+                                  }
+                                };
+                              })}
+                              className={`px-2 py-0.5 rounded text-[8.5px] font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                                cfg.lockAspectRatio !== false
+                                  ? 'bg-amber-600 hover:bg-amber-500 text-white shadow'
+                                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                              }`}
+                              title={cfg.lockAspectRatio !== false ? 'Desbloquear para escalar ejes X e Y por separado' : 'Bloquear para escalar ambos ejes conjuntamente'}
+                            >
+                              {cfg.lockAspectRatio !== false ? <Lock size={10} /> : <Unlock size={10} />}
+                              <span>{cfg.lockAspectRatio !== false ? 'BLOQUEADO' : 'LIBRE'}</span>
+                            </button>
+                          </div>
+
+                          <div className="relative bg-zinc-950/60 p-2 rounded-lg border border-zinc-800">
+                            {/* Indicador visual de candado cuando está bloqueado */}
+                            {cfg.lockAspectRatio !== false && (
+                              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-10 bg-zinc-900 border border-amber-500/60 text-amber-400 rounded-full p-1 shadow-md pointer-events-none flex items-center justify-center">
+                                <Lock size={10} />
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between text-[9px]">
+                                  <span className="text-red-300 font-semibold">Escala X</span>
+                                  <span className="font-mono text-red-300 font-bold">{Math.round((cfg.scaleX ?? 1.0) * 100)}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0.2}
+                                  max={3.0}
+                                  step={0.02}
+                                  value={cfg.scaleX ?? 1.0}
+                                  onChange={e => handleScaleChange(key, 'x', parseFloat(e.target.value))}
+                                  className="w-full h-1.5 accent-red-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between text-[9px]">
+                                  <span className="text-green-300 font-semibold">Escala Y</span>
+                                  <span className="font-mono text-green-300 font-bold">{Math.round((cfg.scaleY ?? 1.0) * 100)}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0.2}
+                                  max={3.0}
+                                  step={0.02}
+                                  value={cfg.scaleY ?? 1.0}
+                                  onChange={e => handleScaleChange(key, 'y', parseFloat(e.target.value))}
+                                  className="w-full h-1.5 accent-green-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between p-1.5 rounded-lg bg-zinc-950/40 border border-zinc-800/80">
+                            <span className="text-[9px] text-zinc-400">Ajuste de Lienzo (1:1)</span>
                             <button
                               onClick={() => setViewConfigs(prev => ({
                                 ...prev,
                                 [key]: { ...prev[key], preserveAspectRatio: !(prev[key].preserveAspectRatio !== false) }
                               }))}
-                              className={`px-2 py-0.5 rounded text-[8.5px] font-bold transition-all cursor-pointer ${
-                                cfg.preserveAspectRatio !== false ? 'bg-emerald-600 text-white shadow' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                              className={`px-2 py-0.5 rounded text-[8px] font-semibold transition-all cursor-pointer ${
+                                cfg.preserveAspectRatio !== false ? 'bg-emerald-700/80 text-emerald-200' : 'bg-zinc-800 text-zinc-400'
                               }`}
                             >
-                              {cfg.preserveAspectRatio !== false ? 'ACTIVO (1:1)' : 'LIBRE'}
+                              {cfg.preserveAspectRatio !== false ? 'Mantener Proporción Real' : 'Ajuste Libre'}
                             </button>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 bg-zinc-950/60 p-1.5 rounded-lg border border-zinc-800">
-                            <div className="space-y-0.5">
-                              <div className="flex items-center justify-between text-[9px]">
-                                <span className="text-red-300">Escala X</span>
-                                <span className="font-mono text-red-300 font-bold">{Math.round((cfg.scaleX ?? 1.0) * 100)}%</span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0.2}
-                                max={3.0}
-                                step={0.02}
-                                value={cfg.scaleX ?? 1.0}
-                                onChange={e => handleScaleChange(key, 'x', parseFloat(e.target.value))}
-                                className="w-full h-1 accent-red-500 bg-zinc-800 rounded cursor-pointer"
-                              />
-                            </div>
-                            <div className="space-y-0.5">
-                              <div className="flex items-center justify-between text-[9px]">
-                                <span className="text-green-300">Escala Y</span>
-                                <span className="font-mono text-green-300 font-bold">{Math.round((cfg.scaleY ?? 1.0) * 100)}%</span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0.2}
-                                max={3.0}
-                                step={0.02}
-                                value={cfg.scaleY ?? 1.0}
-                                onChange={e => handleScaleChange(key, 'y', parseFloat(e.target.value))}
-                                className="w-full h-1 accent-green-500 bg-zinc-800 rounded cursor-pointer"
-                              />
-                            </div>
                           </div>
 
                           <div className="grid grid-cols-2 gap-1.5">
                             <button
                               onClick={() => handleResetScale(key)}
-                              className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[9px] font-semibold transition-colors flex items-center justify-center gap-1"
+                              className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[9px] font-semibold transition-colors flex items-center justify-center gap-1 cursor-pointer"
                             >
                               <RotateCcw size={10} />
                               <span>Restablecer Escala</span>
@@ -1713,12 +2322,123 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                 ...prev,
                                 [key]: { ...prev[key], offsetX: 0, offsetY: 0 }
                               }))}
-                              className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[9px] font-semibold transition-colors flex items-center justify-center gap-1"
+                              className="py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[9px] font-semibold transition-colors flex items-center justify-center gap-1 cursor-pointer"
                             >
                               <Move size={10} />
                               <span>Centrar</span>
                             </button>
                           </div>
+
+                          {/* Control de Grosor 3D / Extrusión del Eje No Proyectado */}
+                          {(() => {
+                            const perpIdx = key === 'side' ? 0 : key === 'front' ? 2 : 1;
+                            const perpName = key === 'side' ? 'Grosor / Anchura 3D (Eje X)' : key === 'front' ? 'Grosor / Profundidad 3D (Eje Z)' : 'Grosor / Altura 3D (Eje Y)';
+                            const colorText = key === 'side' ? 'text-red-300' : key === 'front' ? 'text-cyan-300' : 'text-green-300';
+                            const accentClass = key === 'side' ? 'accent-red-500' : key === 'front' ? 'accent-cyan-500' : 'accent-green-500';
+                            const currentVal = dimensions[perpIdx];
+
+                            return (
+                              <div className="p-2 rounded-lg bg-indigo-950/40 border border-indigo-700/60 space-y-1.5 shadow-sm">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5">
+                                    <Layers size={12} className="text-indigo-400" />
+                                    <span className="text-[9.5px] font-bold text-indigo-200">
+                                      {perpName}
+                                    </span>
+                                  </div>
+                                  <span className={`font-mono text-[10.5px] font-bold ${colorText}`}>
+                                    {currentVal.toFixed(2)} m
+                                  </span>
+                                </div>
+
+                                <input
+                                  type="range"
+                                  min={0.05}
+                                  max={10.0}
+                                  step={0.05}
+                                  value={currentVal}
+                                  onChange={e => {
+                                    const val = Math.max(0.05, parseFloat(e.target.value) || 0.1);
+                                    const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                    nextDims[perpIdx] = val;
+                                    setDimensions(nextDims);
+                                  }}
+                                  className={`w-full h-1.5 ${accentClass} bg-zinc-800 rounded cursor-pointer`}
+                                />
+
+                                {/* Botones de ajuste rápido de grosor */}
+                                <div className="flex items-center justify-between gap-1 pt-0.5">
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                        nextDims[perpIdx] = Math.max(0.05, safeParseFixed(nextDims[perpIdx] / 2, 2, 1));
+                                        setDimensions(nextDims);
+                                      }}
+                                      className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[8px] font-bold border border-zinc-700 transition-colors cursor-pointer"
+                                      title="Reducir grosor 3D a la mitad (÷2)"
+                                    >
+                                      ÷2
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                        nextDims[perpIdx] = Math.min(20, safeParseFixed(nextDims[perpIdx] * 2, 2, 2));
+                                        setDimensions(nextDims);
+                                      }}
+                                      className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[8px] font-bold border border-zinc-700 transition-colors cursor-pointer"
+                                      title="Duplicar grosor 3D (×2)"
+                                    >
+                                      ×2
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                        nextDims[perpIdx] = Math.max(0.05, safeParseFixed(nextDims[perpIdx] - 0.2, 2, 1));
+                                        setDimensions(nextDims);
+                                      }}
+                                      className="px-1 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8px] font-bold border border-zinc-700 transition-colors cursor-pointer"
+                                      title="Restar 0.2m de grosor"
+                                    >
+                                      -0.2
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                        nextDims[perpIdx] = Math.min(20, safeParseFixed(nextDims[perpIdx] + 0.2, 2, 2));
+                                        setDimensions(nextDims);
+                                      }}
+                                      className="px-1 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[8px] font-bold border border-zinc-700 transition-colors cursor-pointer"
+                                      title="Sumar 0.2m de grosor"
+                                    >
+                                      +0.2
+                                    </button>
+                                  </div>
+
+                                  <div className="flex items-center gap-0.5">
+                                    {[0.2, 0.5, 1.0, 2.0, 4.0].map(preset => (
+                                      <button
+                                        key={preset}
+                                        onClick={() => {
+                                          const nextDims: [number, number, number] = [dimensions[0], dimensions[1], dimensions[2]];
+                                          nextDims[perpIdx] = preset;
+                                          setDimensions(nextDims);
+                                        }}
+                                        className={`px-1 py-0.5 rounded text-[8px] font-mono transition-colors cursor-pointer ${
+                                          Math.abs(dimensions[perpIdx] - preset) < 0.05
+                                            ? 'bg-indigo-600 text-white font-bold'
+                                            : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                        title={`Ajustar grosor a ${preset} metros`}
+                                      >
+                                        {preset}m
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
 
@@ -1848,6 +2568,380 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                           </div>
                         </div>
                       )}
+
+                      {/* SUBSECCIÓN 5: GENERADOR DE TEXTURA Y MAPAS PBR DESDE EL BOCETO Y ATLAS MULTI-VISTA */}
+                      {subSection === 'pbr' && (
+                        <div className="space-y-2.5 animate-in fade-in duration-150 text-[10px]">
+                          {/* PANEL MAESTRO: ATLAS MULTI-VISTA UNIFICADO (TEXTURA ÚNICA 3D) */}
+                          <div className="bg-gradient-to-br from-indigo-950/90 via-zinc-900 to-purple-950/80 p-2.5 rounded-xl border border-indigo-500/50 space-y-2 shadow-lg">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <Sparkles size={13} className="text-amber-300 animate-pulse" />
+                                <span className="font-bold text-[10.5px] text-white">
+                                  Atlas Multi-Vista PBR (Textura Única)
+                                </span>
+                              </div>
+                              <span className="px-1.5 py-0.5 rounded bg-indigo-600/80 border border-indigo-400/60 text-indigo-100 text-[8px] font-bold">
+                                {loadedCount} Vistas Disponibles
+                              </span>
+                            </div>
+
+                            <p className="text-[8.5px] text-zinc-300 leading-tight">
+                              Crea una <strong className="text-amber-300">textura PBR combinada de 2048x2048</strong> que proyecta automáticamente la vista <strong className="text-white">Frontal</strong>, <strong className="text-white">Superior</strong> y <strong className="text-white">Lateral</strong> en las caras correspondientes sin sobreescribirse al rotar.
+                            </p>
+
+                            {/* Botón Principal: Hornear / Actualizar Atlas Multi-Vista */}
+                            <button
+                              onClick={handleGenerateUnifiedAtlasPBR}
+                              disabled={isGeneratingPBR || loadedCount === 0}
+                              className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-amber-500 via-indigo-600 to-violet-600 hover:from-amber-400 hover:to-violet-500 text-white font-bold text-[10px] shadow-md flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed active:scale-98"
+                            >
+                              <Zap size={13} className="text-amber-200 fill-amber-200" />
+                              <span>
+                                {isGeneratingPBR
+                                  ? 'Horneando Textura Atlas 2048x2048...'
+                                  : atlasPBRResult
+                                  ? '⚡ Re-Hornear Atlas Multi-Vista PBR'
+                                  : '⚡ Generar Textura Única Multi-Vista PBR'}
+                              </span>
+                            </button>
+
+                            {/* Previsualización del Atlas Generado */}
+                            {atlasPBRResult && (
+                              <div className="space-y-1.5 pt-1.5 border-t border-indigo-800/60 animate-in fade-in">
+                                <div className="flex items-center justify-between text-[8.5px]">
+                                  <span className="text-emerald-300 font-bold flex items-center gap-1">
+                                    <Check size={11} />
+                                    <span>Atlas PBR 2K Listo ({atlasPBRResult.activeViews.join(', ')})</span>
+                                  </span>
+                                  <span className="text-zinc-400 font-mono text-[8px] truncate">
+                                    2048×2048 px
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-5 gap-1 text-center text-[7.5px]">
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-indigo-400/80 overflow-hidden bg-black shadow">
+                                      <img src={atlasPBRResult.albedoAtlasUrl} alt="Atlas Albedo" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 font-semibold block truncate">Albedo</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-indigo-500 overflow-hidden bg-black shadow">
+                                      <img src={atlasPBRResult.normalAtlasUrl} alt="Atlas Normal" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-indigo-300 font-bold block truncate">Normal</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-700 overflow-hidden bg-black shadow">
+                                      <img src={atlasPBRResult.displacementAtlasUrl} alt="Atlas Bump" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">Bump</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-700 overflow-hidden bg-black shadow">
+                                      <img src={atlasPBRResult.roughnessAtlasUrl} alt="Atlas Rugosidad" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">Rugoso</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-700 overflow-hidden bg-black shadow">
+                                      <img src={atlasPBRResult.aoAtlasUrl} alt="Atlas AO" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">AO</span>
+                                  </div>
+                                </div>
+
+                                {/* Selector de Modo de Texturizado Activo */}
+                                <div className="flex items-center justify-between pt-1 gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setTextureTargetMode('atlas');
+                                      setApplyPBRMaterialToCarve(true);
+                                      setTimeout(() => update3DPreview(), 50);
+                                    }}
+                                    className={`flex-1 py-1 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                                      applyPBRMaterialToCarve && textureTargetMode === 'atlas'
+                                        ? 'bg-amber-600 border-amber-400 text-white shadow-md'
+                                        : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+                                    }`}
+                                  >
+                                    <Eye size={10} />
+                                    <span>Ver Atlas en 3D</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* SUBPANEL: CALIBRACIÓN Y ALINEACIÓN DE TEXTURA & COORDENADAS UV */}
+                          <div className="bg-zinc-950/80 p-2.5 rounded-xl border border-amber-500/40 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <SlidersHorizontal size={12} className="text-amber-400" />
+                                <span className="font-bold text-[9.5px] text-amber-200">
+                                  Alineación y Calibración UV (Vista {key.toUpperCase()})
+                                </span>
+                              </div>
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    texOffsetX: 0,
+                                    texOffsetY: 0,
+                                    texScaleX: 1.0,
+                                    texScaleY: 1.0,
+                                    texFlipH: false,
+                                    texFlipV: false,
+                                    texMirrorOpposite: false
+                                  }
+                                }))}
+                                className="text-[8px] text-zinc-400 hover:text-amber-300 transition-colors cursor-pointer flex items-center gap-0.5"
+                                title="Restablecer posición y escala de la textura"
+                              >
+                                <RotateCcw size={9} />
+                                <span>Restablecer</span>
+                              </button>
+                            </div>
+
+                            <p className="text-[8px] text-zinc-400 leading-tight">
+                              Ajusta la posición y escala de la textura sobre la malla 3D para calzarla exactamente con la geometría.
+                            </p>
+
+                            {/* Sliders de Posición / Offset Textura X e Y */}
+                            <div className="grid grid-cols-2 gap-2 bg-zinc-900/80 p-1.5 rounded-lg border border-zinc-800">
+                              <div className="space-y-0.5">
+                                <div className="flex items-center justify-between text-[8.5px]">
+                                  <span className="text-zinc-300">Posición X (Offset)</span>
+                                  <span className="font-mono text-amber-300 font-bold">{(cfg.texOffsetX ?? 0).toFixed(2)}</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={-1.0}
+                                  max={1.0}
+                                  step={0.01}
+                                  value={cfg.texOffsetX ?? 0}
+                                  onChange={e => setViewConfigs(prev => ({
+                                    ...prev,
+                                    [key]: { ...prev[key], texOffsetX: parseFloat(e.target.value) }
+                                  }))}
+                                  className="w-full h-1 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                              <div className="space-y-0.5">
+                                <div className="flex items-center justify-between text-[8.5px]">
+                                  <span className="text-zinc-300">Posición Y (Offset)</span>
+                                  <span className="font-mono text-amber-300 font-bold">{(cfg.texOffsetY ?? 0).toFixed(2)}</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={-1.0}
+                                  max={1.0}
+                                  step={0.01}
+                                  value={cfg.texOffsetY ?? 0}
+                                  onChange={e => setViewConfigs(prev => ({
+                                    ...prev,
+                                    [key]: { ...prev[key], texOffsetY: parseFloat(e.target.value) }
+                                  }))}
+                                  className="w-full h-1 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                            </div>
+
+                            {/* Sliders de Escala Textura X e Y */}
+                            <div className="grid grid-cols-2 gap-2 bg-zinc-900/80 p-1.5 rounded-lg border border-zinc-800">
+                              <div className="space-y-0.5">
+                                <div className="flex items-center justify-between text-[8.5px]">
+                                  <span className="text-zinc-300">Escala Textura X</span>
+                                  <span className="font-mono text-indigo-300 font-bold">{Math.round((cfg.texScaleX ?? 1.0) * 100)}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0.2}
+                                  max={3.0}
+                                  step={0.02}
+                                  value={cfg.texScaleX ?? 1.0}
+                                  onChange={e => setViewConfigs(prev => ({
+                                    ...prev,
+                                    [key]: { ...prev[key], texScaleX: parseFloat(e.target.value) }
+                                  }))}
+                                  className="w-full h-1 accent-indigo-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                              <div className="space-y-0.5">
+                                <div className="flex items-center justify-between text-[8.5px]">
+                                  <span className="text-zinc-300">Escala Textura Y</span>
+                                  <span className="font-mono text-indigo-300 font-bold">{Math.round((cfg.texScaleY ?? 1.0) * 100)}%</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0.2}
+                                  max={3.0}
+                                  step={0.02}
+                                  value={cfg.texScaleY ?? 1.0}
+                                  onChange={e => setViewConfigs(prev => ({
+                                    ...prev,
+                                    [key]: { ...prev[key], texScaleY: parseFloat(e.target.value) }
+                                  }))}
+                                  className="w-full h-1 accent-indigo-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                              </div>
+                            </div>
+
+                            {/* Controles de Volteo de Textura, Cara Trasera y Normal Y */}
+                            <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], texFlipH: !prev[key].texFlipH }
+                                }))}
+                                className={`py-1 px-1.5 rounded border text-[8.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  cfg.texFlipH ? 'bg-amber-600 border-amber-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                }`}
+                                title="Invierte horizontalmente la proyección de textura"
+                              >
+                                <FlipHorizontal size={10} />
+                                <span>Voltear Textura H</span>
+                              </button>
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], texFlipV: !prev[key].texFlipV }
+                                }))}
+                                className={`py-1 px-1.5 rounded border text-[8.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  cfg.texFlipV ? 'bg-amber-600 border-amber-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                }`}
+                                title="Invierte verticalmente la proyección de textura"
+                              >
+                                <FlipVertical size={10} />
+                                <span>Voltear Textura V</span>
+                              </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], texMirrorOpposite: !prev[key].texMirrorOpposite }
+                                }))}
+                                className={`py-1 px-1.5 rounded border text-[8.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  cfg.texMirrorOpposite ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                }`}
+                                title="Por defecto desactivado para que la cara trasera (espalda) NO se vea invertida"
+                              >
+                                <span>Espejar Cara Trasera:</span>
+                                <span className="font-bold">{cfg.texMirrorOpposite ? 'SÍ' : 'NO'}</span>
+                              </button>
+
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], invertNormalY: !prev[key].invertNormalY }
+                                }))}
+                                className={`py-1 px-1.5 rounded border text-[8.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  cfg.invertNormalY ? 'bg-violet-600 border-violet-500 text-white' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                }`}
+                                title="Invierte el eje verde (Y) del mapa de normales para corregir la iluminación"
+                              >
+                                <span>Normal Y (DirectX):</span>
+                                <span className="font-bold">{cfg.invertNormalY ? 'ON' : 'OFF'}</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* SUBPANEL: MAPAS PBR DE LA VISTA INDIVIDUAL ACTUAL */}
+                          <div className="bg-zinc-950/80 p-2 rounded-lg border border-zinc-800 space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-[9px] text-zinc-300 flex items-center gap-1">
+                                <Palette size={11} className="text-indigo-400" />
+                                <span>Textura Individual: Vista {key.toUpperCase()}</span>
+                              </span>
+                              <span className="text-[8px] text-zinc-500 font-mono">Canal Único</span>
+                            </div>
+
+                            {/* Slider de Intensidad de Relieve / Normal Map */}
+                            <div className="space-y-0.5 pt-0.5">
+                              <div className="flex items-center justify-between text-[9px]">
+                                <span className="text-zinc-300">Intensidad Relieve / Normales</span>
+                                <span className="font-mono text-amber-300 font-bold">{pbrNormalStrength.toFixed(1)}x</span>
+                              </div>
+                              <input
+                                type="range"
+                                min={0.5}
+                                max={6.0}
+                                step={0.2}
+                                value={pbrNormalStrength}
+                                onChange={e => setPbrNormalStrength(parseFloat(e.target.value))}
+                                className="w-full h-1.5 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
+
+                            {/* Botón: Generar Mapas de esta Vista */}
+                            <button
+                              onClick={() => handleGeneratePBRFromBlueprint(key)}
+                              disabled={isGeneratingPBR || !cfg.url}
+                              className="w-full py-1.5 px-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-bold text-[9px] shadow-sm flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              <Zap size={10} className="text-amber-300" />
+                              <span>{generatedPBRMaterials[key] ? 'Regenerar Vista ' + key.toUpperCase() : 'Guardar Mapas de Vista ' + key.toUpperCase()}</span>
+                            </button>
+
+                            {/* Previsualización de los 5 Canales PBR de esta Vista */}
+                            {generatedPBRMaterials[key] && (
+                              <div className="space-y-1.5 pt-1.5 border-t border-zinc-800 animate-in fade-in">
+                                <div className="grid grid-cols-5 gap-1 text-center text-[7.5px]">
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-700 overflow-hidden bg-black">
+                                      <img src={cfg.url} alt="Albedo" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-400 block truncate">Albedo</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-indigo-500/60 overflow-hidden bg-black">
+                                      <img src={generatedPBRMaterials[key]?.pbrSet.normalMap} alt="Normal" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-indigo-300 font-bold block truncate">Normal</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-600 overflow-hidden bg-black">
+                                      <img src={generatedPBRMaterials[key]?.pbrSet.displacementMap} alt="Bump" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">Bump</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-600 overflow-hidden bg-black">
+                                      <img src={generatedPBRMaterials[key]?.pbrSet.roughnessMap} alt="Rugosidad" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">Rugoso</span>
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <div className="aspect-square rounded border border-zinc-600 overflow-hidden bg-black">
+                                      <img src={generatedPBRMaterials[key]?.pbrSet.aoMap} alt="AO" className="w-full h-full object-cover" />
+                                    </div>
+                                    <span className="text-zinc-300 block truncate">AO</span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center justify-between pt-1">
+                                  <button
+                                    onClick={() => {
+                                      setSelectedPBRViewKey(key);
+                                      setTextureTargetMode('view');
+                                      setApplyPBRMaterialToCarve(true);
+                                      setTimeout(() => update3DPreview(), 50);
+                                    }}
+                                    className="w-full py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[8.5px] text-zinc-300 hover:text-white font-semibold border border-zinc-700 flex items-center justify-center gap-1 cursor-pointer transition-all"
+                                  >
+                                    <Eye size={10} />
+                                    <span>Aplicar Solo Vista {key.toUpperCase()} al 3D</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1868,47 +2962,89 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                 </button>
               </div>
               <div className="grid grid-cols-3 gap-1.5">
-                <div className="flex items-center gap-1 bg-zinc-950 px-2 py-1 rounded border border-zinc-800">
-                  <span className="text-[9px] text-red-400 font-bold">X:</span>
+                <div className="flex items-center gap-0.5 bg-zinc-950 px-1 py-0.5 rounded border border-zinc-800">
+                  <span className="text-[9px] text-red-400 font-bold px-0.5">X:</span>
+                  <button
+                    onClick={() => setDimensions([Math.max(0.05, safeParseFixed(dimensions[0] - 0.1, 2, 1)), dimensions[1], dimensions[2]])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Restar 0.1m en X"
+                  >
+                    -
+                  </button>
                   <input
                     type="number"
                     step={0.1}
-                    min={0.1}
+                    min={0.05}
                     value={dimensions[0]}
                     onChange={e => {
-                      const v = Math.max(0.1, parseFloat(e.target.value) || 1);
+                      const v = Math.max(0.05, parseFloat(e.target.value) || 1);
                       setDimensions([v, dimensions[1], dimensions[2]]);
                     }}
-                    className="w-full bg-transparent text-xs text-white font-mono focus:outline-none"
+                    className="w-full bg-transparent text-xs text-white font-mono text-center focus:outline-none"
                   />
+                  <button
+                    onClick={() => setDimensions([Math.min(20, safeParseFixed(dimensions[0] + 0.1, 2, 1)), dimensions[1], dimensions[2]])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Sumar 0.1m en X"
+                  >
+                    +
+                  </button>
                 </div>
-                <div className="flex items-center gap-1 bg-zinc-950 px-2 py-1 rounded border border-zinc-800">
-                  <span className="text-[9px] text-green-400 font-bold">Y:</span>
+                <div className="flex items-center gap-0.5 bg-zinc-950 px-1 py-0.5 rounded border border-zinc-800">
+                  <span className="text-[9px] text-green-400 font-bold px-0.5">Y:</span>
+                  <button
+                    onClick={() => setDimensions([dimensions[0], Math.max(0.05, safeParseFixed(dimensions[1] - 0.1, 2, 1)), dimensions[2]])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Restar 0.1m en Y"
+                  >
+                    -
+                  </button>
                   <input
                     type="number"
                     step={0.1}
-                    min={0.1}
+                    min={0.05}
                     value={dimensions[1]}
                     onChange={e => {
-                      const v = Math.max(0.1, parseFloat(e.target.value) || 1);
+                      const v = Math.max(0.05, parseFloat(e.target.value) || 1);
                       setDimensions([dimensions[0], v, dimensions[2]]);
                     }}
-                    className="w-full bg-transparent text-xs text-white font-mono focus:outline-none"
+                    className="w-full bg-transparent text-xs text-white font-mono text-center focus:outline-none"
                   />
+                  <button
+                    onClick={() => setDimensions([dimensions[0], Math.min(20, safeParseFixed(dimensions[1] + 0.1, 2, 1)), dimensions[2]])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Sumar 0.1m en Y"
+                  >
+                    +
+                  </button>
                 </div>
-                <div className="flex items-center gap-1 bg-zinc-950 px-2 py-1 rounded border border-zinc-800">
-                  <span className="text-[9px] text-cyan-400 font-bold">Z:</span>
+                <div className="flex items-center gap-0.5 bg-zinc-950 px-1 py-0.5 rounded border border-zinc-800">
+                  <span className="text-[9px] text-cyan-400 font-bold px-0.5">Z:</span>
+                  <button
+                    onClick={() => setDimensions([dimensions[0], dimensions[1], Math.max(0.05, safeParseFixed(dimensions[2] - 0.1, 2, 1))])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Restar 0.1m en Z"
+                  >
+                    -
+                  </button>
                   <input
                     type="number"
                     step={0.1}
-                    min={0.1}
+                    min={0.05}
                     value={dimensions[2]}
                     onChange={e => {
-                      const v = Math.max(0.1, parseFloat(e.target.value) || 1);
+                      const v = Math.max(0.05, parseFloat(e.target.value) || 1);
                       setDimensions([dimensions[0], dimensions[1], v]);
                     }}
-                    className="w-full bg-transparent text-xs text-white font-mono focus:outline-none"
+                    className="w-full bg-transparent text-xs text-white font-mono text-center focus:outline-none"
                   />
+                  <button
+                    onClick={() => setDimensions([dimensions[0], dimensions[1], Math.min(20, safeParseFixed(dimensions[2] + 0.1, 2, 1))])}
+                    className="w-4 h-4 rounded bg-zinc-850 hover:bg-zinc-700 text-zinc-300 hover:text-white text-[10px] font-bold flex items-center justify-center cursor-pointer transition-colors"
+                    title="Sumar 0.1m en Z"
+                  >
+                    +
+                  </button>
                 </div>
               </div>
             </div>
@@ -1971,6 +3107,40 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                     className="w-14 h-1 accent-indigo-500 bg-zinc-800 rounded cursor-pointer"
                   />
                   <span className="text-zinc-300 font-mono">{smoothIterations}x</span>
+                </div>
+
+                {/* Selector rápido de Textura 3D */}
+                <div className="flex items-center gap-1 pl-1 border-l border-zinc-800">
+                  <button
+                    onClick={() => {
+                      if (!applyPBRMaterialToCarve) {
+                        setApplyPBRMaterialToCarve(true);
+                        setTextureTargetMode('atlas');
+                      } else if (textureTargetMode === 'atlas') {
+                        setTextureTargetMode('view');
+                      } else {
+                        setApplyPBRMaterialToCarve(false);
+                      }
+                      setTimeout(() => update3DPreview(), 50);
+                    }}
+                    className={`px-2 py-0.5 rounded text-[9px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                      !applyPBRMaterialToCarve
+                        ? 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                        : textureTargetMode === 'atlas'
+                        ? 'bg-amber-950/80 border-amber-500/80 text-amber-300 shadow-sm'
+                        : 'bg-indigo-950/80 border-indigo-500/80 text-indigo-300 shadow-sm'
+                    }`}
+                    title="Alternar entre Atlas Multi-Vista, Textura de Vista Individual o Sólido"
+                  >
+                    <Sparkles size={10} className={applyPBRMaterialToCarve ? 'text-amber-400' : 'text-zinc-500'} />
+                    <span>
+                      {!applyPBRMaterialToCarve
+                        ? 'Sólido'
+                        : textureTargetMode === 'atlas'
+                        ? 'Atlas 3D'
+                        : 'Vista ' + activeTab.toUpperCase()}
+                    </span>
+                  </button>
                 </div>
               </div>
             </div>

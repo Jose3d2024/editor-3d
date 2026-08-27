@@ -36,16 +36,54 @@ export const getSavedScenes = (): SavedSceneItem[] => {
   }
 };
 
+export const filterUsedMaterials = (project: Project): Project => {
+  const usedMaterialIds = new Set<string>();
+  const collectObjMaterials = (objs: any[]) => {
+    (objs || []).forEach(obj => {
+      if (obj.materialId) usedMaterialIds.add(obj.materialId);
+      if (obj.material?.id) usedMaterialIds.add(obj.material.id);
+      if (obj.materialIds && typeof obj.materialIds === 'object') {
+        Object.values(obj.materialIds).forEach(mId => {
+          if (mId && typeof mId === 'string') usedMaterialIds.add(mId);
+        });
+      }
+      if (obj.children && Array.isArray(obj.children)) collectObjMaterials(obj.children);
+    });
+  };
+  collectObjMaterials(project.objects);
+
+  let filteredMaterials = (project.materials || []).filter(m => usedMaterialIds.has(m.id));
+  
+  // If objects exist with inline material but not in project.materials, preserve them
+  if (filteredMaterials.length === 0 && project.objects.length > 0) {
+    const inlineMats: any[] = [];
+    project.objects.forEach(obj => {
+      if (obj.material && !inlineMats.some(m => m.id === obj.material.id)) {
+        inlineMats.push(obj.material);
+      }
+    });
+    if (inlineMats.length > 0) {
+      filteredMaterials = inlineMats;
+    }
+  }
+
+  return {
+    ...project,
+    materials: filteredMaterials
+  };
+};
+
 export const saveSceneToStorage = (project: Project): SavedSceneItem[] => {
   const existing = getSavedScenes();
   const now = Date.now();
+  const cleanProject = filterUsedMaterials(JSON.parse(JSON.stringify(project)));
   const sceneItem: SavedSceneItem = {
-    id: project.name || 'Nuevo Proyecto',
-    name: project.name || 'Nuevo Proyecto',
+    id: cleanProject.name || 'Nuevo Proyecto',
+    name: cleanProject.name || 'Nuevo Proyecto',
     savedAt: now,
-    objectCount: project.objects.length,
-    lightCount: project.lights.length,
-    project: JSON.parse(JSON.stringify(project)),
+    objectCount: cleanProject.objects.length,
+    lightCount: cleanProject.lights.length,
+    project: cleanProject,
   };
 
   const filtered = existing.filter(s => s.name !== sceneItem.name);
@@ -89,6 +127,28 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
   const [activeTab, setActiveTab] = useState<'save' | 'library'>(mode === 'open' ? 'library' : 'save');
   const [feedback, setFeedback] = useState<string | null>(null);
 
+  const usedMaterialIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    const collect = (objs: any[]) => {
+      (objs || []).forEach(obj => {
+        if (obj.materialId) ids.add(obj.materialId);
+        if (obj.material?.id) ids.add(obj.material.id);
+        if (obj.materialIds && typeof obj.materialIds === 'object') {
+          Object.values(obj.materialIds).forEach(mId => {
+            if (mId && typeof mId === 'string') ids.add(mId);
+          });
+        }
+        if (obj.children) collect(obj.children);
+      });
+    };
+    collect(project.objects);
+    return ids;
+  }, [project.objects]);
+
+  const usedMaterialsCount = usedMaterialIds.size > 0
+    ? usedMaterialIds.size
+    : (project.objects.some(o => o.material) ? 1 : (project.objects.length > 0 ? 1 : 0));
+
   useEffect(() => {
     if (isOpen) {
       setProjectName(project.name || 'Nuevo Proyecto');
@@ -115,7 +175,8 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
 
     // If requested or as backup download JSON
     if (downloadJsonToo) {
-      const blob = new Blob([JSON.stringify(updatedProject, null, 2)], { type: 'application/json' });
+      const cleanProject = filterUsedMaterials(updatedProject);
+      const blob = new Blob([JSON.stringify(cleanProject, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -241,15 +302,18 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
             <div className="grid grid-cols-3 gap-2 p-2.5 bg-zinc-950/60 rounded-xl border border-zinc-800/80 text-[11px] text-zinc-400">
               <div>
                 <span className="text-zinc-500 block">Objetos:</span>
-                <span className="text-zinc-200 font-bold font-mono">{project.objects.length}</span>
+                <span className="text-zinc-200 font-bold font-mono text-xs">{project.objects.length}</span>
               </div>
               <div>
                 <span className="text-zinc-500 block">Luces:</span>
-                <span className="text-zinc-200 font-bold font-mono">{project.lights.length}</span>
+                <span className="text-zinc-200 font-bold font-mono text-xs">{project.lights.length}</span>
               </div>
               <div>
                 <span className="text-zinc-500 block">Materiales:</span>
-                <span className="text-zinc-200 font-bold font-mono">{project.materials.length}</span>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-emerald-400 font-bold font-mono text-xs">{usedMaterialsCount}</span>
+                  <span className="text-[9px] text-zinc-500">aplicados</span>
+                </div>
               </div>
             </div>
 

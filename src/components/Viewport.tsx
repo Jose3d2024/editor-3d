@@ -37,6 +37,7 @@ import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X } from 'lucide-
 import { fileToDataURL } from '../utils/silhouettes';
 import { extractUniqueEdges } from '../utils/wireframeMesh';
 import { getLoopCutPreview } from '../utils/loopCut';
+import { safeFixed, safeNum } from '../utils/numberUtils';
 
 interface ViewportProps {
   type: ViewportType;
@@ -100,7 +101,8 @@ const computeGizmoLayout = (
   h: number,
   transformSpace: string = 'world',
   selObj?: any,
-  customAxisLen?: number
+  customAxisLen?: number,
+  transformMode: string = 'universal'
 ) => {
   const projected = gizmoPos.clone().project(camera);
   if (projected.z > 2 || projected.z < -2) return null;
@@ -164,7 +166,8 @@ const computeGizmoLayout = (
     { rotAxis: 'Y', norm: vY, color: '#22c55e', sphereColor: '#4ade80' }
   ];
 
-  const radius3D = isOrtho ? worldPerPixel * (AXIS_LEN * 1.15) : Math.max(0.15, dist * 0.12 * 1.15);
+  const rotRadiusRatio = transformMode === 'rotate' ? 1.05 : 0.72;
+  const radius3D = isOrtho ? worldPerPixel * (AXIS_LEN * rotRadiusRatio) : Math.max(0.12, dist * 0.12 * rotRadiusRatio);
 
   for (const { rotAxis, norm, color, sphereColor } of arcConfigs) {
     let projEye = eyeDir.clone().sub(norm.clone().multiplyScalar(eyeDir.dot(norm)));
@@ -1660,19 +1663,25 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       );
       plane.name = 'reference-plane';
       const s = refData.scale[1] || refData.scale[0] || 5;
-      plane.scale.set(s * aspect, s, 1);
+      const flipScaleX = (s * aspect) * (refData.flipX ? -1 : 1);
+      const flipScaleY = s * (refData.flipY ? -1 : 1);
+      plane.scale.set(flipScaleX, flipScaleY, 1);
       
       const pos = refData.position || [0, 0, 0];
       plane.position.set(pos[0], pos[1], pos[2]);
 
+      const angleRad = ((refData.angle || 0) * Math.PI) / 180;
+
       if (type === 'TOP' || type === 'BOTTOM') {
         plane.rotation.x = -Math.PI/2;
         if (type === 'BOTTOM') plane.rotation.x = Math.PI/2;
+        plane.rotation.z = angleRad;
       } else if (type === 'FRONT' || type === 'BACK') {
-        if (type === 'BACK') plane.rotation.y = Math.PI;
+        plane.rotation.y = type === 'BACK' ? Math.PI : 0;
+        plane.rotation.z = angleRad;
       } else if (type === 'LEFT' || type === 'RIGHT') {
-        plane.rotation.y = Math.PI/2;
-        if (type === 'LEFT') plane.rotation.y = -Math.PI/2;
+        plane.rotation.y = type === 'LEFT' ? -Math.PI/2 : Math.PI/2;
+        plane.rotation.z = angleRad;
       }
       sceneRef.current?.add(plane);
     });
@@ -2397,7 +2406,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       // Apply UVW Mapping overrides if specified
       if (mData.uvwMapping && obj.vertices && obj.faces) {
         if (mData.uvwMapping === 'UV') {
-          meshData = generateUVs(meshData);
+          if (!hasUVs) {
+            meshData = generateUVs(meshData);
+          }
         } else {
           meshData = { ...meshData, faces: meshData.faces.map(f => ({ ...f, uvs: undefined })) }; // Clear existing UVs for re-projection
           meshData = applyUVWMapping(meshData, mData.uvwMapping);
@@ -2426,7 +2437,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const uv = face.uvs?.[i] || [0, 0];
           // Create a unique vertex for each position + UV combination to handle seams
           const key = isSmooth
-            ? `${posIdx}_${uv[0].toFixed(6)}_${uv[1].toFixed(6)}`
+            ? `${posIdx}_${safeFixed(uv?.[0], 6)}_${safeFixed(uv?.[1], 6)}`
             : `${posIdx}_f${fIdx}`;
           
           if (vertMap.has(key)) {
@@ -2801,8 +2812,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
             const selectedSet = new Set(selectedVertexIndices);
             const logicalPosAttr = pointGeo.getAttribute('position');
-            for (let i = 0; i < logicalPosAttr.count; i++) {
+            const totalVerts = logicalPosAttr.count;
+            // On dense meshes (> 80 vertices), do not instantiate thousands of individual sphere meshes;
+            // only render selected vertices + dynamic hover dots on pointer move
+            const isDenseMesh = totalVerts > 80;
+
+            for (let i = 0; i < totalVerts; i++) {
               const isSel = isSelected && selectedSet.has(i);
+              if (!isSel && isDenseMesh) {
+                continue;
+              }
+
               const dot = new THREE.Mesh(
                 SHARED_VERTEX_GEO,
                 isSel ? SHARED_ACTIVE_MAT : (viewMode === 'FACES_VERTICES' && !isSelected ? SHARED_CYAN_MAT : SHARED_WHITE_MAT)
@@ -2817,14 +2837,13 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               dot.userData = {
                 id: obj.id,
                 isVertexHandle: true,
-                vertexIndex: i,
-                coincidentIndices: getCoincidentVertices(pointGeo, i)
+                vertexIndex: i
               };
               group.add(dot);
             }
           } else if (editMode === 'EDGE' || editMode === 'FACE') {
-            // Also render subtle landmark dots on vertices for clear topology guidance
-            if (obj.vertices && obj.vertices.length > 0) {
+            // Render subtle landmark dots only for small meshes (<= 60 vertices) to prevent lag on dense meshes
+            if (obj.vertices && obj.vertices.length > 0 && obj.vertices.length <= 60) {
               const logicalVerts: number[] = [];
               obj.vertices.forEach((v, i) => {
                 const off = obj.vertexOffsets?.[i] || [0,0,0];
@@ -3853,7 +3872,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
       }
 
-      const layout = computeGizmoLayout(objPos, camera, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined);
+      const layout = computeGizmoLayout(objPos, camera, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined, transformMode);
       if (!layout) return null;
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const distCenter = Math.sqrt((mx - cx)**2 + (my - cy)**2);
@@ -3861,7 +3880,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       // 1. Center FREE handle (small clean dot)
       if (distCenter < (isNurbsCpSelected ? 14 : 12)) return 'FREE';
 
-      // 2. Check Scale Cubes (disabled when a NURBS control point is selected)
+      // 2. Check Scale Cubes FIRST before Translation Arrow shafts (disabled when a NURBS control point is selected)
       if (!isNurbsCpSelected && (transformMode === 'scale' || transformMode === 'universal')) {
         const scaleDistRatio = transformMode === 'universal' ? 0.72 : 1.0;
         for (const axis of ['X', 'Y', 'Z']) {
@@ -3869,29 +3888,39 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           if (!d) continue;
           const cubeX = cx + d.nx * scaleDistRatio;
           const cubeY = cy + d.ny * scaleDistRatio;
-          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 18) {
+          // Hit radius for scale cube box
+          if (Math.sqrt((mx - cubeX)**2 + (my - cubeY)**2) < 20) {
             return `SCALE_${axis}`;
           }
         }
       }
 
-      // 3. Check Rotation Arcs & Spheres (disabled when a NURBS control point is selected)
-      if (!isNurbsCpSelected && (transformMode === 'rotate' || transformMode === 'universal')) {
-        for (const rotAxis of ['Z', 'X', 'Y']) {
-          const arc = rotArcs[rotAxis];
-          if (!arc) continue;
-          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 18) {
-            return `ROT_${rotAxis}`;
+      // 3. Check Axis Translation Arrows / Arrowheads / Badges (Translate / Universal)
+      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
+        for (const axis of ['X', 'Y', 'Z']) {
+          const d = dirs[axis];
+          if (!d) continue;
+          const tipX = cx + d.nx, tipY = cy + d.ny;
+          const labelDistRatio = 1.22;
+          const badgeX = cx + d.nx * labelDistRatio;
+          const badgeY = cy + d.ny * labelDistRatio;
+
+          // Tip or badge click
+          if (Math.sqrt((mx - tipX)**2 + (my - tipY)**2) < 20 || Math.sqrt((mx - badgeX)**2 + (my - badgeY)**2) < 18) {
+            return axis;
           }
-          for (const p of arc.pts) {
-            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 14) {
-              return `ROT_${rotAxis}`;
-            }
+
+          // Shaft check
+          const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
+          if (bLen >= 5) {
+            const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
+            const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
+            if (dist < 15 && t > 0.15) return axis;
           }
         }
       }
 
-      // 4. Check 2D Translation Planes first for easy corner grabbing
+      // 4. Check 2D Translation Planes for easy corner grabbing
       if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
         const checkPlane = (a1: string, a2: string, planeName: string) => {
           const d1 = dirs[a1], d2 = dirs[a2];
@@ -3926,17 +3955,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         if (checkPlane('X', 'Z', 'XZ')) return 'XZ';
       }
 
-      // 5. Check Axis Translation Arrows / Shafts
-      if (isNurbsCpSelected || transformMode === 'translate' || transformMode === 'universal') {
-        for (const axis of ['X', 'Y', 'Z']) {
-          const d = dirs[axis];
-          if (!d) continue;
-          const tipX = cx + d.nx, tipY = cy + d.ny;
-          const bx = tipX - cx, by = tipY - cy, bLen = Math.sqrt(bx*bx + by*by);
-          if (bLen < 5) continue;
-          const t = Math.max(0, Math.min(1, ((mx - cx)*bx + (my - cy)*by)/(bLen * bLen)));
-          const dist = Math.sqrt((mx - cx - t*bx)**2 + (my - cy - t*by)**2);
-          if (dist < 16) return axis;
+      // 5. Check Rotation Arcs & Spheres (disabled when a NURBS control point is selected)
+      if (!isNurbsCpSelected && (transformMode === 'rotate' || transformMode === 'universal')) {
+        for (const rotAxis of ['Z', 'X', 'Y']) {
+          const arc = rotArcs[rotAxis];
+          if (!arc) continue;
+          if (Math.sqrt((mx - arc.handlePt.x)**2 + (my - arc.handlePt.y)**2) < 14) {
+            return `ROT_${rotAxis}`;
+          }
+          for (const p of arc.pts) {
+            if (Math.sqrt((mx - p.x)**2 + (my - p.y)**2) < 8) {
+              return `ROT_${rotAxis}`;
+            }
+          }
         }
       }
 
@@ -4504,7 +4535,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             if (vh && vh.object.userData.vertexIndex !== undefined) {
               hitVtxIdx = vh.object.userData.vertexIndex;
               hitWorldPos = vh.point.clone();
-              coincidentIndices = vh.object.userData.coincidentIndices || [hitVtxIdx];
+              coincidentIndices = vertexPointsRef.current ? getCoincidentVertices(vertexPointsRef.current.geometry, hitVtxIdx) : [hitVtxIdx];
             }
           }
 
@@ -5310,35 +5341,10 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const newScaleY = Math.max(0.01, s[1] * scaleY);
               const newScaleZ = Math.max(0.01, s[2] * scaleZ);
 
-              let newPosition = [...start.position] as [number, number, number];
-
-              if (scaleAxis !== 'UNIFORM' && scaleAxis !== 'FREE' && start.localSize && start.handleWorldDir) {
-                const shift = new THREE.Vector3(0, 0, 0);
-
-                if (scaleAxis === 'X' || scaleAxis === 'XY' || scaleAxis === 'XZ') {
-                  const deltaScaleX = newScaleX - s[0];
-                  shift.addScaledVector(start.handleWorldDir.X, (deltaScaleX * start.localSize[0]) / 2);
-                }
-                if (scaleAxis === 'Y' || scaleAxis === 'XY' || scaleAxis === 'YZ') {
-                  const deltaScaleY = newScaleY - s[1];
-                  shift.addScaledVector(start.handleWorldDir.Y, (deltaScaleY * start.localSize[1]) / 2);
-                }
-                if (scaleAxis === 'Z' || scaleAxis === 'XZ' || scaleAxis === 'YZ') {
-                  const deltaScaleZ = newScaleZ - s[2];
-                  shift.addScaledVector(start.handleWorldDir.Z, (deltaScaleZ * start.localSize[2]) / 2);
-                }
-
-                newPosition = [
-                  start.position[0] + shift.x,
-                  start.position[1] + shift.y,
-                  start.position[2] + shift.z
-                ];
-              }
-
               return {
                 transform: {
                   ...start,
-                  position: newPosition,
+                  position: [...start.position],
                   scale: [
                     newScaleX,
                     newScaleY,
@@ -5816,16 +5822,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           const cur = projectRef.current.objects.find(o => o.id === selectedObjectId);
           if (cur && ['X', 'Y', 'Z'].includes(ax)) {
             const axIdx = ax === 'X' ? 0 : ax === 'Y' ? 1 : 2;
-            display = `${ax}: ${cur.transform.position[axIdx].toFixed(3)}`;
+            display = `${ax}: ${safeFixed(cur.transform.position[axIdx], 3)}`;
           } else if (cur) {
             display = ax;
           }
         } else if (transformMode === 'rotate' && ax !== 'FREE') {
           const angleDeg = ((dx + dy) * 0.01 * 180 / Math.PI);
-          display = `${ax}: ${angleDeg.toFixed(1)}°`;
+          display = `${ax}: ${safeFixed(angleDeg, 1)}°`;
         } else if (transformMode === 'scale') {
           const delta = 1 + (dx - dy) * 0.005;
-          display = `${ax}: ×${delta.toFixed(3)}`;
+          display = `${ax}: ×${safeFixed(delta, 3)}`;
         }
         if (display) {
           gizmoDisplayRef.current.style.display = 'block';
@@ -6467,6 +6473,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           }
 
           if (!hitSomething && event.button === 0) {
+            // Clicking outside figure resets gizmo to normal (universal) state and deselects
+            setTransformMode('universal');
+            gizmoStateRef.current.activeAxis = null;
             if (editMode === 'OBJECT') {
               selectObject(null);
               selectLight(null);
@@ -6719,9 +6728,18 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       }
 
       switch(event.key.toLowerCase()) {
-        case 'g': case 'w': setTransformMode('translate'); break;
-        case 'r': setTransformMode('rotate'); break;
-        case 's': setTransformMode('scale'); break;
+        case 'g': case 'w': 
+          setTransformMode(transformMode === 'translate' ? 'universal' : 'translate'); 
+          break;
+        case 'r': 
+          setTransformMode(transformMode === 'rotate' ? 'universal' : 'rotate'); 
+          break;
+        case 's': 
+          setTransformMode(transformMode === 'scale' ? 'universal' : 'scale'); 
+          break;
+        case 'u':
+          setTransformMode('universal');
+          break;
         case 'a': if (event.ctrlKey || event.metaKey) { event.preventDefault(); useStore.getState().selectAll(); } break;
         case 'd': if (event.ctrlKey || event.metaKey) { event.preventDefault(); useStore.getState().duplicateSelected(); } break;
         case 'e': 
@@ -6732,11 +6750,12 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               useStore.getState().extrudeFaces(selectedObjectId, selectedFaceIndices, 0.3);
             }
           } else {
-            setTransformMode('rotate');
+            setTransformMode(transformMode === 'rotate' ? 'universal' : 'rotate');
           }
           break;
       }
       if (event.key === 'Escape') {
+        setTransformMode('universal');
         useStore.getState().deselectAll();
       }
     };
@@ -6917,7 +6936,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         (selObj.selectedNurbsControlPoint || selObj.selectedNurbsControlPoints?.length)
       );
 
-      const layout = computeGizmoLayout(gizmoPos, cameraRef.current, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined);
+      const layout = computeGizmoLayout(gizmoPos, cameraRef.current, w, h, transformSpace, selObj, isNurbsCpSelected ? 50 : undefined, transformMode);
       if (!layout) return;
       const { cx, cy, AXIS_LEN, dirs, rotArcs } = layout;
       const gs = gizmoStateRef.current;
@@ -7301,8 +7320,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           {(()=>{
             const obj = project.objects.find(o=>o.id===selectedObjectId)!;
             const _interp = getInterpolatedTransform(obj, currentTime);
-            const pos = _interp.position;
-            return `X:${pos[0].toFixed(2)} Y:${pos[1].toFixed(2)} Z:${pos[2].toFixed(2)}${obj.keyframes?.length ? ` [${obj.keyframes.length}kf]` : ''}`;
+            const pos = _interp?.position || [0, 0, 0];
+            return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${obj.keyframes?.length ? ` [${obj.keyframes.length}kf]` : ''}`;
           })()}
         </div>
       )}
