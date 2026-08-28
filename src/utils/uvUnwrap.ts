@@ -258,13 +258,20 @@ function relaxIslandUVs(
     }
   });
 
-  // Iterative Spring Laplacian Relaxation with 3D edge length preservation
+  // Iterative Spring Laplacian Relaxation with readBuffer and 3D edge length preservation
   for (let iter = 0; iter < iterations; iter++) {
+    // Clonar el estado UV al inicio de la iteración para lectura limpia y simétrica
+    const readBuffer = new Map<number, [number, number][]>();
+    islandFaceIndices.forEach(fIdx => {
+      readBuffer.set(fIdx, islandFaceUVs.get(fIdx)!.map(uv => [...uv] as [number, number]));
+    });
+
     vertNeighbors.forEach((neighbors, vIdx) => {
       const refs = vertCoordRefs.get(vIdx);
       if (!refs || refs.length === 0 || neighbors.size === 0) return;
 
-      const currUV = islandFaceUVs.get(refs[0].fIdx)![refs[0].cornerIdx];
+      const firstRef = refs[0];
+      const currUV = readBuffer.get(firstRef.fIdx)![firstRef.cornerIdx];
       const p3D = new THREE.Vector3(...vertices[vIdx]);
 
       let avgU = 0, avgV = 0, totalWeight = 0;
@@ -272,7 +279,8 @@ function relaxIslandUVs(
       neighbors.forEach(nIdx => {
         const nRefs = vertCoordRefs.get(nIdx);
         if (!nRefs || nRefs.length === 0) return;
-        const nUV = islandFaceUVs.get(nRefs[0].fIdx)![nRefs[0].cornerIdx];
+        const nRef = nRefs[0];
+        const nUV = readBuffer.get(nRef.fIdx)![nRef.cornerIdx];
         const n3D = new THREE.Vector3(...vertices[nIdx]);
 
         const dist3D = Math.max(1e-4, p3D.distanceTo(n3D));
@@ -288,9 +296,9 @@ function relaxIslandUVs(
         avgU /= totalWeight;
         avgV /= totalWeight;
 
-        // Smooth blend (alpha = 0.25 to prevent fold-overs)
-        const newU = currUV[0] * 0.75 + avgU * 0.25;
-        const newV = currUV[1] * 0.75 + avgV * 0.25;
+        // Smooth blend (alpha = 0.20 to prevent fold-overs)
+        const newU = currUV[0] * 0.80 + avgU * 0.20;
+        const newV = currUV[1] * 0.80 + avgV * 0.20;
 
         refs.forEach(({ fIdx, cornerIdx }) => {
           const uv = islandFaceUVs.get(fIdx)![cornerIdx];
@@ -334,7 +342,7 @@ export function packUVPieces(
     totalArea += (isl.width + margin) * (isl.height + margin);
   });
 
-  const estimatedGridWidth = Math.max(1e-4, Math.sqrt(totalArea) * 1.15);
+  const estimatedGridWidth = Math.max(1e-4, Math.sqrt(totalArea) * 1.2);
 
   // Shelf-packing algorithm
   let currentX = margin;
@@ -375,10 +383,10 @@ export function packUVPieces(
     if (currentY + shelfHeight > maxExtentY) maxExtentY = currentY + shelfHeight;
   });
 
-  // Global normalization factor to fit tightly into [0, 1] range
+  // Global normalization factor to fit tightly into [0, 1] range preserving aspect ratio
   const totalW = Math.max(1e-6, maxExtentX);
   const totalH = Math.max(1e-6, maxExtentY);
-  const maxDim = Math.max(totalW, totalH);
+  const layoutScale = Math.max(totalW, totalH);
 
   placements.forEach(({ island, x, y }) => {
     island.islandFaceUVs.forEach((uvs, fIdx) => {
@@ -388,8 +396,8 @@ export function packUVPieces(
         const localV = v - island.minV;
 
         // Place on packed canvas
-        const finalU = (x + localU) / maxDim;
-        const finalV = (y + localV) / maxDim;
+        const finalU = (x + localU) / layoutScale;
+        const finalV = (y + localV) / layoutScale;
 
         return [finalU, finalV];
       });

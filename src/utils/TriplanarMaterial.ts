@@ -75,7 +75,7 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
       `
     );
 
-    // Fragment shader modifications: Stochastic Triplanar Mapping with Smooth Edge Blend
+    // Fragment shader modifications: Stochastic Triplanar Mapping with Smooth Edge Blend & Proper Tangent Orientation
     const mixosAntiTilingCode = `
       varying vec3 vLocalPosition;
       varying vec3 vLocalNormal;
@@ -106,20 +106,34 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
       vec4 sampleMixosTriplanar(sampler2D tex, vec3 pos, vec3 normal, vec2 scale, bool isNormalMap) {
         vec3 blend = getTriplanarWeights(normal, uTriplanarBlend);
         
-        vec2 uvX = vec2(normal.x < 0.0 ? -pos.z : pos.z, pos.y);
-        vec2 uvY = vec2(pos.x, normal.y < 0.0 ? -pos.z : pos.z);
-        vec2 uvZ = vec2(normal.z < 0.0 ? -pos.x : pos.x, pos.y);
+        // Proyecciones planas continuas absolutas (evita saltos y costuras en espejo por signo de la normal)
+        vec2 uvX = vec2(pos.z, pos.y) * scale;
+        vec2 uvY = vec2(pos.x, pos.z) * scale;
+        vec2 uvZ = vec2(pos.x, pos.y) * scale;
 
-        vec4 cx = texture2D(tex, uvX * scale);
-        vec4 cy = texture2D(tex, uvY * scale);
-        vec4 cz = texture2D(tex, uvZ * scale);
+        vec4 cx = texture2D(tex, uvX);
+        vec4 cy = texture2D(tex, uvY);
+        vec4 cz = texture2D(tex, uvZ);
 
         if (isNormalMap) {
-          vec3 n1 = cx.xyz * 2.0 - 1.0;
-          vec3 n2 = cy.xyz * 2.0 - 1.0;
-          vec3 n3 = cz.xyz * 2.0 - 1.0;
-          vec3 normBlend = normalize(n1 * blend.x + n2 * blend.y + n3 * blend.z);
-          return vec4(normBlend * 0.5 + 0.5, (cx.w * blend.x + cy.w * blend.y + cz.w * blend.z));
+          // Desempaquetar mapas de normales originales
+          vec3 tnx = cx.xyz * 2.0 - 1.0;
+          vec3 tny = cy.xyz * 2.0 - 1.0;
+          vec3 tnz = cz.xyz * 2.0 - 1.0;
+
+          // Orientar el espacio tangente según el signo del plano proyectado
+          tnx.z *= sign(normal.x);
+          tny.z *= sign(normal.y);
+          tnz.z *= sign(normal.z);
+
+          // Construir vectores orientados en el espacio de la geometría local
+          vec3 tnormalX = vec3(0.0, tnx.y, tnx.x);
+          vec3 tnormalY = vec3(tny.x, 0.0, tny.y);
+          vec3 tnormalZ = vec3(tnz.x, tnz.y, 0.0);
+
+          // Mezclar los tres vectores en función del peso triplanar calculado
+          vec3 blendedNormal = normalize(tnormalX * blend.x + tnormalY * blend.y + tnormalZ * blend.z);
+          return vec4(blendedNormal * 0.5 + 0.5, (cx.w * blend.x + cy.w * blend.y + cz.w * blend.z));
         }
 
         return cx * blend.x + cy * blend.y + cz * blend.z;
@@ -165,7 +179,7 @@ export function setupTriplanarMaterial(material: THREE.Material, mData: any) {
         #ifdef USE_NORMALMAP
           vec4 mapN = sampleMixosTriplanar(normalMap, vLocalPosition, vLocalNormal, triplanarScale, true);
           vec3 tnormal = mapN.xyz * 2.0 - 1.0;
-          normal = normalize(vLocalNormal + tnormal * normalScale.x);
+          normal = normalize(vNormalMatrix * (vLocalNormal + tnormal * normalScale.x));
         #endif
         `
       );

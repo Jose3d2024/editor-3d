@@ -251,6 +251,9 @@ export function generateMultiViewAtlasUVs(
     const flipV = cfg?.texFlipV ?? false;
     const mirrorOpposite = cfg?.texMirrorOpposite ?? false;
 
+    // Dimensión máxima para mapeado isométrico uniforme sin deformación de aspect ratio
+    const maxDim = Math.max(size[0], size[1], size[2]);
+
     const uvs: [number, number][] = face.indices.map(vIdx => {
       const v = vertices[vIdx] || [0, 0, 0];
       const [x, y, z] = v;
@@ -260,23 +263,33 @@ export function generateMultiViewAtlasUVs(
       if (dominantView === 'side') {
         // Vista Lateral (plano Z-Y)
         if (mirrorOpposite) {
-          rawU = normalX >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+          rawU = normalX >= 0 ? (max[2] - z) / maxDim : (z - min[2]) / maxDim;
         } else {
-          rawU = (max[2] - z) / size[2];
+          rawU = (max[2] - z) / maxDim;
         }
-        rawV = (y - min[1]) / size[1];
+        rawV = (y - min[1]) / maxDim;
+
+        // Centrado si no es cúbico
+        rawU += (1.0 - (size[2] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
       } else if (dominantView === 'top') {
-        // Vista Superior (plano X-Z)
-        rawU = (x - min[0]) / size[0];
-        rawV = normalY >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+        // Vista Superior (plano X-Z) - proyección continua sin saltos de signo
+        rawU = (x - min[0]) / maxDim;
+        rawV = (max[2] - z) / maxDim;
+
+        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[2] / maxDim)) * 0.5;
       } else {
         // Vista Frontal (plano X-Y)
         if (mirrorOpposite) {
-          rawU = normalZ >= 0 ? (x - min[0]) / size[0] : (max[0] - x) / size[0];
+          rawU = normalZ >= 0 ? (x - min[0]) / maxDim : (max[0] - x) / maxDim;
         } else {
-          rawU = (x - min[0]) / size[0];
+          rawU = (x - min[0]) / maxDim;
         }
-        rawV = (y - min[1]) / size[1];
+        rawV = (y - min[1]) / maxDim;
+
+        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
       }
 
       // Aplicar escala y offset
@@ -290,10 +303,10 @@ export function generateMultiViewAtlasUVs(
       let subU = bounds.minU + uNorm * bSpanU;
       let subV = bounds.minV + vNorm * bSpanV;
 
-      subU = Math.max(0.002, Math.min(0.998, subU));
-      subV = Math.max(0.002, Math.min(0.998, subV));
+      subU = Math.max(0.001, Math.min(0.999, subU));
+      subV = Math.max(0.001, Math.min(0.999, subV));
 
-      // Mapear al espacio global del Atlas [0, 1]
+      // Mapear al espacio global del Atlas [0, 1] en espacio de texturas WebGL
       const atlasU = quad.uMin + subU * quadWidth;
       const atlasV = quad.vMin + subV * quadHeight;
 

@@ -98,10 +98,23 @@ export interface ProcessedSilhouette {
   boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number };
 }
 
+export interface GhostOverlayData {
+  viewKey: 'front' | 'side' | 'top';
+  label: string;
+  imgData: ImageData | null;
+  processed: ProcessedSilhouette | null;
+  color: string;
+  opacity?: number;
+  showImage?: boolean;
+  showOutline?: boolean;
+  showAlignmentRails?: boolean;
+}
+
 /**
  * Carga una imagen, preserva sus dimensiones y proporciones reales (sin distorsión cuadrada),
  * y aplica transformaciones geométricas (escala X/Y, desplazamiento X/Y, espejo, rotación)
  * junto con los filtros fotográficos (brillo, contraste, b/n, nitidez).
+ * Usa resolución 1024x1024 y margen seguro de encuadre para evitar recortes en bordes.
  */
 export async function loadCanvasImageData(
   imageUrl: string,
@@ -119,6 +132,7 @@ export async function loadCanvasImageData(
       const is90or270 = rot === 90 || rot === 270;
       const effAspect = is90or270 ? (1 / nativeAspect) : nativeAspect;
 
+      // 512x512 para procesamiento ágil y fluido a 60 FPS
       const CANVAS_SIZE = 512;
       const canvas = document.createElement('canvas');
       canvas.width = CANVAS_SIZE;
@@ -129,26 +143,43 @@ export async function loadCanvasImageData(
         return;
       }
 
+      // Detectar si la imagen original tiene transparencia o fondo sólido
+      const sampleCanvas = document.createElement('canvas');
+      sampleCanvas.width = Math.min(32, origW);
+      sampleCanvas.height = Math.min(32, origH);
+      const sCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+      let hasSourceTransparency = false;
+      let sampledBg: [number, number, number] = [255, 255, 255];
+      if (sCtx) {
+        sCtx.drawImage(img, 0, 0, sampleCanvas.width, sampleCanvas.height);
+        const sData = sCtx.getImageData(0, 0, sampleCanvas.width, sampleCanvas.height).data;
+        const cornerAlpha = sData[3];
+        if (cornerAlpha < 40) {
+          hasSourceTransparency = true;
+        } else {
+          sampledBg = [sData[0], sData[1], sData[2]];
+        }
+      }
+
       // Proporción y escala:
-      // Por defecto preserveAspectRatio es TRUE (guarda las dimensiones verdaderas sin estirar)
       const preserveRatio = config.preserveAspectRatio !== false;
       const sX = (config.scaleX ?? 1.0) * (config.scaleUniform ?? 1.0);
       const sY = (config.scaleY ?? 1.0) * (config.scaleUniform ?? 1.0);
       const offX = (config.offsetX ?? 0) * (CANVAS_SIZE * 0.5);
       const offY = -(config.offsetY ?? 0) * (CANVAS_SIZE * 0.5);
 
-      let baseDrawW = CANVAS_SIZE;
-      let baseDrawH = CANVAS_SIZE;
+      // Margen de seguridad (88% del canvas)
+      const SAFE_SIZE = CANVAS_SIZE * 0.88;
+      let baseDrawW = SAFE_SIZE;
+      let baseDrawH = SAFE_SIZE;
 
       if (preserveRatio) {
         if (effAspect <= 1.0) {
-          // Imagen vertical / esbelta (ej. AT-AT front): ocupa todo el alto y el ancho proporcional
-          baseDrawW = CANVAS_SIZE * effAspect;
-          baseDrawH = CANVAS_SIZE;
+          baseDrawW = SAFE_SIZE * effAspect;
+          baseDrawH = SAFE_SIZE;
         } else {
-          // Imagen horizontal / ancha: ocupa todo el ancho y el alto proporcional
-          baseDrawW = CANVAS_SIZE;
-          baseDrawH = CANVAS_SIZE / effAspect;
+          baseDrawW = SAFE_SIZE;
+          baseDrawH = SAFE_SIZE / effAspect;
         }
       }
 
@@ -160,26 +191,25 @@ export async function loadCanvasImageData(
         const [r, g, b] = config.customBgColor;
         ctx.fillStyle = `rgb(${r},${g},${b})`;
         ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-      } else {
-        // Fondo transparente por defecto
+      } else if (hasSourceTransparency) {
         ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      } else {
+        const [r, g, b] = sampledBg;
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
       }
 
       ctx.save();
-      // Trasladar al centro del lienzo + desplazamientos X e Y del usuario
       ctx.translate(CANVAS_SIZE / 2 + offX, CANVAS_SIZE / 2 + offY);
 
-      // Rotación
       if (rot !== 0) {
         ctx.rotate((rot * Math.PI) / 180);
       }
 
-      // Espejo
       const flipScaleX = config.flipH ? -1 : 1;
       const flipScaleY = config.flipV ? -1 : 1;
       ctx.scale(flipScaleX, flipScaleY);
 
-      // Dimensiones de dibujado considerando si la imagen rota internamente
       const imgDrawW = is90or270 ? drawH : drawW;
       const imgDrawH = is90or270 ? drawW : drawH;
 
@@ -272,10 +302,6 @@ function applySharpenFilter(imgData: ImageData, strength: number) {
   const dst = imgData.data;
   const factor = Math.min(3.0, strength * 0.45);
 
-  // Kernel Laplaciano de realce:
-  // [  0, -f,  0 ]
-  // [ -f, 1+4f, -f ]
-  // [  0, -f,  0 ]
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
       const idx = (y * W + x) * 4;
@@ -310,7 +336,7 @@ export function analyzeImageCharacteristics(imageData: ImageData): {
   let totalAlphaLow = 0;
   let bgR = 0, bgG = 0, bgB = 0, bgCount = 0;
 
-  // Muestrear todo el perímetro exterior (bordes)
+  // Muestrear los bordes exteriores
   for (let x = 0; x < W; x++) {
     const idxTop = x * 4;
     if (data[idxTop + 3] < 30) totalAlphaLow++;
@@ -332,26 +358,30 @@ export function analyzeImageCharacteristics(imageData: ImageData): {
   }
 
   const borderPixels = (W * 2 + (H - 2) * 2);
-  const hasAlpha = (totalAlphaLow / borderPixels) > 0.3;
+  const hasAlpha = (totalAlphaLow / borderPixels) > 0.40;
 
-  const avgR = bgCount > 0 ? bgR / bgCount : 0;
-  const avgG = bgCount > 0 ? bgG / bgCount : 0;
-  const avgB = bgCount > 0 ? bgB / bgCount : 0;
+  const avgR = bgCount > 0 ? bgR / bgCount : (hasAlpha ? 0 : 255);
+  const avgG = bgCount > 0 ? bgG / bgCount : (hasAlpha ? 0 : 255);
+  const avgB = bgCount > 0 ? bgB / bgCount : (hasAlpha ? 0 : 255);
   const bgLum = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
-  const isDarkBg = bgLum < 120;
+  const isDarkBg = bgLum < 128;
 
   let suggestedMode: BlueprintDetectionMode = 'LINE_ART';
   if (hasAlpha) {
     suggestedMode = 'TRANSPARENT_ALPHA';
-  } else if (!isDarkBg && bgLum > 220) {
+  } else if (!isDarkBg) {
+    // Fondo claro (dibujo, silueta o modelo sobre blanco / gris claro)
     suggestedMode = 'LINE_ART';
+  } else {
+    // Fondo oscuro (figura sólida o silueta sobre fondo oscuro)
+    suggestedMode = 'SOLID_COLOR';
   }
 
   return {
     isDarkBg,
     hasAlpha,
     suggestedMode,
-    suggestedThreshold: isDarkBg ? 40 : 160,
+    suggestedThreshold: 45, // Umbral óptimo de 45 para capturar contornos nítidos tanto en fondos claros como oscuros
     bgColor: [Math.round(avgR), Math.round(avgG), Math.round(avgB)]
   };
 }
@@ -699,26 +729,28 @@ export function processSilhouette(
   let finalMask = mask;
   let finalSdf = computeSDF(mask, W, H, blurRadius);
 
-  if (config.manualControlPoints && config.manualControlPoints.length > 0) {
-    finalContours = config.manualControlPoints;
+  if (config.manualControlPoints !== undefined && config.manualControlPoints !== null) {
+    finalContours = config.manualControlPoints.filter(p => p && p.length >= 3);
     // Rasterizar los polígonos manuales para reconstruir mask y SDF precisos
     const rasterMask = new Uint8Array(W * H);
-    // Para cada bucle manual, rasterizar con Scanline / Ray-Casting
-    for (let y = 0; y < H; y++) {
-      const ny = 1 - (y / (H - 1)) * 2;
-      for (let x = 0; x < W; x++) {
-        const nx = (x / (W - 1)) * 2 - 1;
-        let inside = false;
-        for (const poly of config.manualControlPoints) {
-          for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-            const xi = poly[i][0], yi = poly[i][1];
-            const xj = poly[j][0], yj = poly[j][1];
-            const intersect = ((yi > ny) !== (yj > ny)) &&
-              (nx < ((xj - xi) * (ny - yi)) / (yj - yi + 1e-7) + xi);
-            if (intersect) inside = !inside;
+    if (finalContours.length > 0) {
+      // Para cada bucle manual, rasterizar con Scanline / Ray-Casting
+      for (let y = 0; y < H; y++) {
+        const ny = 1 - (y / (H - 1)) * 2;
+        for (let x = 0; x < W; x++) {
+          const nx = (x / (W - 1)) * 2 - 1;
+          let inside = false;
+          for (const poly of finalContours) {
+            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+              const xi = poly[i][0], yi = poly[i][1];
+              const xj = poly[j][0], yj = poly[j][1];
+              const intersect = ((yi > ny) !== (yj > ny)) &&
+                (nx < ((xj - xi) * (ny - yi)) / (yj - yi + 1e-7) + xi);
+              if (intersect) inside = !inside;
+            }
           }
+          rasterMask[y * W + x] = inside ? 1 : 0;
         }
-        rasterMask[y * W + x] = inside ? 1 : 0;
       }
     }
     finalMask = rasterMask;
@@ -987,7 +1019,7 @@ function extractMultiContoursFromMask(
         }
 
         if (loopPts.length >= 8) {
-          const simplified = rdpSimplify(loopPts, 0.005);
+          const simplified = simplifyClosedPolygon(loopPts, 0.012);
           if (simplified.length >= 4) {
             allContours.push(simplified);
           }
@@ -1004,7 +1036,39 @@ function extractMultiContoursFromMask(
 }
 
 /**
- * Simplificación Ramer-Douglas-Peucker para polígonos 2D
+ * Simplificación Ramer-Douglas-Peucker adaptada específicamente para bucles poligonales cerrados 2D
+ */
+export function simplifyClosedPolygon(pts: [number, number][], epsilon: number): [number, number][] {
+  if (pts.length <= 4) return pts;
+
+  // 1. Encontrar el punto más alejado del punto inicial para partir el polígono cerrado en dos arcos
+  const p0 = pts[0];
+  let maxD = 0;
+  let farIdx = Math.floor(pts.length / 2);
+
+  for (let i = 1; i < pts.length; i++) {
+    const d = Math.hypot(pts[i][0] - p0[0], pts[i][1] - p0[1]);
+    if (d > maxD) {
+      maxD = d;
+      farIdx = i;
+    }
+  }
+
+  // 2. Simplificar ambas mitades de forma independiente
+  const half1 = rdpSimplify(pts.slice(0, farIdx + 1), epsilon);
+  const half2 = rdpSimplify([...pts.slice(farIdx), pts[0]], epsilon);
+
+  // 3. Fusionar evitando duplicar los extremos comunes
+  const merged: [number, number][] = [
+    ...half1.slice(0, -1),
+    ...half2.slice(0, -1)
+  ];
+
+  return merged.length >= 3 ? merged : pts;
+}
+
+/**
+ * Simplificación Ramer-Douglas-Peucker para cadenas de puntos 2D abiertas
  */
 function rdpSimplify(pts: [number, number][], epsilon: number): [number, number][] {
   if (pts.length <= 2) return pts;
@@ -1238,6 +1302,13 @@ export async function carveModelFromBlueprints(
             if (dSide > maxDist) maxDist = dSide;
           }
 
+          // Confinamiento estricto en el cubo [-1, 1] para que las extrusiones de 1 o más vistas
+          // generen tapas finales sólidas y modelos 100% cerrados/estancos
+          const boxLimitDist = Math.max(Math.abs(normX) - 0.96, Math.abs(normY) - 0.96, Math.abs(normZ) - 0.96);
+          if (boxLimitDist > maxDist) {
+            maxDist = boxLimitDist;
+          }
+
           if (mode === 'SMOOTH_SCULPT') {
             const sphereDist = (normX * normX + normY * normY + normZ * normZ) * 0.15;
             maxDist += sphereDist;
@@ -1362,6 +1433,9 @@ export function generateBlueprintUVs(
     Math.max(1e-4, max[2] - min[2]),
   ];
 
+  // Dimensión máxima global para un mapeado isométrico proporcional sin estiramiento
+  const maxDim = Math.max(size[0], size[1], size[2]);
+
   // Configuración de calibración de textura
   const scaleX = Math.max(0.01, viewConfig?.texScaleX ?? 1.0);
   const scaleY = Math.max(0.01, viewConfig?.texScaleY ?? 1.0);
@@ -1413,56 +1487,57 @@ export function generateBlueprintUVs(
       let rawU = 0.5;
       let rawV = 0.5;
 
+      // Mapeado normalizado anamórfico basado en maxDim y recentrado isométrico
       if (viewKey === 'side') {
-        // Vista Lateral (Proyección principal en X)
         if (absX >= 0.25) {
-          // Caras laterales (+X derecha, -X izquierda)
-          if (mirrorOpposite) {
-            rawU = normalX >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
-          } else {
-            rawU = (max[2] - z) / size[2];
-          }
-          rawV = (y - min[1]) / size[1];
+          rawU = (mirrorOpposite && normalX < 0) ? (z - min[2]) / maxDim : (max[2] - z) / maxDim;
+          rawV = (y - min[1]) / maxDim;
         } else {
-          // Caras de contorno / grosor perimetral
-          rawU = (x - min[0]) / size[0];
-          rawV = (absY >= absZ) ? (max[2] - z) / size[2] : (y - min[1]) / size[1];
+          rawU = (x - min[0]) / maxDim;
+          rawV = (max[2] - z) / maxDim;
         }
+        rawU += (1.0 - (size[2] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
+
       } else if (viewKey === 'front') {
-        // Vista Frontal (Proyección principal en Z)
         if (absZ >= 0.25) {
-          // Caras frontales y posteriores
-          if (mirrorOpposite) {
-            rawU = normalZ >= 0 ? (x - min[0]) / size[0] : (max[0] - x) / size[0];
-          } else {
-            rawU = (x - min[0]) / size[0];
-          }
-          rawV = (y - min[1]) / size[1];
+          rawU = (mirrorOpposite && normalZ < 0) ? (max[0] - x) / maxDim : (x - min[0]) / maxDim;
+          rawV = (y - min[1]) / maxDim;
         } else {
-          // Caras de contorno perimetral
-          rawU = (z - min[2]) / size[2];
-          rawV = (absY >= absX) ? (x - min[0]) / size[0] : (y - min[1]) / size[1];
+          rawU = (z - min[2]) / maxDim;
+          rawV = (y - min[1]) / maxDim;
         }
+        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
+
       } else if (viewKey === 'top') {
-        // Vista Superior (Proyección principal en Y)
         if (absY >= 0.25) {
-          rawU = (x - min[0]) / size[0];
-          rawV = normalY >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+          rawU = (x - min[0]) / maxDim;
+          rawV = normalY >= 0 ? (max[2] - z) / maxDim : (z - min[2]) / maxDim;
         } else {
-          rawV = (y - min[1]) / size[1];
-          rawU = (absX >= absZ) ? (max[2] - z) / size[2] : (x - min[0]) / size[0];
+          rawU = (x - min[0]) / maxDim;
+          rawV = (y - min[1]) / maxDim;
         }
+        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+        rawV += (1.0 - (size[2] / maxDim)) * 0.5;
+
       } else {
         // Modo Auto / Triplanar Ortográfico
         if (absX >= absY && absX >= absZ) {
-          rawU = (mirrorOpposite && normalX < 0) ? (z - min[2]) / size[2] : (max[2] - z) / size[2];
-          rawV = (y - min[1]) / size[1];
+          rawU = (mirrorOpposite && normalX < 0) ? (z - min[2]) / maxDim : (max[2] - z) / maxDim;
+          rawV = (y - min[1]) / maxDim;
+          rawU += (1.0 - (size[2] / maxDim)) * 0.5;
+          rawV += (1.0 - (size[1] / maxDim)) * 0.5;
         } else if (absY >= absX && absY >= absZ) {
-          rawU = (x - min[0]) / size[0];
-          rawV = normalY >= 0 ? (max[2] - z) / size[2] : (z - min[2]) / size[2];
+          rawU = (x - min[0]) / maxDim;
+          rawV = normalY >= 0 ? (max[2] - z) / maxDim : (z - min[2]) / maxDim;
+          rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+          rawV += (1.0 - (size[2] / maxDim)) * 0.5;
         } else {
-          rawU = (mirrorOpposite && normalZ < 0) ? (max[0] - x) / size[0] : (x - min[0]) / size[0];
-          rawV = (y - min[1]) / size[1];
+          rawU = (mirrorOpposite && normalZ < 0) ? (max[0] - x) / maxDim : (x - min[0]) / maxDim;
+          rawV = (y - min[1]) / maxDim;
+          rawU += (1.0 - (size[0] / maxDim)) * 0.5;
+          rawV += (1.0 - (size[1] / maxDim)) * 0.5;
         }
       }
 
@@ -1524,9 +1599,9 @@ function createExtrudedContourGeo(
   geo.center();
 
   if (axis === 'x') {
-    geo.rotateY(Math.PI / 2);
+    geo.rotateY(-Math.PI / 2);
   } else if (axis === 'y') {
-    geo.rotateX(-Math.PI / 2);
+    geo.rotateX(Math.PI / 2);
   }
 
   return geo;
@@ -1544,7 +1619,11 @@ export function drawBlueprintPreview(
   selectedPointInfo: { loopIdx: number; ptIdx: number } | null = null,
   isEditPointsMode: boolean = false,
   hoveredPointInfo: { loopIdx: number; ptIdx: number } | null = null,
-  holeSeeds: [number, number][] = []
+  holeSeeds: [number, number][] = [],
+  multiSelectedPoints: { loopIdx: number; ptIdx: number }[] = [],
+  selectionBox: { x1: number; y1: number; x2: number; y2: number } | null = null,
+  showSymmetryGuides: boolean = true,
+  ghostOverlays: GhostOverlayData[] = []
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -1572,6 +1651,116 @@ export function drawBlueprintPreview(
   ctx.scale(zoom, zoom);
   ctx.translate(-W / 2, -H / 2);
 
+  // 0. Superponer Mapas Fantasma de Referencia (Otras Vistas: Frontal, Lateral, Superior)
+  if (ghostOverlays && ghostOverlays.length > 0) {
+    ghostOverlays.forEach(ghost => {
+      if (!ghost.imgData && !ghost.processed) return;
+
+      // 0.1 Boceto de la otra vista como imagen semitransparente
+      if (ghost.showImage && ghost.imgData) {
+        ctx.save();
+        ctx.globalAlpha = Math.max(0.05, Math.min(1.0, ghost.opacity ?? 0.35));
+        const gCanvas = document.createElement('canvas');
+        gCanvas.width = ghost.imgData.width;
+        gCanvas.height = ghost.imgData.height;
+        const gCtx = gCanvas.getContext('2d');
+        if (gCtx) {
+          gCtx.putImageData(ghost.imgData, 0, 0);
+          ctx.drawImage(gCanvas, 0, 0, W, H);
+        }
+        ctx.restore();
+      }
+
+      // 0.2 Contorno perimetral de la silueta de la otra vista
+      if (ghost.showOutline && ghost.processed && ghost.processed.contours) {
+        ctx.save();
+        ctx.strokeStyle = ghost.color;
+        ctx.lineWidth = Math.max(1.2, 1.8 / zoom);
+        ctx.setLineDash([5 / zoom, 4 / zoom]);
+        ctx.shadowColor = ghost.color;
+        ctx.shadowBlur = 6 / zoom;
+
+        ghost.processed.contours.forEach(loop => {
+          if (loop.length < 2) return;
+          ctx.beginPath();
+          const [gx0, gy0] = [
+            ((loop[0][0] + 1) / 2) * (W - 1),
+            ((1 - loop[0][1]) / 2) * (H - 1)
+          ];
+          ctx.moveTo(gx0, gy0);
+          for (let i = 1; i < loop.length; i++) {
+            const [gx, gy] = [
+              ((loop[i][0] + 1) / 2) * (W - 1),
+              ((1 - loop[i][1]) / 2) * (H - 1)
+            ];
+            ctx.lineTo(gx, gy);
+          }
+          ctx.closePath();
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+
+      // 0.3 Rieles Láser de Alineación y Proporciones Ortográficas
+      if (ghost.showAlignmentRails && ghost.processed && ghost.processed.boundsNormalized && processed && processed.boundsNormalized) {
+        ctx.save();
+        const bCurr = processed.boundsNormalized;
+        const bGhost = ghost.processed.boundsNormalized;
+
+        const currTopY = (1 - bCurr.maxV) * (H - 1);
+        const currBotY = (1 - bCurr.minV) * (H - 1);
+        const ghostTopY = (1 - bGhost.maxV) * (H - 1);
+        const ghostBotY = (1 - bGhost.minV) * (H - 1);
+
+        // Riel Superior (Cabeza / Altura Máxima)
+        ctx.strokeStyle = '#f59e0b'; // Ámbar
+        ctx.lineWidth = Math.max(1.0, 1.4 / zoom);
+        ctx.setLineDash([4 / zoom, 4 / zoom]);
+        
+        ctx.beginPath();
+        ctx.moveTo(0, currTopY);
+        ctx.lineTo(W, currTopY);
+        ctx.stroke();
+
+        ctx.strokeStyle = ghost.color;
+        ctx.beginPath();
+        ctx.moveTo(0, ghostTopY);
+        ctx.lineTo(W, ghostTopY);
+        ctx.stroke();
+
+        // Riel Inferior (Base / Pies)
+        ctx.strokeStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.moveTo(0, currBotY);
+        ctx.lineTo(W, currBotY);
+        ctx.stroke();
+
+        ctx.strokeStyle = ghost.color;
+        ctx.beginPath();
+        ctx.moveTo(0, ghostBotY);
+        ctx.lineTo(W, ghostBotY);
+        ctx.stroke();
+
+        // Etiqueta de comparación de alturas
+        const currH = Math.max(0.01, bCurr.maxV - bCurr.minV);
+        const ghostH = Math.max(0.01, bGhost.maxV - bGhost.minV);
+        const ratioH = Math.round((currH / ghostH) * 100);
+
+        ctx.setLineDash([]);
+        ctx.fillStyle = ratioH >= 97 && ratioH <= 103 ? '#10b981' : '#f59e0b';
+        ctx.font = `bold ${Math.max(9, 11 / zoom)}px sans-serif`;
+        ctx.textAlign = 'right';
+        ctx.fillText(
+          `Ref (${ghost.label}): Altura ${ratioH}%`,
+          W - 12 / zoom,
+          Math.min(currTopY, ghostTopY) - 6 / zoom
+        );
+
+        ctx.restore();
+      }
+    });
+  }
+
   // 1. Dibujar imagen base
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = imgData.width;
@@ -1582,22 +1771,80 @@ export function drawBlueprintPreview(
     ctx.drawImage(tempCanvas, 0, 0, W, H);
   }
 
-  // 1.1 Guías sutiles de alineación central y encuadre
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-  ctx.lineWidth = 1 / zoom;
-  ctx.setLineDash([4 / zoom, 4 / zoom]);
-  // Línea central vertical
-  ctx.beginPath();
-  ctx.moveTo(W / 2, 0);
-  ctx.lineTo(W / 2, H);
-  ctx.stroke();
-  // Línea central horizontal
-  ctx.beginPath();
-  ctx.moveTo(0, H / 2);
-  ctx.lineTo(W, H / 2);
-  ctx.stroke();
-  ctx.restore();
+  // 1.1 Guías de simetría y ejes ortográficos
+  if (showSymmetryGuides) {
+    ctx.save();
+    
+    // Eje Central Vertical (Eje de Simetría X = 0) en Azul / Cian Brillante
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+    ctx.lineWidth = Math.max(1.2, 1.8 / zoom);
+    ctx.setLineDash([6 / zoom, 4 / zoom]);
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0);
+    ctx.lineTo(W / 2, H);
+    ctx.stroke();
+
+    // Marcas de división en el eje vertical
+    for (let y = 0; y <= H; y += H / 8) {
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 5 / zoom, y);
+      ctx.lineTo(W / 2 + 5 / zoom, y);
+      ctx.stroke();
+    }
+
+    // Eje Central Horizontal (Eje Y = 0) en Verde Esmeralda
+    ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)';
+    ctx.lineWidth = Math.max(1.0, 1.5 / zoom);
+    ctx.setLineDash([4 / zoom, 4 / zoom]);
+    ctx.beginPath();
+    ctx.moveTo(0, H / 2);
+    ctx.lineTo(W, H / 2);
+    ctx.stroke();
+
+    for (let x = 0; x <= W; x += W / 8) {
+      ctx.beginPath();
+      ctx.moveTo(x, H / 2 - 5 / zoom);
+      ctx.lineTo(x, H / 2 + 5 / zoom);
+      ctx.stroke();
+    }
+
+    // Cruz de Origen Central (0, 0)
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.fillStyle = '#0284c7';
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, 3.5 / zoom, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Bounding Box y Centro de la Silueta (Líneas Naranjas Discretas)
+    if (processed && processed.boundsNormalized) {
+      const b = processed.boundsNormalized;
+      const bLeft = b.minU * (W - 1);
+      const bRight = b.maxU * (W - 1);
+      const bTop = (1 - b.maxV) * (H - 1);
+      const bBottom = (1 - b.minV) * (H - 1);
+      const bCenterNormX = (bLeft + bRight) / 2;
+      const bCenterNormY = (bTop + bBottom) / 2;
+
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
+      ctx.lineWidth = 1 / zoom;
+      ctx.setLineDash([3 / zoom, 3 / zoom]);
+      ctx.strokeRect(bLeft, bTop, bRight - bLeft, bBottom - bTop);
+
+      // Centro de la silueta detectada
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.8)';
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(bCenterNormX - 6 / zoom, bCenterNormY);
+      ctx.lineTo(bCenterNormX + 6 / zoom, bCenterNormY);
+      ctx.moveTo(bCenterNormX, bCenterNormY - 6 / zoom);
+      ctx.lineTo(bCenterNormX, bCenterNormY + 6 / zoom);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
 
   // 2. Superponer tinte de silueta sólida
   const maskCanvas = document.createElement('canvas');
@@ -1662,7 +1909,9 @@ export function drawBlueprintPreview(
       const step = isEditPointsMode ? 1 : 4;
       for (let ptIdx = 0; ptIdx < loop.length; ptIdx += step) {
         const [cx, cy] = toCanvas(loop[ptIdx][0], loop[ptIdx][1]);
-        const isSelected = selectedPointInfo && selectedPointInfo.loopIdx === loopIdx && selectedPointInfo.ptIdx === ptIdx;
+        const isSingleSelected = selectedPointInfo && selectedPointInfo.loopIdx === loopIdx && selectedPointInfo.ptIdx === ptIdx;
+        const isMultiSelected = multiSelectedPoints.some(p => p.loopIdx === loopIdx && p.ptIdx === ptIdx);
+        const isSelected = isSingleSelected || isMultiSelected;
         const isHovered = hoveredPointInfo && hoveredPointInfo.loopIdx === loopIdx && hoveredPointInfo.ptIdx === ptIdx;
 
         ctx.save();
@@ -1728,6 +1977,23 @@ export function drawBlueprintPreview(
   }
 
   ctx.restore();
+
+  // 5. Dibujar Caja de Selección Múltiple (Marquee Selection Box) en espacio píxel de lienzo
+  if (selectionBox) {
+    const rx = Math.min(selectionBox.x1, selectionBox.x2);
+    const ry = Math.min(selectionBox.y1, selectionBox.y2);
+    const rw = Math.abs(selectionBox.x2 - selectionBox.x1);
+    const rh = Math.abs(selectionBox.y2 - selectionBox.y1);
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.restore();
+  }
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {

@@ -475,8 +475,12 @@ export function marchingCubes(
       neighbors[c].add(a); neighbors[c].add(b);
     }
 
+    // Algoritmo de suavizado alterno para evitar la contracción geométrica (Anti-Shrinkage)
     for (let iter = 0; iter < smoothIterations; iter++) {
       const smoothedVerts: V3[] = [];
+      const isExpansionStep = iter % 2 === 1;
+      const currentFactor = isExpansionStep ? -(smoothFactor * 1.05) : smoothFactor;
+
       for (let i = 0; i < finalVertices.length; i++) {
         const nbrs = neighbors[i];
         if (nbrs.size === 0) {
@@ -496,9 +500,9 @@ export function marchingCubes(
 
         const orig = finalVertices[i];
         smoothedVerts.push([
-          orig[0] * (1 - smoothFactor) + avgX * smoothFactor,
-          orig[1] * (1 - smoothFactor) + avgY * smoothFactor,
-          orig[2] * (1 - smoothFactor) + avgZ * smoothFactor
+          orig[0] * (1 - currentFactor) + avgX * currentFactor,
+          orig[1] * (1 - currentFactor) + avgY * currentFactor,
+          orig[2] * (1 - currentFactor) + avgZ * currentFactor
         ]);
       }
       for (let i = 0; i < finalVertices.length; i++) {

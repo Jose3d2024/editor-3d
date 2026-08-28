@@ -20,6 +20,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
   const [isShortcutsSectionOpen, setIsShortcutsSectionOpen] = useState(true);
   const [isViewportPrefsOpen, setIsViewportPrefsOpen] = useState(true);
   const [isPrecisionOpen, setIsPrecisionOpen] = useState(false);
+  const [isTexturePrefsOpen, setIsTexturePrefsOpen] = useState(true);
   const [isSceneStatsOpen, setIsSceneStatsOpen] = useState(false);
 
   // Local preferences state (persisted in localStorage or session)
@@ -29,6 +30,24 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const [showAxes, setShowAxes] = useState<boolean>(true);
   const [highPerformanceMode, setHighPerformanceMode] = useState<boolean>(false);
+
+  // Estados locales para Proyección & Texturas PBR
+  const [triplanarScale, setTriplanarScale] = useState<number>(1.0);
+  const [triplanarBlend, setTriplanarBlend] = useState<number>(0.5);
+  const [mirrorOpposite, setMirrorOpposite] = useState<boolean>(false);
+
+  const selectedObjectId = useStore(state => state.selectedObjectId);
+  const updateMaterial = useStore(state => state.updateMaterial);
+
+  // Helper para sincronizar cambios con el material del objeto seleccionado si existe
+  const handleMaterialParamChange = (key: string, value: any) => {
+    if (selectedObjectId) {
+      const obj = project.objects.find(o => o.id === selectedObjectId);
+      if (obj?.materialId) {
+        updateMaterial(obj.materialId, { [key]: value });
+      }
+    }
+  };
 
   // Filtered shortcuts for in-panel quick browsing
   const filteredShortcuts = SHORTCUTS_DATA.filter(item => {
@@ -300,7 +319,90 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({ onOpenShortcutsModal }
           )}
         </div>
 
-        {/* ─── SECTION 4: MÉTRICAS DEL PROYECTO ─── */}
+        {/* ─── SECTION 4: AJUSTES DE PROYECCIÓN & PBR ─── */}
+        <div className="p-3.5 rounded-2xl bg-zinc-900/40 border border-zinc-800 space-y-3">
+          <button
+            onClick={() => setIsTexturePrefsOpen(!isTexturePrefsOpen)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <div className="flex items-center gap-2">
+              <Sparkles size={14} className="text-indigo-400" />
+              <span className="text-xs font-bold text-zinc-200 uppercase tracking-wider">
+                Proyección & Texturas PBR
+              </span>
+            </div>
+            {isTexturePrefsOpen ? <ChevronDown size={14} className="text-zinc-500" /> : <ChevronRight size={14} className="text-zinc-500" />}
+          </button>
+
+          {isTexturePrefsOpen && (
+            <div className="space-y-3 pt-1 text-xs">
+              {/* Deslizador de Escala / Tiling Triplanar */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-zinc-400">Escala de Textura (Tiling)</span>
+                  <span className="text-zinc-200 font-mono font-bold">{triplanarScale.toFixed(2)}x</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="5.0"
+                  step="0.05"
+                  value={triplanarScale}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    setTriplanarScale(val);
+                    handleMaterialParamChange('triplanarScale', val);
+                    handleMaterialParamChange('mapRepeat', [val, val]);
+                  }}
+                  className="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded cursor-pointer"
+                />
+              </div>
+
+              {/* Deslizador de Suavizado de Bordes (Blend) */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-zinc-400">Suavizado de Bordes (Blend)</span>
+                  <span className="text-zinc-200 font-mono font-bold">{(triplanarBlend * 100).toFixed(0)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.0"
+                  max="1.0"
+                  step="0.02"
+                  value={triplanarBlend}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    setTriplanarBlend(val);
+                    handleMaterialParamChange('triplanarBlend', val);
+                  }}
+                  className="w-full accent-indigo-500 h-1.5 bg-zinc-800 rounded cursor-pointer"
+                />
+              </div>
+
+              {/* Conmutador de Simetría Espejo para Caras Opuestas */}
+              <div className="pt-1">
+                <label className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/60 border border-zinc-800/80 cursor-pointer hover:border-zinc-700 transition-colors">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-zinc-300 font-medium">Simetría en Caras Opuestas</span>
+                    <span className="text-[8px] text-zinc-500">Refleja la proyección en normales invertidas</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={mirrorOpposite}
+                    onChange={e => {
+                      const val = e.target.checked;
+                      setMirrorOpposite(val);
+                      handleMaterialParamChange('texMirrorOpposite', val);
+                    }}
+                    className="accent-indigo-500 w-3.5 h-3.5 rounded"
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ─── SECTION 5: MÉTRICAS DEL PROYECTO ─── */}
         <div className="p-3.5 rounded-2xl bg-zinc-900/40 border border-zinc-800 space-y-3">
           <button
             onClick={() => setIsSceneStatsOpen(!isSceneStatsOpen)}
