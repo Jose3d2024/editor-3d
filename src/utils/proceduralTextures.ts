@@ -90,6 +90,93 @@ export function createNoiseTexture(
   return canvas.toDataURL('image/png');
 }
 
+/**
+ * Generates an organic thin-film iridescent rainbow interference texture (soap bubble / oil slick)
+ */
+export function createThinFilmIridescenceTexture(
+  width = 512, height = 512, swirlScale = 3.5, flowSpeed = 1.0, vibrancy = 1.2
+): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) return '';
+  const imgData = ctx.createImageData(width, height);
+  const data = imgData.data;
+
+  const snoise = (x: number, y: number) => {
+    const i = Math.floor(x), j = Math.floor(y);
+    const fx = x - i, fy = y - j;
+    const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+    const hash = (n: number) => Math.sin(n) * 43758.5453 % 1;
+    const a = hash(i + j * 57), b = hash(i + 1 + j * 57);
+    const c = hash(i + (j + 1) * 57), d = hash(i + 1 + (j + 1) * 57);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  };
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const u = x / width, v = y / height;
+      const nx = u * swirlScale, ny = v * swirlScale;
+      const n1 = snoise(nx, ny);
+      const n2 = snoise(nx * 2.2 + n1 * 1.5, ny * 2.2 + n1 * 1.5);
+      const thickness = (n1 * 0.6 + n2 * 0.4 + (v * 0.2)) * 6.28318;
+
+      const r = Math.sin(thickness * 1.0) * 0.5 + 0.5;
+      const g = Math.sin(thickness * 1.0 + 2.094) * 0.5 + 0.5;
+      const b = Math.sin(thickness * 1.0 + 4.188) * 0.5 + 0.5;
+
+      const idx = (y * width + x) * 4;
+      data[idx] = Math.min(255, Math.max(0, (r * vibrancy * 255) | 0));
+      data[idx + 1] = Math.min(255, Math.max(0, (g * vibrancy * 255) | 0));
+      data[idx + 2] = Math.min(255, Math.max(0, (b * vibrancy * 255) | 0));
+      data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+/**
+ * Generates an iridescence thickness grayscale map (fluid gradient & turbulence for Three.js iridescenceThicknessMap)
+ */
+export function createIridescenceThicknessTexture(
+  width = 512, height = 512, scale = 4.0, swirl = 1.5
+): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) return '';
+  const imgData = ctx.createImageData(width, height);
+  const data = imgData.data;
+
+  const snoise = (x: number, y: number) => {
+    const i = Math.floor(x), j = Math.floor(y);
+    const fx = x - i, fy = y - j;
+    const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+    const hash = (n: number) => Math.sin(n) * 43758.5453 % 1;
+    const a = hash(i + j * 57), b = hash(i + 1 + j * 57);
+    const c = hash(i + (j + 1) * 57), d = hash(i + 1 + (j + 1) * 57);
+    return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  };
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const u = x / width, v = y / height;
+      const nx = u * scale, ny = v * scale;
+      const n1 = snoise(nx, ny);
+      const n2 = snoise(nx * 2.5 + n1 * swirl, ny * 2.5 + n1 * swirl);
+      const val = Math.min(1.0, Math.max(0.0, 0.5 + 0.35 * n1 + 0.25 * n2));
+      const c = (val * 255) | 0;
+
+      const idx = (y * width + x) * 4;
+      data[idx] = c;
+      data[idx + 1] = c;
+      data[idx + 2] = c;
+      data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
 export function createCheckerTexture(
   width = 512, height = 512, size = 8, color1 = '#ffffff', color2 = '#000000'
 ): string {
@@ -971,24 +1058,170 @@ export function generateMaterial(
 }
 
 const COLOR_THUMB_CACHE = new Map<string, string>();
-export function _colorThumb(hexColor: string, icon?: string): string {
-  const cacheKey = `${hexColor}_${icon || ''}`;
+export function _colorThumb(hexColor: string, icon?: string, materialId?: string): string {
+  const cacheKey = `${hexColor}_${icon || ''}_${materialId || ''}`;
   if (COLOR_THUMB_CACHE.has(cacheKey)) return COLOR_THUMB_CACHE.get(cacheKey)!;
   const canvas = document.createElement('canvas');
   canvas.width = 48;
   canvas.height = 48;
   const ctx = canvas.getContext('2d');
   if (ctx) {
-    const grad = ctx.createRadialGradient(20, 16, 2, 24, 24, 26);
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(0.35, hexColor);
-    grad.addColorStop(1, '#090a0f');
-    ctx.fillStyle = grad;
+    // 1. Dark sphere background with subtle vignette
+    const bgGrad = ctx.createRadialGradient(24, 24, 0, 24, 24, 24);
+    bgGrad.addColorStop(0, '#1c1d28');
+    bgGrad.addColorStop(1, '#090a0f');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, 48, 48);
+
+    // 2. 3D Sphere base with realistic PBR lighting
+    ctx.save();
     ctx.beginPath();
-    ctx.arc(24, 24, 22, 0, Math.PI * 2);
+    ctx.arc(24, 24, 20, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Base body gradient (specular at 16, 14, diffuse midpoint, shadow at 32, 34)
+    const sphereGrad = ctx.createRadialGradient(16, 14, 1, 24, 24, 22);
+    sphereGrad.addColorStop(0, '#ffffff');
+    sphereGrad.addColorStop(0.25, hexColor);
+    sphereGrad.addColorStop(0.75, hexColor);
+    sphereGrad.addColorStop(1, '#050608');
+    ctx.fillStyle = sphereGrad;
     ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+
+    // 3. Specialized Procedural Overlays depending on Material ID / Category
+    const mid = materialId || '';
+    if (mid.includes('wave') || mid.includes('water')) {
+      // Concentric cyan water ripple rings
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.lineWidth = 1.2;
+      for (let r = 5; r <= 17; r += 4) {
+        ctx.beginPath();
+        ctx.ellipse(24, 26, r, r * 0.45, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else if (mid.includes('shield') || mid.includes('glitch')) {
+      // Sci-fi holographic cyber grid & scanlines
+      ctx.strokeStyle = mid.includes('glitch') ? 'rgba(52, 211, 153, 0.6)' : 'rgba(34, 211, 238, 0.6)';
+      ctx.lineWidth = 1;
+      for (let y = 10; y <= 38; y += 4) {
+        ctx.beginPath();
+        ctx.moveTo(8, y);
+        ctx.lineTo(40, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.fillRect(18, 18, 12, 12);
+    } else if (mid.includes('magma') || mid.includes('volcanic')) {
+      // Magma crust with incandescent glowing red/orange veins
+      ctx.strokeStyle = '#ffedd5';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(14, 18);
+      ctx.lineTo(24, 24);
+      ctx.lineTo(34, 19);
+      ctx.moveTo(24, 24);
+      ctx.lineTo(26, 36);
+      ctx.stroke();
+    } else if (mid.includes('crystal') || mid.includes('prism')) {
+      // Prismatic crystal facets & rainbow caustics
+      const prismGrad = ctx.createLinearGradient(10, 10, 38, 38);
+      prismGrad.addColorStop(0, 'rgba(255, 0, 128, 0.4)');
+      prismGrad.addColorStop(0.33, 'rgba(0, 200, 255, 0.4)');
+      prismGrad.addColorStop(0.66, 'rgba(0, 255, 128, 0.4)');
+      prismGrad.addColorStop(1, 'rgba(255, 200, 0, 0.4)');
+      ctx.fillStyle = prismGrad;
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(24, 8);
+      ctx.lineTo(38, 24);
+      ctx.lineTo(24, 40);
+      ctx.lineTo(10, 24);
+      ctx.closePath();
+      ctx.stroke();
+    } else if (mid.includes('flesh') || mid.includes('bio')) {
+      // Organic muscle striations
+      ctx.strokeStyle = 'rgba(255, 180, 180, 0.35)';
+      ctx.lineWidth = 1;
+      for (let x = 10; x <= 38; x += 5) {
+        ctx.beginPath();
+        ctx.moveTo(x, 10);
+        ctx.bezierCurveTo(x + 4, 20, x - 4, 30, x, 38);
+        ctx.stroke();
+      }
+    } else if (mid.includes('comic')) {
+      // Halftone dot pattern
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      for (let gx = 10; gx <= 36; gx += 5) {
+        for (let gy = 10; gy <= 36; gy += 5) {
+          ctx.beginPath();
+          ctx.arc(gx, gy, 1.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    } else if (mid.includes('frosted')) {
+      // Frosted acid glass noise speckles
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      for (let i = 0; i < 20; i++) {
+        const sx = 12 + ((i * 17) % 24);
+        const sy = 12 + ((i * 23) % 24);
+        ctx.fillRect(sx, sy, 2, 2);
+      }
+    } else if (mid.includes('emerald') || mid.includes('ruby')) {
+      // Rich jewel caustics
+      const jewelGrad = ctx.createRadialGradient(24, 28, 2, 24, 28, 14);
+      jewelGrad.addColorStop(0, 'rgba(255, 255, 255, 0.6)');
+      jewelGrad.addColorStop(1, 'transparent');
+      ctx.fillStyle = jewelGrad;
+      ctx.beginPath();
+      ctx.arc(24, 28, 12, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (mid.includes('soap_bubble') || mid.includes('bubble') || mid.includes('jabon')) {
+      // Iridescent thin-film rainbow bubble interference overlay
+      const bubbleGrad = ctx.createLinearGradient(8, 8, 40, 40);
+      bubbleGrad.addColorStop(0, 'rgba(255, 99, 132, 0.55)');
+      bubbleGrad.addColorStop(0.25, 'rgba(255, 205, 86, 0.55)');
+      bubbleGrad.addColorStop(0.5, 'rgba(75, 192, 192, 0.55)');
+      bubbleGrad.addColorStop(0.75, 'rgba(54, 162, 235, 0.55)');
+      bubbleGrad.addColorStop(1, 'rgba(153, 102, 255, 0.55)');
+      ctx.fillStyle = bubbleGrad;
+      ctx.beginPath();
+      ctx.arc(24, 24, 19, 0, Math.PI * 2);
+      ctx.fill();
+
+      const innerGrad = ctx.createRadialGradient(20, 18, 2, 24, 24, 18);
+      innerGrad.addColorStop(0, 'rgba(255, 255, 255, 0.45)');
+      innerGrad.addColorStop(0.5, 'rgba(200, 240, 255, 0.15)');
+      innerGrad.addColorStop(1, 'rgba(255, 180, 240, 0.35)');
+      ctx.fillStyle = innerGrad;
+      ctx.beginPath();
+      ctx.arc(24, 24, 19, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(20, 18, 6, -0.5, Math.PI * 0.8);
+      ctx.stroke();
+    }
+
+    // 4. Secondary specular highlight & bounce light
+    const specGrad = ctx.createRadialGradient(16, 14, 0, 16, 14, 6);
+    specGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
+    specGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.4)');
+    specGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = specGrad;
+    ctx.fillRect(10, 8, 12, 12);
+
+    ctx.restore();
+
+    // 5. Crisp glass / Fresnel rim stroke
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.beginPath();
+    ctx.arc(24, 24, 20, 0, Math.PI * 2);
     ctx.stroke();
   }
   const url = canvas.toDataURL('image/webp', 0.85);
@@ -4796,7 +5029,7 @@ export const csmWaves: ProceduralMaterial = {
     ior: 1.33,
   },
   generate: () => fastSolidMaps('#0284c7', 0.1, 0.2),
-  thumbnail: () => _colorThumb('#0284c7', '🌊'),
+  thumbnail: () => _colorThumb('#0284c7', '🌊', 'csm_waves'),
 };
 
 export const csmShield: ProceduralMaterial = {
@@ -4823,7 +5056,7 @@ export const csmShield: ProceduralMaterial = {
     emissiveIntensity: 1.5,
   },
   generate: () => fastSolidMaps('#0891b2', 0.15, 0.0),
-  thumbnail: () => _colorThumb('#0891b2', '🛡️'),
+  thumbnail: () => _colorThumb('#0891b2', '🛡️', 'csm_shield'),
 };
 
 export const csmMagma: ProceduralMaterial = {
@@ -4850,7 +5083,7 @@ export const csmMagma: ProceduralMaterial = {
     emissiveIntensity: 2.0,
   },
   generate: () => fastSolidMaps('#1c1917', 0.85, 0.1),
-  thumbnail: () => _colorThumb('#ff3b00', '🌋'),
+  thumbnail: () => _colorThumb('#ff3b00', '🌋', 'csm_magma'),
 };
 
 export const csmTwist: ProceduralMaterial = {
@@ -4875,7 +5108,7 @@ export const csmTwist: ProceduralMaterial = {
     color: '#581c87',
   },
   generate: () => fastSolidMaps('#581c87', 0.2, 0.6),
-  thumbnail: () => _colorThumb('#a855f7', '🌪️'),
+  thumbnail: () => _colorThumb('#a855f7', '🌪️', 'csm_twist'),
 };
 
 export const csmBioFlesh: ProceduralMaterial = {
@@ -4900,7 +5133,7 @@ export const csmBioFlesh: ProceduralMaterial = {
     color: '#881337',
   },
   generate: () => fastSolidMaps('#881337', 0.35, 0.0),
-  thumbnail: () => _colorThumb('#e11d48', '🧬'),
+  thumbnail: () => _colorThumb('#e11d48', '🧬', 'csm_flesh'),
 };
 
 export const csmQuantumCrystal: ProceduralMaterial = {
@@ -4926,7 +5159,7 @@ export const csmQuantumCrystal: ProceduralMaterial = {
     transmission: 0.6,
   },
   generate: () => fastSolidMaps('#312e81', 0.05, 0.4),
-  thumbnail: () => _colorThumb('#818cf8', '💎'),
+  thumbnail: () => _colorThumb('#818cf8', '💎', 'csm_crystal'),
 };
 
 export const csmGlitch: ProceduralMaterial = {
@@ -4951,7 +5184,7 @@ export const csmGlitch: ProceduralMaterial = {
     color: '#064e3b',
   },
   generate: () => fastSolidMaps('#064e3b', 0.3, 0.1),
-  thumbnail: () => _colorThumb('#10b981', '👾'),
+  thumbnail: () => _colorThumb('#10b981', '👾', 'csm_glitch'),
 };
 
 export const csmComic: ProceduralMaterial = {
@@ -4976,7 +5209,37 @@ export const csmComic: ProceduralMaterial = {
     color: '#d97706',
   },
   generate: () => fastSolidMaps('#d97706', 0.9, 0.0),
-  thumbnail: () => _colorThumb('#f59e0b', '🎨'),
+  thumbnail: () => _colorThumb('#f59e0b', '🎨', 'csm_comic'),
+};
+
+export const csmSoapBubble: ProceduralMaterial = {
+  id: 'csm_soap_bubble',
+  name: 'CSM Pompa de Jabón (Película Delgada)',
+  category: 'csm',
+  icon: '🫧',
+  isCSM: true,
+  csmConfig: {
+    enabled: true,
+    baseMaterial: 'MeshPhysicalMaterial',
+    preset: 'soap_bubble',
+    timeSpeed: 0.8,
+    displacementScale: 0.02,
+    noiseFrequency: 2.8,
+    colorAccent: '#38bdf8',
+    glowIntensity: 1.5,
+    roughnessMod: 0.02,
+    metalnessMod: 0.05,
+  },
+  defaults: {
+    roughness: 0.02,
+    metalness: 0.05,
+    color: '#e0f2fe',
+    transmission: 0.95,
+    ior: 1.333,
+    thickness: 0.1,
+  },
+  generate: () => fastSolidMaps('#38bdf8', 0.02, 0.05),
+  thumbnail: () => _colorThumb('#38bdf8', '🫧', 'csm_soap_bubble'),
 };
 
 export const glassPrismDispersion: ProceduralMaterial = {
@@ -5002,7 +5265,7 @@ export const glassPrismDispersion: ProceduralMaterial = {
     thickness: 1.2,
   },
   generate: () => fastSolidMaps('#e0e7ff', 0.02, 0.0),
-  thumbnail: () => _colorThumb('#a5b4fc', '🌈'),
+  thumbnail: () => _colorThumb('#a5b4fc', '🌈', 'glass_prism'),
 };
 
 export const glassFrostedAcid: ProceduralMaterial = {
@@ -5026,7 +5289,7 @@ export const glassFrostedAcid: ProceduralMaterial = {
     thickness: 1.0,
   },
   generate: () => fastSolidMaps('#cbd5e1', 0.32, 0.0),
-  thumbnail: () => _colorThumb('#cbd5e1', '🌫️'),
+  thumbnail: () => _colorThumb('#cbd5e1', '🌫️', 'glass_frosted'),
 };
 
 export const glassEmeraldCaustic: ProceduralMaterial = {
@@ -5053,7 +5316,7 @@ export const glassEmeraldCaustic: ProceduralMaterial = {
     thickness: 1.5,
   },
   generate: () => fastSolidMaps('#059669', 0.04, 0.0),
-  thumbnail: () => _colorThumb('#10b981', '❇️'),
+  thumbnail: () => _colorThumb('#10b981', '❇️', 'glass_emerald'),
 };
 
 export const glassRubyDichroic: ProceduralMaterial = {
@@ -5081,16 +5344,56 @@ export const glassRubyDichroic: ProceduralMaterial = {
     thickness: 1.6,
   },
   generate: () => fastSolidMaps('#e11d48', 0.03, 0.0),
-  thumbnail: () => _colorThumb('#f43f5e', '💎'),
+  thumbnail: () => _colorThumb('#f43f5e', '💎', 'glass_ruby'),
+};
+
+export const glassSoapBubbleWebGPU: ProceduralMaterial = {
+  id: 'glass_soap_bubble',
+  name: 'Pompa de Jabón Espectral (WebGPU)',
+  category: 'glass_webgpu',
+  icon: '🫧',
+  isWebGPUGlass: true,
+  webgpuGlass: {
+    enabled: true,
+    preset: 'soap_bubble_spectral',
+    dispersion: 0.14,
+    chromaticAberration: 0.09,
+    distortion: 0.03,
+    distortionSpeed: 1.2,
+    distortionFrequency: 2.5,
+    frostedBlur: 0.0,
+    rimGlow: 1.8,
+    rimColor: '#38bdf8',
+    thinFilmIridescence: 1.0,
+    causticIntensity: 1.5,
+  },
+  defaults: {
+    roughness: 0.02,
+    metalness: 0.02,
+    color: '#e0f2fe',
+    transmission: 0.96,
+    ior: 1.333,
+    thickness: 0.1,
+    dispersion: 0.14,
+    attenuationColor: '#bae6fd',
+    attenuationDistance: 1.5,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.02,
+    iridescence: 1.0,
+    iridescenceIOR: 1.333,
+    iridescenceThicknessRange: [150, 750],
+  },
+  generate: () => fastSolidMaps('#38bdf8', 0.02, 0.02),
+  thumbnail: () => _colorThumb('#38bdf8', '🫧', 'glass_soap_bubble'),
 };
 
 export const MATERIAL_LIBRARY: ProceduralMaterial[] = [
   // Custom Shader Materials (CSM)
-  csmWaves, csmShield, csmMagma, csmTwist,
+  csmSoapBubble, csmWaves, csmShield, csmMagma, csmTwist,
   csmBioFlesh, csmQuantumCrystal, csmGlitch, csmComic,
 
   // WebGPU Glass Materials
-  glassPrismDispersion, glassFrostedAcid, glassEmeraldCaustic, glassRubyDichroic,
+  glassSoapBubbleWebGPU, glassPrismDispersion, glassFrostedAcid, glassEmeraldCaustic, glassRubyDichroic,
 
   // Wood & Organic (Substance 3D Core Collection)
   oakPlanks, walnut, pine, mahogany, varnishedWood,

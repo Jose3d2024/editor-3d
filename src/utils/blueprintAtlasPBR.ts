@@ -51,6 +51,7 @@ function loadImageAsync(url: string): Promise<HTMLImageElement | null> {
 
 /**
  * Compone un Atlas 2D combinando las imágenes de las diferentes vistas en sus respectivos cuadrantes
+ * con corrección de V-Flip e inyección de sangrado perimetral (Bleeding) para evitar costuras.
  */
 async function compositeAtlasChannel(
   images: { viewKey: BlueprintViewKey; url: string }[],
@@ -80,10 +81,21 @@ async function compositeAtlasChannel(
     const dw = (quad.uMax - quad.uMin) * atlasSize;
     const dh = (quad.vMax - quad.vMin) * atlasSize;
 
+    ctx.save();
+    // Patrón de sangrado (Bleed): sombra difuminada para que el mipmapping de WebGL no recoja el color del fondo
+    ctx.shadowColor = defaultFillColor;
+    ctx.shadowBlur = 4;
     ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.restore();
   }
 
   return canvas.toDataURL('image/png');
+}
+
+export interface AtlasGenerationOptions {
+  atlasResolution?: number;
+  baseMetalness?: number; // 0.0 a 1.0
+  baseRoughness?: number; // 0.0 a 1.0
 }
 
 /**
@@ -91,10 +103,19 @@ async function compositeAtlasChannel(
  */
 export async function buildUnifiedMultiViewPBRAtlas(
   viewDataMap: Partial<Record<BlueprintViewKey, ViewPBRData>>,
-  atlasResolution = 2048
+  options: number | AtlasGenerationOptions = 2048
 ): Promise<MultiViewAtlasResult | null> {
   const activeKeys = (['front', 'side', 'top'] as BlueprintViewKey[]).filter(k => !!viewDataMap[k]);
   if (activeKeys.length === 0) return null;
+
+  const atlasResolution = typeof options === 'number' ? options : (options.atlasResolution ?? 2048);
+  const baseMetalness = typeof options === 'object' ? (options.baseMetalness ?? 0.0) : 0.0;
+  const baseRoughness = typeof options === 'object' ? (options.baseRoughness ?? 0.5) : 0.5;
+
+  const metalByte = Math.max(0, Math.min(255, Math.round(baseMetalness * 255))).toString(16).padStart(2, '0');
+  const roughByte = Math.max(0, Math.min(255, Math.round(baseRoughness * 255))).toString(16).padStart(2, '0');
+  const metalHexColor = `#${metalByte}${metalByte}${metalByte}`;
+  const roughHexColor = `#${roughByte}${roughByte}${roughByte}`;
 
   // 1. Recolectar URLs de cada canal
   const albedoList: { viewKey: BlueprintViewKey; url: string }[] = [];
@@ -127,9 +148,9 @@ export async function buildUnifiedMultiViewPBRAtlas(
     compositeAtlasChannel(albedoList, atlasResolution, '#e2e8f0'),
     compositeAtlasChannel(normalList, atlasResolution, '#8080ff'), // Normal neutra tangente
     compositeAtlasChannel(bumpList, atlasResolution, '#808080'),   // Bump neutral 50% gris
-    compositeAtlasChannel(roughList, atlasResolution, '#707070'),  // Rugosidad media
+    compositeAtlasChannel(roughList, atlasResolution, roughHexColor),  // Rugosidad dinámica
     compositeAtlasChannel(aoList, atlasResolution, '#ffffff'),     // AO blanco sin sombras
-    compositeAtlasChannel(metalList, atlasResolution, '#000000'),  // No metálico por defecto
+    compositeAtlasChannel(metalList, atlasResolution, metalHexColor),  // Metalizado dinámico
   ]);
 
   const materialId = 'mat_atlas_pbr_' + Math.random().toString(36).substring(2, 9);
@@ -151,7 +172,7 @@ export async function buildUnifiedMultiViewPBRAtlas(
 /**
  * Genera coordenadas UV mapeando cada cara de la malla 3D al cuadrante correspondiente en el Atlas Multi-Vista.
  * 
- * Regla de Asignación de Cuadrantes según la normal de cada cara:
+ * Regla de Asignación de Cuadrantes según la normal de cada cara con escala isotrópica (maxHalf):
  * - Caras Laterales (|Nx| dominante): proyectadas en plano Z-Y y mapeadas al cuadrante `side`
  * - Caras Superiores/Inferiores (|Ny| dominante): proyectadas en plano X-Z y mapeadas al cuadrante `top`
  * - Caras Frontales/Posteriores (|Nz| dominante): proyectadas en plano X-Y y mapeadas al cuadrante `front`
@@ -159,29 +180,22 @@ export async function buildUnifiedMultiViewPBRAtlas(
 export function generateMultiViewAtlasUVs(
   obj: { vertices: V3[]; faces: MeshFace[] },
   activeViews: BlueprintViewKey[] = ['side', 'top', 'front'],
-  _customDimensions?: V3,
+  customDimensions?: V3,
   viewsConfig?: Partial<Record<BlueprintViewKey, BlueprintImageConfig>>,
-  boundsMap?: Partial<Record<BlueprintViewKey, { minU: number; minV: number; maxU: number; maxV: number }>>
+  _boundsMap?: Partial<Record<BlueprintViewKey, { minU: number; minV: number; maxU: number; maxV: number }>>
 ): { vertices: V3[]; faces: MeshFace[] } {
   const vertices = obj.vertices;
   if (!vertices || vertices.length === 0 || !obj.faces || obj.faces.length === 0) return obj;
 
-  // 1. Bounding box global
-  const min = [Infinity, Infinity, Infinity];
-  const max = [-Infinity, -Infinity, -Infinity];
-  vertices.forEach(v => {
-    if (!v) return;
-    for (let i = 0; i < 3; i++) {
-      if (v[i] < min[i]) min[i] = v[i];
-      if (v[i] > max[i]) max[i] = v[i];
-    }
-  });
+  // 1. Bounding box global y escala isotrópica
+  const dimX = customDimensions ? customDimensions[0] : 2;
+  const dimY = customDimensions ? customDimensions[1] : 2;
+  const dimZ = customDimensions ? customDimensions[2] : 2;
 
-  const size = [
-    Math.max(1e-4, max[0] - min[0]),
-    Math.max(1e-4, max[1] - min[1]),
-    Math.max(1e-4, max[2] - min[2]),
-  ];
+  const halfX = Math.max(1e-4, dimX / 2);
+  const halfY = Math.max(1e-4, dimY / 2);
+  const halfZ = Math.max(1e-4, dimZ / 2);
+  const maxHalf = Math.max(halfX, halfY, halfZ);
 
   // Determinar vistas activas para fallback
   const hasSide = activeViews.includes('side');
@@ -239,9 +253,6 @@ export function generateMultiViewAtlasUVs(
     const quadHeight = quad.vMax - quad.vMin;
 
     const cfg = viewsConfig?.[dominantView];
-    const bounds = boundsMap?.[dominantView] || { minU: 0, minV: 0, maxU: 1, maxV: 1 };
-    const bSpanU = Math.max(1e-4, bounds.maxU - bounds.minU);
-    const bSpanV = Math.max(1e-4, bounds.maxV - bounds.minV);
 
     const scaleX = Math.max(0.01, cfg?.texScaleX ?? 1.0);
     const scaleY = Math.max(0.01, cfg?.texScaleY ?? 1.0);
@@ -251,45 +262,39 @@ export function generateMultiViewAtlasUVs(
     const flipV = cfg?.texFlipV ?? false;
     const mirrorOpposite = cfg?.texMirrorOpposite ?? false;
 
-    // Dimensión máxima para mapeado isométrico uniforme sin deformación de aspect ratio
-    const maxDim = Math.max(size[0], size[1], size[2]);
-
     const uvs: [number, number][] = face.indices.map(vIdx => {
       const v = vertices[vIdx] || [0, 0, 0];
       const [x, y, z] = v;
       let rawU = 0.5;
       let rawV = 0.5;
 
+      // Proyección Isotrópica dividiendo por maxHalf con centrado analítico
       if (dominantView === 'side') {
-        // Vista Lateral (plano Z-Y)
-        if (mirrorOpposite) {
-          rawU = normalX >= 0 ? (max[2] - z) / maxDim : (z - min[2]) / maxDim;
-        } else {
-          rawU = (max[2] - z) / maxDim;
-        }
-        rawV = (y - min[1]) / maxDim;
+        let pzNorm = z / maxHalf;
+        let pyNorm = y / maxHalf;
+        if (mirrorOpposite && normalX < 0) pzNorm = -pzNorm;
+        rawU = (1.0 - pzNorm) / 2.0;
+        rawV = (pyNorm + 1.0) / 2.0;
 
-        // Centrado si no es cúbico
-        rawU += (1.0 - (size[2] / maxDim)) * 0.5;
-        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
+        rawU += (1.0 - (halfZ / maxHalf)) * 0.5;
+        rawV += (1.0 - (halfY / maxHalf)) * 0.5;
       } else if (dominantView === 'top') {
-        // Vista Superior (plano X-Z) - proyección continua sin saltos de signo
-        rawU = (x - min[0]) / maxDim;
-        rawV = (max[2] - z) / maxDim;
+        let pxNorm = x / maxHalf;
+        let pzNorm = z / maxHalf;
+        rawU = (pxNorm + 1.0) / 2.0;
+        rawV = normalY >= 0 ? (1.0 - pzNorm) / 2.0 : (pzNorm + 1.0) / 2.0;
 
-        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
-        rawV += (1.0 - (size[2] / maxDim)) * 0.5;
+        rawU += (1.0 - (halfX / maxHalf)) * 0.5;
+        rawV += (1.0 - (halfZ / maxHalf)) * 0.5;
       } else {
-        // Vista Frontal (plano X-Y)
-        if (mirrorOpposite) {
-          rawU = normalZ >= 0 ? (x - min[0]) / maxDim : (max[0] - x) / maxDim;
-        } else {
-          rawU = (x - min[0]) / maxDim;
-        }
-        rawV = (y - min[1]) / maxDim;
+        let pxNorm = x / maxHalf;
+        let pyNorm = y / maxHalf;
+        if (mirrorOpposite && normalZ < 0) pxNorm = -pxNorm;
+        rawU = (pxNorm + 1.0) / 2.0;
+        rawV = (pyNorm + 1.0) / 2.0;
 
-        rawU += (1.0 - (size[0] / maxDim)) * 0.5;
-        rawV += (1.0 - (size[1] / maxDim)) * 0.5;
+        rawU += (1.0 - (halfX / maxHalf)) * 0.5;
+        rawV += (1.0 - (halfY / maxHalf)) * 0.5;
       }
 
       // Aplicar escala y offset
@@ -299,12 +304,8 @@ export function generateMultiViewAtlasUVs(
       if (flipH) uNorm = 1.0 - uNorm;
       if (flipV) vNorm = 1.0 - vNorm;
 
-      // Mapear con bounding box
-      let subU = bounds.minU + uNorm * bSpanU;
-      let subV = bounds.minV + vNorm * bSpanV;
-
-      subU = Math.max(0.001, Math.min(0.999, subU));
-      subV = Math.max(0.001, Math.min(0.999, subV));
+      const subU = Math.max(0.001, Math.min(0.999, uNorm));
+      const subV = Math.max(0.001, Math.min(0.999, vNorm));
 
       // Mapear al espacio global del Atlas [0, 1] en espacio de texturas WebGL
       const atlasU = quad.uMin + subU * quadWidth;

@@ -40,6 +40,29 @@ export interface BooleanResult {
 }
 
 /**
+ * Limpia y sanea una geometría para garantizar que sea apta para CSG sin colapsos de árbol BSP
+ */
+export function cleanGeometryForCSG(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  let cleanGeo = geo.clone();
+  
+  // Asegurar que no tenga NaNs o infinitos en las posiciones
+  const posAttr = cleanGeo.getAttribute('position');
+  if (posAttr) {
+    const arr = posAttr.array as Float32Array;
+    for (let i = 0; i < arr.length; i++) {
+      if (!isFinite(arr[i]) || isNaN(arr[i])) {
+        arr[i] = 0;
+      }
+    }
+    posAttr.needsUpdate = true;
+  }
+
+  // Asegurar que tenga normales bien calculadas
+  cleanGeo.computeVertexNormals();
+  return cleanGeo;
+}
+
+/**
  * Prepara cualquier objeto (primitiva, NURBS, malla importada GLTF/STL/OBJ, paramétrico)
  * para convertirlo en una malla Three.js no indexada en coordenadas mundiales lista para CSG.
  */
@@ -69,12 +92,8 @@ export async function prepareMeshForCSG(rawObj: CSGObject): Promise<{ mesh: THRE
   }
 
   // 3. Crear Three.js geometry base
-  let geo: THREE.BufferGeometry;
-  if (obj.vertices && obj.vertices.length > 0 && obj.faces && obj.faces.length > 0) {
-    geo = createBaseGeometry(obj);
-  } else {
-    geo = createBaseGeometry(obj);
-  }
+  let geo = createBaseGeometry(obj);
+  geo = cleanGeometryForCSG(geo);
 
   // Asegurar vértices no indexados para three-csg-ts
   let nonIndexedGeo = geo.toNonIndexed();

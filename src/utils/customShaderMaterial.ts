@@ -452,6 +452,56 @@ export const CSM_PRESETS: CSMPresetDefinition[] = [
 
       diffuseColor.rgb = mix(inkColor, litColor * (band * 0.55 + 0.45), dotMask);
     `
+  },
+  {
+    id: 'soap_bubble',
+    name: 'Pompa de Jabón (Interferencia de Película Delgada)',
+    category: 'Vidrio & Transmisión',
+    icon: '🫧',
+    description: 'Física óptica de interferencia por película delgada con espesor dinámico (250-800nm), reflejos irisados Airy, torbellinos de tensión superficial y refracción especular.',
+    defaultBaseMaterial: 'MeshPhysicalMaterial',
+    defaultParams: {
+      timeSpeed: 0.8,
+      displacementScale: 0.015,
+      noiseFrequency: 2.8,
+      colorAccent: '#38bdf8',
+      glowIntensity: 1.6,
+      roughnessMod: 0.02,
+      metalnessMod: 0.05
+    },
+    vertexCode: `
+      // Micro-ondulación y deformación orgánica por tensión superficial
+      if (uDisplacementScale > 0.0001) {
+        float bubbleWobble = sin(uTime * uTimeSpeed * 2.2 + position.y * 3.5) * cos(position.x * 3.5 + uTime * uTimeSpeed * 1.8);
+        transformed += normal * (bubbleWobble * uDisplacementScale);
+      }
+    `,
+    fragmentCode: `
+      vec3 nDir = length(vCSMNormal) > 0.001 ? normalize(vCSMNormal) : vec3(0.0, 1.0, 0.0);
+      vec3 vDir = normalize(cameraPosition - vWorldPosition);
+      float NdotV = clamp(abs(dot(nDir, vDir)), 0.001, 1.0);
+
+      // Torbellinos dinámicos de espesor de película de agua/jabón (200-800 nm)
+      float swirl1 = csm_snoise(vWorldPosition * (uNoiseFreq * 0.5) + vec3(uTime * uTimeSpeed * 0.15, uTime * uTimeSpeed * 0.1, 0.0));
+      float swirl2 = csm_snoise(vWorldPosition * (uNoiseFreq * 1.2) - vec3(uTime * uTimeSpeed * 0.2, uTime * uTimeSpeed * 0.12, uTime * uTimeSpeed * 0.08));
+      float thickness = clamp(0.5 + 0.35 * swirl1 + 0.15 * swirl2, 0.08, 0.95);
+
+      // Ecuación de camino óptico (OPD) con índice de refracción de agua jabonosa n = 1.333
+      float cosThetaT = sqrt(max(0.0, 1.0 - (1.0 - NdotV * NdotV) / (1.333 * 1.333)));
+      float opd = 2.0 * 1.333 * thickness * cosThetaT;
+
+      // Espectro de interferencia constructiva Airy para longitudes de onda RGB
+      vec3 phase = opd * vec3(5.6, 6.9, 8.4) + vec3(0.0, 0.33, 0.67);
+      vec3 iridColor = 0.5 + 0.5 * cos(6.28318 * phase);
+
+      // Realce Fresnel en los bordes y reflejo especular tipo pompa
+      float fresnel = pow(1.0 - NdotV, 2.8);
+      vec3 specularRim = vec3(1.0) * pow(1.0 - NdotV, 4.5) * (uGlowIntensity * 1.4);
+
+      vec3 baseFilm = mix(iridColor, uColorAccent, 0.25);
+      diffuseColor.rgb = mix(baseFilm * (0.35 + fresnel * 0.85), specularRim + iridColor * 1.3, fresnel * 0.75);
+      diffuseColor.a = clamp(0.28 + fresnel * 0.68 + length(specularRim) * 0.25, 0.18, 0.98);
+    `
   }
 ];
 
@@ -493,6 +543,9 @@ export function createCustomShaderMaterial(
       break;
   }
 
+  const isSoapBubble = csmConfig.preset === 'soap_bubble';
+  const isHolo = csmConfig.preset === 'hologram_shield';
+
   // Apply standard material parameters
   const m = material as any;
   m.name = baseData.name || 'CustomShaderMaterial';
@@ -501,9 +554,9 @@ export function createCustomShaderMaterial(
   if ('metalness' in m) m.metalness = baseData.metalness ?? (csmConfig.metalnessMod ?? 0.0);
   if ('emissive' in m) m.emissive.set(baseData.emissive || '#000000');
   if ('emissiveIntensity' in m) m.emissiveIntensity = baseData.emissiveIntensity ?? 1;
-  m.opacity = baseData.opacity ?? 1;
-  m.transparent = baseData.transparent ?? (m.opacity < 1);
-  m.depthWrite = true;
+  m.opacity = baseData.opacity ?? (isSoapBubble ? 0.85 : 1);
+  m.transparent = isSoapBubble || isHolo || (baseData.transparent ?? (m.opacity < 1));
+  m.depthWrite = isSoapBubble ? false : true;
   m.side = THREE.DoubleSide;
 
   if (baseTextures.map) m.map = baseTextures.map;
@@ -537,6 +590,7 @@ export function createCustomShaderMaterial(
       uniform vec3 uColorAccent;
       uniform float uGlowIntensity;
       varying vec3 vWorldPosition;
+      varying vec3 vCSMNormal;
       ${CSM_COMMON_GLSL}
       ${shader.vertexShader}
     `.replace(
@@ -544,6 +598,7 @@ export function createCustomShaderMaterial(
       `
       #include <begin_vertex>
       vWorldPosition = (modelMatrix * vec4(position, 1.0)).xyz;
+      vCSMNormal = normalize(normalMatrix * normal);
       
       // --- CSM Vertex Injection ---
       ${vertexSnippet}
@@ -559,6 +614,7 @@ export function createCustomShaderMaterial(
       uniform vec3 uColorAccent;
       uniform float uGlowIntensity;
       varying vec3 vWorldPosition;
+      varying vec3 vCSMNormal;
       ${CSM_COMMON_GLSL}
       ${shader.fragmentShader}
     `.replace(

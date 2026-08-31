@@ -48,6 +48,7 @@ export const MaterialThumbnail: React.FC<Props> = memo(({ material, size = 44, s
     material.transparent, material.opacity,
     material.transmission, material.ior, material.thickness,
     material.map, material.normalMap, material.roughnessMap, material.normalScale,
+    material.id, material.csmConfig, (material as any).csmPreset, material.customShaderMaterial, material.category,
     size, forcedShape,
   ]);
 
@@ -72,7 +73,5 @@ export const MaterialThumbnail: React.FC<Props> = memo(({ material, size = 44, s
     />
   );
 });
-
-MaterialThumbnail.displayName = 'MaterialThumbnail';
 
 MaterialThumbnail.displayName = 'MaterialThumbnail';

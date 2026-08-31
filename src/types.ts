@@ -396,6 +396,8 @@ export interface MaterialData {
   glassConfig?: GlassMaterialConfig;
 }
 
+export type BlueprintViewKey = 'front' | 'top' | 'side';
+
 export type CSMBaseMaterialType = 'MeshPhysicalMaterial' | 'MeshStandardMaterial' | 'MeshToonMaterial' | 'MeshLambertMaterial' | 'MeshBasicMaterial';
 
 export type CSMPresetType =
@@ -407,7 +409,8 @@ export type CSMPresetType =
   | 'quantum_crystal'
   | 'twist_vortex'
   | 'digital_wire_glitch'
-  | 'comic_halftone';
+  | 'comic_halftone'
+  | 'soap_bubble';
 
 export interface CSMConfig {
   enabled?: boolean;
@@ -428,6 +431,7 @@ export interface CSMConfig {
 export type GlassPresetType =
   | 'newton_dispersion_prism'
   | 'diamond_spectral'
+  | 'soap_bubble_spectral'
   | 'frosted_mist_glass'
   | 'liquid_wave_glass'
   | 'smoked_obsidian'

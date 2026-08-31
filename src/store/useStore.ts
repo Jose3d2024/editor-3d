@@ -2513,16 +2513,26 @@ export const useStore = create<Store>()((set, get) => ({
       const { dissolveCoplanarFaces } = await import('../utils/meshUtils');
       const result = dissolveCoplanarFaces(obj, angleToleranceDeg);
 
+      let finalFaces = result.faces;
+      const hadUVs = obj.faces?.some(f => f.uvs && f.uvs.length > 0) || (obj as any).blueprintAtlas || (obj as any).blueprintPBR;
+      const hasUVsNow = finalFaces.some(f => f.uvs && f.uvs.length > 0);
+      if (hadUVs && (!hasUVsNow || finalFaces.some(f => !f.uvs || f.uvs.length !== f.indices.length))) {
+        // Garantizar que la malla mantenga mapeado UV continuo en todas sus caras
+        const { smartUVProject } = await import('../utils/uvUnwrap');
+        const projected = smartUVProject({ vertices: result.vertices, faces: finalFaces }, { angleThresholdDeg: 66, islandMargin: 0.02 });
+        finalFaces = projected.faces;
+      }
+
       const updatedObj: CSGObject = {
         ...obj,
         type: 'MESH',
         parameters: {},
         meshData: undefined,
         vertices: result.vertices,
-        faces: result.faces,
+        faces: finalFaces,
         vertexOffsets: {},
         smoothShading: true,
-        stats: { vertices: result.vertices.length, faces: result.faces.length }
+        stats: { vertices: result.vertices.length, faces: finalFaces.length }
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});

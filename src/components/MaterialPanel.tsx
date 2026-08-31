@@ -61,7 +61,9 @@ import {
   MaterialFilters,
   generateAllThumbnails,
   generateAllThumbnailsAsync,
-  ProceduralMaterial 
+  ProceduralMaterial,
+  createThinFilmIridescenceTexture,
+  createIridescenceThicknessTexture
 } from '../utils/proceduralTextures';
 import { MapEditorModal } from './MapEditorModal';
 import { ProceduralMapModal, ProceduralConfig } from './ProceduralMapModal';
@@ -490,6 +492,60 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     description: 'Líquido diáfano IOR 1.333',
     apply: { color: '#f0f9ff', roughness: 0.02, metalness: 0.0, transmission: 1.0, ior: 1.333, thickness: 2.0, transparent: true }
   },
+  {
+    name: 'Pompa de Jabón Físico (Thin-Film)',
+    category: 'Vidrio & Gemas',
+    icon: '🫧',
+    description: 'Interferencia de película ultra-delgada con iridiscencia espectral completa e IOR 1.333',
+    apply: {
+      color: '#ffffff',
+      roughness: 0.0,
+      metalness: 0.0,
+      transmission: 1.0,
+      ior: 1.333,
+      iridescence: 1.0,
+      iridescenceIOR: 1.333,
+      iridescenceThicknessRange: [100, 750],
+      thickness: 0.1,
+      transparent: true,
+      opacity: 0.35,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.0
+    }
+  },
+  {
+    name: 'Película de Aceite en Agua',
+    category: 'Vidrio & Gemas',
+    icon: '🛢️',
+    description: 'Fina capa lipídica irisada con interferencia óptica sobre superficie húmeda',
+    apply: {
+      color: '#0f172a',
+      roughness: 0.05,
+      metalness: 0.0,
+      iridescence: 0.95,
+      iridescenceIOR: 1.45,
+      iridescenceThicknessRange: [150, 600],
+      clearcoat: 0.9,
+      clearcoatRoughness: 0.02
+    }
+  },
+  {
+    name: 'Nácar / Concha de Perla',
+    category: 'Vidrio & Gemas',
+    icon: '🦪',
+    description: 'Aragonito bio-mineral laminado con brillos iridiscentes y sheen satinado',
+    apply: {
+      color: '#fdfbf7',
+      roughness: 0.18,
+      metalness: 0.05,
+      iridescence: 0.85,
+      iridescenceIOR: 1.65,
+      iridescenceThicknessRange: [200, 800],
+      sheen: 0.7,
+      sheenColor: '#fce7f3',
+      clearcoat: 0.6
+    }
+  },
 
   // Lacados & Pinturas
   {
@@ -535,8 +591,31 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
     name: 'Pompa de Jabón',
     category: 'Especiales',
     icon: '🫧',
-    description: 'Interferencia de película fina',
-    apply: { color: '#ffffff', roughness: 0.02, metalness: 0.0, transmission: 0.98, opacity: 0.35, transparent: true, ior: 1.15, iridescence: 1.0, iridescenceIOR: 1.33, iridescenceThicknessRange: [100, 400] }
+    description: 'Interferencia de película fina con reflejos irisados Airy',
+    apply: {
+      color: '#e0f2fe',
+      roughness: 0.02,
+      metalness: 0.05,
+      transmission: 0.95,
+      opacity: 0.85,
+      transparent: true,
+      ior: 1.333,
+      thickness: 0.1,
+      iridescence: 1.0,
+      iridescenceIOR: 1.333,
+      iridescenceThicknessRange: [150, 750],
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshPhysicalMaterial',
+        preset: 'soap_bubble',
+        timeSpeed: 0.8,
+        displacementScale: 0.015,
+        noiseFrequency: 2.8,
+        colorAccent: '#38bdf8',
+        glowIntensity: 1.6,
+      }
+    }
   },
   {
     name: 'Mancha Petróleo',
@@ -554,6 +633,42 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
   },
 
   // ── WebGPU Physical Glass (Dispersión Espectral, Refracción & Cáusticas) ──
+  {
+    name: 'Pompa de Jabón Espectral (WebGPU Glass)',
+    category: 'Vidrio & Gemas',
+    icon: '🫧',
+    description: 'Refracción física con dispersión de Cauchy, iridiscencia espectral y ondas superficiales',
+    apply: {
+      color: '#e0f2fe',
+      roughness: 0.02,
+      metalness: 0.02,
+      transmission: 0.96,
+      ior: 1.333,
+      thickness: 0.1,
+      dispersion: 0.14,
+      attenuationColor: '#bae6fd',
+      attenuationDistance: 1.5,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      iridescence: 1.0,
+      iridescenceIOR: 1.333,
+      iridescenceThicknessRange: [150, 750],
+      isGlass: true,
+      glassConfig: {
+        enabled: true,
+        preset: 'soap_bubble_spectral',
+        dispersion: 0.14,
+        chromaticAberration: 0.09,
+        distortion: 0.03,
+        distortionSpeed: 1.2,
+        distortionFrequency: 2.5,
+        rimGlow: 1.8,
+        rimColor: '#38bdf8',
+        thinFilmIridescence: 1.0,
+        causticIntensity: 1.5,
+      }
+    }
+  },
   {
     name: 'Prisma Óptico Newton (WebGPU Glass)',
     category: 'Vidrio & Gemas',
@@ -721,6 +836,30 @@ const PHYSICALLY_CALIBRATED_PRESETS: {
   },
 
   // ── THREE-CustomShaderMaterial (CSM Extension Shaders) ──
+  {
+    name: 'CSM Pompa de Jabón (Película Delgada)',
+    category: 'Custom Shaders (CSM)',
+    icon: '🫧',
+    description: 'Interferencia Airy con torbellinos de espesor y brillo especular dinámico',
+    apply: {
+      color: '#e0f2fe',
+      roughness: 0.02,
+      metalness: 0.05,
+      opacity: 0.85,
+      transparent: true,
+      isCSM: true,
+      csmConfig: {
+        enabled: true,
+        baseMaterial: 'MeshPhysicalMaterial',
+        preset: 'soap_bubble',
+        timeSpeed: 0.8,
+        displacementScale: 0.015,
+        noiseFrequency: 2.8,
+        colorAccent: '#38bdf8',
+        glowIntensity: 1.6,
+      }
+    }
+  },
   {
     name: 'CSM Ondas Líquidas & Vórtice',
     category: 'Custom Shaders (CSM)',
@@ -1669,11 +1808,15 @@ export const MaterialPanel: React.FC = () => {
       : (selectedObjectId ? [selectedObjectId] : []);
     if (ids.length > 0) {
       assignMaterialToObjects(ids, newMat.id);
+      setCopiedNotification(`¡Material "${pMat.name}" aplicado al objeto!`);
+      setTimeout(() => setCopiedNotification(null), 2500);
+    } else {
+      setCopiedNotification(`Material "${pMat.name}" añadido al proyecto`);
+      setTimeout(() => setCopiedNotification(null), 2500);
     }
     setEditingMaterialId(newMat.id);
     setMaterialStudioMaterialId(newMat.id);
-    openMaterialStudio(newMat.id);
-    setActiveTab('edit');
+    return newMat.id;
   };
 
   const handleFilterChange = (filterKey: 'rust' | 'scratches' | 'dirt', val: number) => {
@@ -2160,17 +2303,36 @@ export const MaterialPanel: React.FC = () => {
         <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
           <button
             onClick={() => setActiveTab('library')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/30"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'library'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <Sparkles size={12} />
             <span>Materiales</span>
           </button>
           <button
             onClick={() => setActiveTab('textures')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'textures'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('edit')}
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'edit'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
+          >
+            <SlidersHorizontal size={12} />
+            <span>Editor</span>
           </button>
         </div>
         
@@ -2415,7 +2577,8 @@ export const MaterialPanel: React.FC = () => {
                   <button
                     key={pMat.id}
                     onClick={() => handleSelectProceduralMaterial(pMat)}
-                    className="group relative flex flex-col items-center p-2 rounded-xl border border-white/5 bg-zinc-900/40 hover:border-indigo-500/50 hover:bg-indigo-900/10 transition-all text-left overflow-hidden shadow-sm hover:shadow-indigo-500/10 min-h-[96px]"
+                    className="group relative flex flex-col items-center p-2 rounded-xl border border-white/5 bg-zinc-900/40 hover:border-indigo-500/50 hover:bg-indigo-900/10 transition-all text-left overflow-hidden shadow-sm hover:shadow-indigo-500/10 min-h-[96px] cursor-pointer active:scale-95"
+                    title={`Hacer clic para aplicar "${pMat.name}" al objeto seleccionado`}
                   >
                     <div className="w-12 h-12 rounded-lg overflow-hidden bg-black/40 border border-white/10 relative flex items-center justify-center shadow-inner group-hover:scale-105 transition-transform duration-200">
                       {thumbUrl ? (
@@ -2455,17 +2618,20 @@ export const MaterialPanel: React.FC = () => {
                     key={mat.id}
                     onClick={() => {
                       const ids = (selectedObjectIds && selectedObjectIds.length > 0) ? selectedObjectIds : (selectedObjectId ? [selectedObjectId] : []);
-                      if (ids.length > 0) assignMaterialToObjects(ids, mat.id);
+                      if (ids.length > 0) {
+                        assignMaterialToObjects(ids, mat.id);
+                        setCopiedNotification(`¡Material "${mat.name}" asignado al objeto!`);
+                        setTimeout(() => setCopiedNotification(null), 2500);
+                      }
                       setEditingMaterialId(mat.id);
                       setMaterialStudioMaterialId(mat.id);
-                      openMaterialStudio(mat.id);
-                      setActiveTab('edit');
                     }}
-                    className={`group relative flex flex-col items-center p-2 rounded-xl border transition-all text-left overflow-hidden min-h-[96px] ${
+                    className={`group relative flex flex-col items-center p-2 rounded-xl border transition-all text-left overflow-hidden min-h-[96px] cursor-pointer active:scale-95 ${
                       activeMaterialId === mat.id 
                         ? 'border-indigo-500 bg-indigo-500/10 shadow-[0_0_12px_rgba(99,102,241,0.2)]' 
                         : 'border-white/5 bg-zinc-900/40 hover:border-white/20'
                     }`}
+                    title={`Hacer clic para asignar "${mat.name}"`}
                   >
                     <div className="relative">
                       <MaterialThumbnail material={mat} size={48} />
@@ -2524,17 +2690,36 @@ export const MaterialPanel: React.FC = () => {
         <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
           <button
             onClick={() => setActiveTab('library')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'library'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <Sparkles size={12} />
             <span>Materiales</span>
           </button>
           <button
             onClick={() => setActiveTab('textures')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all bg-emerald-600 text-white shadow-md shadow-emerald-600/30"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'textures'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('edit')}
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'edit'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
+          >
+            <SlidersHorizontal size={12} />
+            <span>Editor</span>
           </button>
         </div>
 
@@ -2766,17 +2951,36 @@ export const MaterialPanel: React.FC = () => {
         <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
           <button
             onClick={() => setActiveTab('library')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'library'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <Sparkles size={12} />
             <span>Materiales</span>
           </button>
           <button
             onClick={() => setActiveTab('textures')}
-            className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'textures'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
           >
             <ImageIcon size={12} />
             <span>Texturas</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('edit')}
+            className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+              activeTab === 'edit'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+            }`}
+          >
+            <SlidersHorizontal size={12} />
+            <span>Editor</span>
           </button>
         </div>
 
@@ -2838,17 +3042,36 @@ export const MaterialPanel: React.FC = () => {
       <div className="flex items-center p-1.5 bg-[#101013] border-b border-white/10 gap-1 flex-shrink-0">
         <button
           onClick={() => setActiveTab('library')}
-          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+            activeTab === 'library'
+              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+          }`}
         >
           <Sparkles size={12} />
           <span>Materiales</span>
         </button>
         <button
           onClick={() => setActiveTab('textures')}
-          className="flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
+          className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+            activeTab === 'textures'
+              ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+          }`}
         >
           <ImageIcon size={12} />
           <span>Texturas</span>
+        </button>
+        <button
+          onClick={() => setActiveTab('edit')}
+          className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
+            activeTab === 'edit'
+              ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
+          }`}
+        >
+          <SlidersHorizontal size={12} />
+          <span>Editor</span>
         </button>
       </div>
 
@@ -4873,9 +5096,79 @@ export const MaterialPanel: React.FC = () => {
           {openSections.iridescence && (
             <div className="p-3 pt-1 space-y-3 border-t border-white/5">
               <p className="text-[9px] text-zinc-400 leading-tight">
-                Interferencia óptica de capa delgada que produce cambios de color iridiscentes según el ángulo de visión (pompas de jabón, manchas de aceite, nácar, alas de insectos).
+                Interferencia física de película delgada (thin-film) que descompone la luz en patrones irisados cromáticos según el espesor molecular y el ángulo de incidencia (pompas de jabón, manchas de aceite, nácar, alas de insectos).
               </p>
 
+              {/* Presets Rápidos Calibrados de Iridiscencia */}
+              <div className="space-y-1">
+                <span className="text-[8.5px] text-zinc-400 font-semibold uppercase">Presets Calibrados de Película Fina:</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    {
+                      label: '🫧 Pompa de Jabón Físico',
+                      desc: 'Película ultra-fina translúcida',
+                      p: {
+                        iridescence: 1.0,
+                        iridescenceIOR: 1.333,
+                        iridescenceThicknessRange: [100, 750] as [number, number],
+                        transmission: 1.0,
+                        roughness: 0.0,
+                        ior: 1.333,
+                        thickness: 0.1,
+                        transparent: true,
+                        opacity: 0.35,
+                        clearcoat: 1.0,
+                        clearcoatRoughness: 0.0,
+                        metalness: 0.0
+                      }
+                    },
+                    {
+                      label: '🛢️ Película de Aceite',
+                      desc: 'Flotando sobre agua / asfalto',
+                      p: {
+                        iridescence: 0.95,
+                        iridescenceIOR: 1.45,
+                        iridescenceThicknessRange: [150, 600] as [number, number],
+                        roughness: 0.05,
+                        clearcoat: 0.8
+                      }
+                    },
+                    {
+                      label: '🦪 Nácar / Madreperla',
+                      desc: 'Reflejos orgánicos de concha',
+                      p: {
+                        iridescence: 0.85,
+                        iridescenceIOR: 1.65,
+                        iridescenceThicknessRange: [200, 800] as [number, number],
+                        roughness: 0.18,
+                        clearcoat: 0.6
+                      }
+                    },
+                    {
+                      label: '🌈 Titanio Anodizado',
+                      desc: 'Capa de óxido térmico irisado',
+                      p: {
+                        iridescence: 0.9,
+                        iridescenceIOR: 2.1,
+                        iridescenceThicknessRange: [250, 650] as [number, number],
+                        metalness: 0.95,
+                        roughness: 0.12
+                      }
+                    }
+                  ].map(preset => (
+                    <button
+                      key={preset.label}
+                      onClick={() => updateMaterial(activeMaterial.id, preset.p)}
+                      className="p-1.5 rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-fuchsia-500/20 hover:border-fuchsia-400/40 text-left transition-all cursor-pointer group"
+                    >
+                      <span className="text-[9.5px] font-bold text-zinc-200 group-hover:text-fuchsia-300 block truncate">{preset.label}</span>
+                      <span className="text-[8px] text-zinc-500 block truncate">{preset.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Slider de Intensidad */}
               <div className="space-y-1.5">
                 <div className="flex justify-between items-center text-[10px]">
                   <label className="text-zinc-400">Intensidad Iridiscente</label>
@@ -4889,17 +5182,93 @@ export const MaterialPanel: React.FC = () => {
                 />
               </div>
 
+              {/* Slider IOR Película Fina */}
               <div className="space-y-1.5">
                 <div className="flex justify-between items-center text-[10px]">
-                  <label className="text-zinc-400">IOR Película Iridiscente</label>
-                  <span className="font-mono text-zinc-300">{(activeMaterial.iridescenceIOR ?? 1.3).toFixed(2)}</span>
+                  <label className="text-zinc-400">IOR Película Iridiscente (Índice de Refracción)</label>
+                  <span className="font-mono text-zinc-300">{(activeMaterial.iridescenceIOR ?? 1.333).toFixed(3)}</span>
                 </div>
                 <input 
-                  type="range" min="1.0" max="3.0" step="0.05"
-                  value={activeMaterial.iridescenceIOR ?? 1.3}
+                  type="range" min="1.0" max="3.0" step="0.01"
+                  value={activeMaterial.iridescenceIOR ?? 1.333}
                   onChange={e => updateMaterial(activeMaterial.id, { iridescenceIOR: parseFloat(e.target.value) })}
                   className="w-full accent-fuchsia-500 h-1 bg-white/10 rounded-lg cursor-pointer"
                 />
+              </div>
+
+              {/* Rango de Grosor de la Película Fina (Thickness Range en nm) */}
+              <div className="space-y-2 bg-black/20 p-2 rounded-lg border border-fuchsia-500/20">
+                <div className="flex items-center justify-between text-[9.5px] font-bold text-fuchsia-300">
+                  <span>Espesor de Película Delgada (Nanómetros)</span>
+                  <span className="font-mono text-[8.5px] text-zinc-400">
+                    {activeMaterial.iridescenceThicknessRange ? `${activeMaterial.iridescenceThicknessRange[0]}nm – ${activeMaterial.iridescenceThicknessRange[1]}nm` : '100nm – 750nm'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[8.5px] text-zinc-400">
+                      <span>Mínimo (nm)</span>
+                      <span className="font-mono text-zinc-200">{activeMaterial.iridescenceThicknessRange?.[0] ?? 100}</span>
+                    </div>
+                    <input 
+                      type="range" min="50" max="600" step="10"
+                      value={activeMaterial.iridescenceThicknessRange?.[0] ?? 100}
+                      onChange={e => {
+                        const min = parseInt(e.target.value, 10);
+                        const max = Math.max(min + 50, activeMaterial.iridescenceThicknessRange?.[1] ?? 750);
+                        updateMaterial(activeMaterial.id, { iridescenceThicknessRange: [min, max] });
+                      }}
+                      className="w-full accent-fuchsia-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[8.5px] text-zinc-400">
+                      <span>Máximo (nm)</span>
+                      <span className="font-mono text-zinc-200">{activeMaterial.iridescenceThicknessRange?.[1] ?? 750}</span>
+                    </div>
+                    <input 
+                      type="range" min="200" max="1200" step="10"
+                      value={activeMaterial.iridescenceThicknessRange?.[1] ?? 750}
+                      onChange={e => {
+                        const max = parseInt(e.target.value, 10);
+                        const min = Math.min(max - 50, activeMaterial.iridescenceThicknessRange?.[0] ?? 100);
+                        updateMaterial(activeMaterial.id, { iridescenceThicknessRange: [min, max] });
+                      }}
+                      className="w-full accent-fuchsia-400 h-1 bg-white/10 rounded-lg cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Generación Procedimental Rápida de Mapas de Iridiscencia */}
+                <div className="pt-1.5 flex gap-1.5 border-t border-white/5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = createThinFilmIridescenceTexture(512, 512);
+                      updateMaterial(activeMaterial.id, { iridescenceMap: url, iridescence: activeMaterial.iridescence || 1.0 });
+                      setCopiedNotification('¡Mapa de Iridiscencia Espectral generado y asignado!');
+                      setTimeout(() => setCopiedNotification(null), 2500);
+                    }}
+                    className="flex-1 py-1 px-1.5 bg-fuchsia-950/60 hover:bg-fuchsia-900/80 border border-fuchsia-500/30 text-fuchsia-200 rounded text-[8.5px] font-bold transition-colors flex items-center justify-center gap-1"
+                  >
+                    <span>✨ Generar Mapa Arcoíris</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = createIridescenceThicknessTexture(512, 512);
+                      updateMaterial(activeMaterial.id, { iridescenceThicknessMap: url, iridescence: activeMaterial.iridescence || 1.0 });
+                      setCopiedNotification('¡Mapa de Grosor Dinámico generado y asignado!');
+                      setTimeout(() => setCopiedNotification(null), 2500);
+                    }}
+                    className="flex-1 py-1 px-1.5 bg-fuchsia-950/60 hover:bg-fuchsia-900/80 border border-fuchsia-500/30 text-fuchsia-200 rounded text-[8.5px] font-bold transition-colors flex items-center justify-center gap-1"
+                  >
+                    <span>🫧 Generar Mapa de Grosor</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -5576,6 +5945,24 @@ export const MaterialPanel: React.FC = () => {
                   onSelectFile={f => onSelectTextureFile(f, 'anisotropyMap')}
                   onModify={() => handleModifyMap('Anisotropy Map', 'anisotropyMap')}
                   onClear={() => updateMaterial(activeMaterial.id, { anisotropyMap: undefined })}
+                />
+                <TextureSlot 
+                  label="Iridescence Map (Color)" 
+                  slotKey="Iridescence"
+                  texture={activeMaterial.iridescenceMap} 
+                  onDrop={e => onDropTexture(e, 'iridescenceMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'iridescenceMap')}
+                  onModify={() => handleModifyMap('Iridescence Map', 'iridescenceMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { iridescenceMap: undefined })}
+                />
+                <TextureSlot 
+                  label="Iridescence Thickness" 
+                  slotKey="IridescenceThickness"
+                  texture={activeMaterial.iridescenceThicknessMap} 
+                  onDrop={e => onDropTexture(e, 'iridescenceThicknessMap')}
+                  onSelectFile={f => onSelectTextureFile(f, 'iridescenceThicknessMap')}
+                  onModify={() => handleModifyMap('Iridescence Thickness Map', 'iridescenceThicknessMap')}
+                  onClear={() => updateMaterial(activeMaterial.id, { iridescenceThicknessMap: undefined })}
                 />
               </div>
             </div>

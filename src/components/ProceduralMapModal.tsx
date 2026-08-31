@@ -11,11 +11,13 @@ import {
   createOakPlanksRoughnessMap,
   createOakPlanksAOMap,
   createOakPlanksDisplacementMap,
+  createThinFilmIridescenceTexture,
+  createIridescenceThicknessTexture,
 } from '../utils/proceduralTextures';
 
 export interface ProceduralConfig {
   mapKey: keyof MaterialData;
-  type: 'noise' | 'checker' | 'wood' | 'oak_planks';
+  type: 'noise' | 'checker' | 'wood' | 'oak_planks' | 'thin_film' | 'iridescence_thickness';
   params: any;
 }
 
@@ -45,6 +47,10 @@ export const ProceduralMapModal: React.FC<ProceduralMapModalProps> = ({ config, 
       else if (config.mapKey === 'aoMap')       url = createOakPlanksAOMap(256, 256);
       else if (config.mapKey === 'displacementMap') url = createOakPlanksDisplacementMap(256, 256);
       else url = createOakPlanksTexture(256, 256);
+    } else if (config.type === 'thin_film') {
+      url = createThinFilmIridescenceTexture(256, 256, params.scale || 3.5, 1.0, params.vibrancy || 1.2);
+    } else if (config.type === 'iridescence_thickness') {
+      url = createIridescenceThicknessTexture(256, 256, params.scale || 4.0, params.swirl || 1.5);
     }
     setPreviewUrl(url);
   }, [config.type, config.mapKey, params, normalStrength]);
@@ -63,6 +69,10 @@ export const ProceduralMapModal: React.FC<ProceduralMapModalProps> = ({ config, 
       else if (config.mapKey === 'aoMap')       url = createOakPlanksAOMap(512, 512);
       else if (config.mapKey === 'displacementMap') url = createOakPlanksDisplacementMap(512, 512);
       else url = createOakPlanksTexture(512, 512);
+    } else if (config.type === 'thin_film') {
+      url = createThinFilmIridescenceTexture(512, 512, params.scale || 3.5, 1.0, params.vibrancy || 1.2);
+    } else if (config.type === 'iridescence_thickness') {
+      url = createIridescenceThicknessTexture(512, 512, params.scale || 4.0, params.swirl || 1.5);
     }
     onApply(url);
   };
@@ -124,6 +134,34 @@ export const ProceduralMapModal: React.FC<ProceduralMapModalProps> = ({ config, 
                     <label className="block text-xs text-gray-400 mb-1">Ring Color</label>
                     <input type="color" value={params.ringColor || '#5c3a21'} onChange={e => setParams({...params, ringColor: e.target.value})} className="w-full h-8 cursor-pointer rounded bg-[#222] border border-[#444]" />
                   </div>
+                </div>
+              </>
+            )}
+
+            {/* Thin Film Iridescence controls */}
+            {config.type === 'thin_film' && (
+              <>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Escala de Ondas / Torbellinos ({params.scale || 3.5})</label>
+                  <input type="range" min="1" max="12" step="0.5" value={params.scale || 3.5} onChange={e => setParams({...params, scale: Number(e.target.value)})} className="w-full accent-fuchsia-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Vibrancia Cromática ({params.vibrancy || 1.2})</label>
+                  <input type="range" min="0.5" max="2.5" step="0.1" value={params.vibrancy || 1.2} onChange={e => setParams({...params, vibrancy: Number(e.target.value)})} className="w-full accent-fuchsia-500" />
+                </div>
+              </>
+            )}
+
+            {/* Iridescence Thickness Map controls */}
+            {config.type === 'iridescence_thickness' && (
+              <>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Frecuencia Espacial ({params.scale || 4.0})</label>
+                  <input type="range" min="1" max="15" step="0.5" value={params.scale || 4.0} onChange={e => setParams({...params, scale: Number(e.target.value)})} className="w-full accent-fuchsia-500" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Turbulencia de Fluido ({params.swirl || 1.5})</label>
+                  <input type="range" min="0.2" max="4.0" step="0.1" value={params.swirl || 1.5} onChange={e => setParams({...params, swirl: Number(e.target.value)})} className="w-full accent-fuchsia-500" />
                 </div>
               </>
             )}

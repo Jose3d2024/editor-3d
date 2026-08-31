@@ -444,8 +444,8 @@ export function marchingCubes(
     return { vertices: [], faces: [] };
   }
 
-  // Deduplicación y soldadura de vértices (Weld con Hash Grid)
-  const PRECISION = 100000;
+  // Deduplicación y soldadura de vértices (Weld con Hash Grid robusto)
+  const PRECISION = 10000; // 0.1mm de tolerancia espacial para evitar vértices duplicados infinitesimales
   const vertMap = new Map<string, number>();
   const finalVertices: V3[] = [];
   const triangleIndices: number[] = [];
@@ -462,7 +462,8 @@ export function marchingCubes(
     triangleIndices.push(idx);
   }
 
-  // Suavizado Laplaciano opcional sobre la malla topológica
+  // Suavizado Taubin (Low-Pass Filter) sobre la malla topológica
+  // Elimina el ruido y escalonamiento de vóxeles sin encoger el volumen ni distorsionar aristas
   if (smoothIterations > 0 && finalVertices.length > 0) {
     // Construir tabla de adyacencia
     const neighbors: Set<number>[] = Array.from({ length: finalVertices.length }, () => new Set());
@@ -475,16 +476,16 @@ export function marchingCubes(
       neighbors[c].add(a); neighbors[c].add(b);
     }
 
-    // Algoritmo de suavizado alterno para evitar la contracción geométrica (Anti-Shrinkage)
-    for (let iter = 0; iter < smoothIterations; iter++) {
-      const smoothedVerts: V3[] = [];
-      const isExpansionStep = iter % 2 === 1;
-      const currentFactor = isExpansionStep ? -(smoothFactor * 1.05) : smoothFactor;
+    const lambda = Math.min(0.5, Math.max(0.1, smoothFactor * 0.6));
+    const mu = -(lambda / (1 - 0.05 * lambda)); // Factor Taubin μ < -λ para preservar volumen
 
+    for (let iter = 0; iter < smoothIterations; iter++) {
+      // Paso 1: Relajación positiva (λ)
+      const step1Verts: V3[] = [];
       for (let i = 0; i < finalVertices.length; i++) {
         const nbrs = neighbors[i];
         if (nbrs.size === 0) {
-          smoothedVerts.push(finalVertices[i]);
+          step1Verts.push(finalVertices[i]);
           continue;
         }
 
@@ -499,14 +500,37 @@ export function marchingCubes(
         avgZ /= nbrs.size;
 
         const orig = finalVertices[i];
-        smoothedVerts.push([
-          orig[0] * (1 - currentFactor) + avgX * currentFactor,
-          orig[1] * (1 - currentFactor) + avgY * currentFactor,
-          orig[2] * (1 - currentFactor) + avgZ * currentFactor
+        step1Verts.push([
+          orig[0] + lambda * (avgX - orig[0]),
+          orig[1] + lambda * (avgY - orig[1]),
+          orig[2] + lambda * (avgZ - orig[2])
         ]);
       }
+
+      // Paso 2: Anti-contracción negativa (μ)
       for (let i = 0; i < finalVertices.length; i++) {
-        finalVertices[i] = smoothedVerts[i];
+        const nbrs = neighbors[i];
+        if (nbrs.size === 0) {
+          finalVertices[i] = step1Verts[i];
+          continue;
+        }
+
+        let avgX = 0, avgY = 0, avgZ = 0;
+        for (const n of nbrs) {
+          avgX += step1Verts[n][0];
+          avgY += step1Verts[n][1];
+          avgZ += step1Verts[n][2];
+        }
+        avgX /= nbrs.size;
+        avgY /= nbrs.size;
+        avgZ /= nbrs.size;
+
+        const orig = step1Verts[i];
+        finalVertices[i] = [
+          orig[0] + mu * (avgX - orig[0]),
+          orig[1] + mu * (avgY - orig[1]),
+          orig[2] + mu * (avgZ - orig[2])
+        ];
       }
     }
   }

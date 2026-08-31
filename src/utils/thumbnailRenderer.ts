@@ -98,9 +98,25 @@ class ThumbnailRenderer {
       const color = new THREE.Color(materialData.color);
       const isEmissive = materialData.emissive && materialData.emissive !== '#000000' && (materialData.emissiveIntensity ?? 0) > 0.05;
       const isGlass = (materialData.transmission ?? 0) > 0.3;
+      const isSoapBubble = materialData.csmConfig?.preset === 'soap_bubble' || materialData.id?.includes('soap_bubble');
 
       let mat: THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial;
-      if (isGlass || (materialData.transparent && materialData.opacity < 0.85)) {
+      if (isSoapBubble) {
+        mat = new THREE.MeshPhysicalMaterial({
+          color: new THREE.Color(0xf0f9ff),
+          roughness: 0.02,
+          metalness: 0.05,
+          transparent: true,
+          opacity: 0.65,
+          transmission: 0.95,
+          thickness: 0.2,
+          ior: 1.333,
+          iridescence: 1.0,
+          iridescenceIOR: 1.333,
+          iridescenceThicknessRange: [220, 780],
+          envMapIntensity: 2.0,
+        });
+      } else if (isGlass || (materialData.transparent && materialData.opacity < 0.85)) {
         mat = new THREE.MeshPhysicalMaterial({
           color,
           roughness: materialData.roughness,

@@ -95,6 +95,42 @@ export const WEBGPU_GLASS_PRESETS: GlassPresetDefinition[] = [
     }
   },
   {
+    id: 'soap_bubble_spectral',
+    name: 'Pompa de Jabón Espectral (WebGPU)',
+    category: 'Vidrio & Gemas',
+    icon: '🫧',
+    description: 'Película ultra-delgada con refracción física, dispersión de Cauchy, iridiscencia espectral y ondulación orgánica',
+    defaultParams: {
+      dispersion: 0.14,
+      chromaticAberration: 0.09,
+      distortion: 0.03,
+      distortionSpeed: 1.2,
+      distortionFrequency: 2.5,
+      frostedBlur: 0.0,
+      rimGlow: 1.8,
+      rimColor: '#38bdf8',
+      thinFilmIridescence: 1.0,
+      internalBubbles: false,
+      causticIntensity: 1.5
+    },
+    pbrParams: {
+      color: '#e0f2fe',
+      roughness: 0.02,
+      metalness: 0.02,
+      transmission: 0.96,
+      ior: 1.333,
+      thickness: 0.1,
+      dispersion: 0.14,
+      attenuationColor: '#bae6fd',
+      attenuationDistance: 1.5,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      iridescence: 1.0,
+      iridescenceIOR: 1.333,
+      iridescenceThicknessRange: [150, 750]
+    }
+  },
+  {
     id: 'frosted_mist_glass',
     name: 'Vidrio Esmerilado de Niebla',
     category: 'Translúcidos & Difusos',

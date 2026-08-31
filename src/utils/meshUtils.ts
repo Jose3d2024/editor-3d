@@ -88,19 +88,30 @@ export function repairMesh(
   for (const face of obj.faces) {
     const remapped = face.indices.map(i => remap[i]);
     const filtered: number[] = [];
+    const filteredUVs: [number, number][] = [];
     for (let k = 0; k < remapped.length; k++) {
       if (k === 0 || remapped[k] !== remapped[k - 1]) {
         filtered.push(remapped[k]);
+        if (face.uvs && face.uvs[k]) {
+          filteredUVs.push(face.uvs[k]);
+        }
       }
     }
     if (filtered.length > 1 && filtered[0] === filtered[filtered.length - 1]) {
       filtered.pop();
+      if (filteredUVs.length > filtered.length) {
+        filteredUVs.pop();
+      }
     }
     if (filtered.length < 3) { degenerateCount++; continue; }
     const key = [...filtered].sort((a,b)=>a-b).join(',');
     if (faceSet.has(key)) { dupFaceCount++; continue; }
     faceSet.add(key);
-    cleanFaces.push({ ...face, indices: filtered });
+    cleanFaces.push({
+      ...face,
+      indices: filtered,
+      ...(face.uvs && filteredUVs.length === filtered.length ? { uvs: filteredUVs } : {})
+    });
   }
   if (degenerateCount > 0) report.push(`${degenerateCount} caras degeneradas eliminadas`);
   if (dupFaceCount > 0)     report.push(`${dupFaceCount} caras duplicadas eliminadas`);
@@ -856,9 +867,35 @@ export function isotropicRemesh(
  * Identifies connected planar regions, removes redundant interior vertices and collinear boundary vertices,
  * and re-triangulates flat surfaces with minimal polygon density (like Blender's Limited Dissolve).
  */
+export interface PlanarDecimationOptions {
+  angleToleranceDeg?: number;
+  snapToPlane?: boolean;
+  collinearToleranceDeg?: number;
+  maxPlaneDistRatio?: number;
+}
+
+export function flattenAndSimplifyPlanarFaces(
+  obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
+  options: PlanarDecimationOptions = {}
+): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
+  const {
+    angleToleranceDeg = 12.0,
+    snapToPlane = true,
+    collinearToleranceDeg = 4.5,
+    maxPlaneDistRatio = 0.015
+  } = options;
+
+  return dissolveCoplanarFaces(obj, angleToleranceDeg, {
+    snapToPlane,
+    collinearToleranceDeg,
+    maxPlaneDistRatio
+  });
+}
+
 export function dissolveCoplanarFaces(
   obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
-  angleToleranceDeg: number = 4.0
+  angleToleranceDeg: number = 4.0,
+  extraOptions?: { snapToPlane?: boolean; collinearToleranceDeg?: number; maxPlaneDistRatio?: number }
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
   const repaired = repairMesh(obj);
   const { vertices } = repaired;
@@ -868,14 +905,31 @@ export function dissolveCoplanarFaces(
     return { vertices, faces: inputFaces, report: ['Malla sin caras'] };
   }
 
-  // Convert any quads or n-gons into uniform triangles first
-  const triFaces: [number, number, number][] = [];
+  const snapToPlane = extraOptions?.snapToPlane ?? true;
+  const collinearTolDeg = extraOptions?.collinearToleranceDeg ?? Math.max(3.0, angleToleranceDeg * 0.4);
+  const maxPlaneDistRatio = extraOptions?.maxPlaneDistRatio ?? 0.008;
+
+  // Convert any quads or n-gons into uniform triangles first with UV tracking
+  interface TriFaceItem {
+    indices: [number, number, number];
+    uvs?: [number, number][];
+    materialIndex?: number;
+  }
+  const triFaces: TriFaceItem[] = [];
   inputFaces.forEach(f => {
     if (f.indices.length === 3) {
-      triFaces.push([f.indices[0], f.indices[1], f.indices[2]]);
+      triFaces.push({
+        indices: [f.indices[0], f.indices[1], f.indices[2]],
+        uvs: f.uvs && f.uvs.length >= 3 ? [f.uvs[0], f.uvs[1], f.uvs[2]] : undefined,
+        materialIndex: f.materialIndex
+      });
     } else if (f.indices.length > 3) {
       for (let i = 1; i < f.indices.length - 1; i++) {
-        triFaces.push([f.indices[0], f.indices[i], f.indices[i + 1]]);
+        triFaces.push({
+          indices: [f.indices[0], f.indices[i], f.indices[i + 1]],
+          uvs: f.uvs && f.uvs.length >= f.indices.length ? [f.uvs[0], f.uvs[i], f.uvs[i + 1]] : undefined,
+          materialIndex: f.materialIndex
+        });
       }
     }
   });
@@ -892,7 +946,7 @@ export function dissolveCoplanarFaces(
     if (v.z < minZ) minZ = v.z; if (v.z > maxZ) maxZ = v.z;
   });
   const bboxDiag = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) || 1.0;
-  const maxPlaneDist = Math.max(1e-4, bboxDiag * 0.0035);
+  const maxPlaneDist = Math.max(1e-4, bboxDiag * maxPlaneDistRatio);
 
   const cosAngleTol = Math.cos((angleToleranceDeg * Math.PI) / 180);
 
@@ -903,7 +957,7 @@ export function dissolveCoplanarFaces(
   const fPlaneD: number[] = [];
 
   const cb = new THREE.Vector3(), ab = new THREE.Vector3();
-  triFaces.forEach(([i0, i1, i2]) => {
+  triFaces.forEach(({ indices: [i0, i1, i2] }) => {
     const p0 = vertVectors[i0], p1 = vertVectors[i1], p2 = vertVectors[i2];
     cb.subVectors(p2, p1);
     ab.subVectors(p0, p1);
@@ -921,7 +975,7 @@ export function dissolveCoplanarFaces(
 
   // Build vertex-to-face adjacency map to protect shared boundary vertices
   const vertToFaces = new Map<number, Set<number>>();
-  triFaces.forEach(([i0, i1, i2], fIdx) => {
+  triFaces.forEach(({ indices: [i0, i1, i2] }, fIdx) => {
     [i0, i1, i2].forEach(v => {
       let set = vertToFaces.get(v);
       if (!set) { set = new Set(); vertToFaces.set(v, set); }
@@ -931,7 +985,7 @@ export function dissolveCoplanarFaces(
 
   // Build edge-to-face adjacency map
   const edgeToFaces = new Map<string, number[]>();
-  triFaces.forEach(([i0, i1, i2], fIdx) => {
+  triFaces.forEach(({ indices: [i0, i1, i2] }, fIdx) => {
     const edges = [
       i0 < i1 ? `${i0}_${i1}` : `${i1}_${i0}`,
       i1 < i2 ? `${i1}_${i2}` : `${i2}_${i1}`,
@@ -963,6 +1017,10 @@ export function dissolveCoplanarFaces(
         for (let j = i + 1; j < facesWithEdge.length; j++) {
           const fA = facesWithEdge[i];
           const fB = facesWithEdge[j];
+
+          // Never cluster across different material IDs
+          if (triFaces[fA].materialIndex !== triFaces[fB].materialIndex) continue;
+
           const nA = fNormals[fA];
           const nB = fNormals[fB];
 
@@ -986,6 +1044,82 @@ export function dissolveCoplanarFaces(
     let list = clusters.get(root);
     if (!list) { list = []; clusters.set(root, list); }
     list.push(f);
+  }
+
+  // Pre-pass: Compute cluster planes and snap planar vertices to eliminate voxel waviness
+  const clusterPlanes = new Map<number, { normal: THREE.Vector3; center: THREE.Vector3; d: number }>();
+  if (snapToPlane) {
+    clusters.forEach((faceIndices, root) => {
+      if (faceIndices.length < 2) return;
+      const cNormal = new THREE.Vector3();
+      const cCenter = new THREE.Vector3();
+      let totalArea = 0;
+
+      faceIndices.forEach(fi => {
+        const a = fAreas[fi];
+        cNormal.addScaledVector(fNormals[fi], a);
+        cCenter.addScaledVector(fCenters[fi], a);
+        totalArea += a;
+      });
+
+      if (totalArea > 1e-12 && cNormal.lengthSq() > 1e-12) {
+        cNormal.normalize();
+        cCenter.multiplyScalar(1 / totalArea);
+        const d = cNormal.dot(cCenter);
+        clusterPlanes.set(root, { normal: cNormal, center: cCenter, d });
+      }
+    });
+
+    // Map vertex to all clusters it belongs to
+    const vertClusters = new Map<number, Set<number>>();
+    clusters.forEach((faceIndices, root) => {
+      faceIndices.forEach(fi => {
+        const [i0, i1, i2] = triFaces[fi].indices;
+        [i0, i1, i2].forEach(v => {
+          let s = vertClusters.get(v);
+          if (!s) { s = new Set(); vertClusters.set(v, s); }
+          s.add(root);
+        });
+      });
+    });
+
+    // Snap vertices to cluster plane (or intersection of planes)
+    vertClusters.forEach((cSet, vIdx) => {
+      const p = vertVectors[vIdx];
+      const validPlanes = Array.from(cSet)
+        .map(root => clusterPlanes.get(root))
+        .filter((pl): pl is { normal: THREE.Vector3; center: THREE.Vector3; d: number } => !!pl);
+
+      if (validPlanes.length === 1) {
+        // Project vertex onto single plane
+        const pl = validPlanes[0];
+        const dist = pl.normal.dot(p) - pl.d;
+        if (Math.abs(dist) <= maxPlaneDist * 1.5) {
+          p.addScaledVector(pl.normal, -dist);
+          vertices[vIdx] = [p.x, p.y, p.z];
+        }
+      } else if (validPlanes.length === 2) {
+        // Vertex lies on sharp edge between 2 planar clusters: project onto the intersection line
+        const pl1 = validPlanes[0];
+        const pl2 = validPlanes[1];
+        const cross = new THREE.Vector3().crossVectors(pl1.normal, pl2.normal);
+        if (cross.lengthSq() > 0.05) { // Non-parallel planes
+          const dist1 = pl1.normal.dot(p) - pl1.d;
+          const dist2 = pl2.normal.dot(p) - pl2.d;
+          if (Math.abs(dist1) <= maxPlaneDist * 1.5 && Math.abs(dist2) <= maxPlaneDist * 1.5) {
+            const n1 = pl1.normal, n2 = pl2.normal;
+            const dot12 = n1.dot(n2);
+            const denom = 1 - dot12 * dot12;
+            if (denom > 1e-4) {
+              const k1 = (dist1 - dist2 * dot12) / denom;
+              const k2 = (dist2 - dist1 * dot12) / denom;
+              p.sub(new THREE.Vector3().addScaledVector(n1, k1).addScaledVector(n2, k2));
+              vertices[vIdx] = [p.x, p.y, p.z];
+            }
+          }
+        }
+      }
+    });
   }
 
   // 2D Ear Clipping Triangulator Helper
@@ -1099,8 +1233,12 @@ export function dissolveCoplanarFaces(
 
   clusters.forEach((faceIndices) => {
     if (faceIndices.length <= 1) {
-      // Single triangle: keep as is
-      faceIndices.forEach(fi => finalFaces.push({ indices: triFaces[fi] }));
+      // Single triangle: keep original indices, UVs and material
+      faceIndices.forEach(fi => finalFaces.push({
+        indices: [...triFaces[fi].indices],
+        uvs: triFaces[fi].uvs ? [...triFaces[fi].uvs!] : undefined,
+        materialIndex: triFaces[fi].materialIndex
+      }));
       return;
     }
 
@@ -1166,7 +1304,7 @@ export function dissolveCoplanarFaces(
     // Multi-triangle cluster: extract directed boundary edges
     const directedEdgeCount = new Map<string, { from: number; to: number; count: number }>();
     faceIndices.forEach(fi => {
-      const [i0, i1, i2] = triFaces[fi];
+      const [i0, i1, i2] = triFaces[fi].indices;
       const triHalfEdges = [[i0, i1], [i1, i2], [i2, i0]];
       triHalfEdges.forEach(([u, v]) => {
         const key = `${u}_${v}`;
@@ -1190,7 +1328,11 @@ export function dissolveCoplanarFaces(
 
     if (boundaryHalfEdges.length < 3) {
       // In case of non-manifold degeneracies, keep original triangles
-      faceIndices.forEach(fi => finalFaces.push({ indices: triFaces[fi] }));
+      faceIndices.forEach(fi => finalFaces.push({
+        indices: [...triFaces[fi].indices],
+        uvs: triFaces[fi].uvs ? [...triFaces[fi].uvs!] : undefined,
+        materialIndex: triFaces[fi].materialIndex
+      }));
       return;
     }
 
@@ -1246,7 +1388,11 @@ export function dissolveCoplanarFaces(
 
     if (loops.length === 0) {
       // Fallback to original triangles if no clean loop was traced
-      faceIndices.forEach(fi => finalFaces.push({ indices: triFaces[fi] }));
+      faceIndices.forEach(fi => finalFaces.push({
+        indices: [...triFaces[fi].indices],
+        uvs: triFaces[fi].uvs ? [...triFaces[fi].uvs!] : undefined,
+        materialIndex: triFaces[fi].materialIndex
+      }));
       return;
     }
 
@@ -1267,13 +1413,71 @@ export function dissolveCoplanarFaces(
     }
     const V = new THREE.Vector3().crossVectors(clusterNormal, U).normalize();
 
+    // Collect known UV coordinates for vertices in this cluster to preserve textures
+    const vertUVMap = new Map<number, [number, number]>();
+    faceIndices.forEach(fi => {
+      const tf = triFaces[fi];
+      if (tf.uvs && tf.uvs.length === 3) {
+        vertUVMap.set(tf.indices[0], tf.uvs[0]);
+        vertUVMap.set(tf.indices[1], tf.uvs[1]);
+        vertUVMap.set(tf.indices[2], tf.uvs[2]);
+      }
+    });
+
+    // Solve exact 2D affine UV interpolator for this planar patch: (x_2d, y_2d) -> (u, v)
+    let affineEvaluator: ((x: number, y: number) => [number, number]) | null = null;
+    if (vertUVMap.size >= 3) {
+      const knownEntries = Array.from(vertUVMap.entries());
+      for (let i = 0; i < knownEntries.length && !affineEvaluator; i++) {
+        for (let j = i + 1; j < knownEntries.length && !affineEvaluator; j++) {
+          for (let k = j + 1; k < knownEntries.length && !affineEvaluator; k++) {
+            const [v0, uv0] = knownEntries[i];
+            const [v1, uv1] = knownEntries[j];
+            const [v2, uv2] = knownEntries[k];
+            const p0 = vertVectors[v0], p1 = vertVectors[v1], p2 = vertVectors[v2];
+            const x0 = p0.dot(U), y0 = p0.dot(V);
+            const x1 = p1.dot(U), y1 = p1.dot(V);
+            const x2 = p2.dot(U), y2 = p2.dot(V);
+            const dx1 = x1 - x0, dy1 = y1 - y0;
+            const dx2 = x2 - x0, dy2 = y2 - y0;
+            const det = dx1 * dy2 - dy1 * dx2;
+            if (Math.abs(det) > 1e-7) {
+              const du1 = uv1[0] - uv0[0], dv1 = uv1[1] - uv0[1];
+              const du2 = uv2[0] - uv0[0], dv2 = uv2[1] - uv0[1];
+              const invDet = 1 / det;
+              const au = (du1 * dy2 - du2 * dy1) * invDet;
+              const bu = (du2 * dx1 - du1 * dx2) * invDet;
+              const av = (dv1 * dy2 - dv2 * dy1) * invDet;
+              const bv = (dv2 * dx1 - dv1 * dx2) * invDet;
+              affineEvaluator = (x: number, y: number): [number, number] => {
+                const u = uv0[0] + au * (x - x0) + bu * (y - y0);
+                const v = uv0[1] + av * (x - x0) + bv * (y - y0);
+                return [u, v];
+              };
+            }
+          }
+        }
+      }
+    }
+
+    const getVertexUV = (vIdx: number): [number, number] | undefined => {
+      if (vertUVMap.has(vIdx)) return vertUVMap.get(vIdx)!;
+      if (affineEvaluator) {
+        const p = vertVectors[vIdx];
+        return affineEvaluator(p.dot(U), p.dot(V));
+      }
+      return undefined;
+    };
+
+    const hasAnyUV = vertUVMap.size > 0;
+    const clusterMat = triFaces[faceIndices[0]]?.materialIndex;
     let clusterSuccess = true;
     const clusterNewFaces: MeshFace[] = [];
 
     // Process each boundary loop into clean planar faces
     loops.forEach(rawLoop => {
       // Simplify collinear points along straight borders (only if not used by outside faces)
-      const simplifiedLoop = simplifyCollinear(rawLoop, Math.max(1.0, angleToleranceDeg));
+      const simplifiedLoop = simplifyCollinear(rawLoop, collinearTolDeg);
       if (simplifiedLoop.length < 3) return;
 
       // Compute normal of simplified loop using Newell's method
@@ -1293,9 +1497,17 @@ export function dissolveCoplanarFaces(
         : [...simplifiedLoop].reverse();
 
       if (orientedIndices.length === 3) {
-        clusterNewFaces.push({ indices: orientedIndices });
+        clusterNewFaces.push({
+          indices: orientedIndices,
+          uvs: hasAnyUV ? orientedIndices.map(vi => getVertexUV(vi) || [0, 0]) : undefined,
+          materialIndex: clusterMat
+        });
       } else if (orientedIndices.length === 4) {
-        clusterNewFaces.push({ indices: orientedIndices });
+        clusterNewFaces.push({
+          indices: orientedIndices,
+          uvs: hasAnyUV ? orientedIndices.map(vi => getVertexUV(vi) || [0, 0]) : undefined,
+          materialIndex: clusterMat
+        });
       } else {
         // Robust 2D planar triangulation for N-gons to prevent non-manifold rendering gaps
         const pts2D = orientedIndices.map(vi => {
@@ -1305,13 +1517,20 @@ export function dissolveCoplanarFaces(
         const triIndices = triangulate2D(pts2D);
         if (triIndices.length > 0) {
           triIndices.forEach(([t0, t1, t2]) => {
+            const fIndices = [orientedIndices[t0], orientedIndices[t1], orientedIndices[t2]];
             clusterNewFaces.push({
-              indices: [orientedIndices[t0], orientedIndices[t1], orientedIndices[t2]]
+              indices: fIndices,
+              uvs: hasAnyUV ? fIndices.map(vi => getVertexUV(vi) || [0, 0]) : undefined,
+              materialIndex: clusterMat
             });
           });
         } else {
           // Keep N-gon face
-          clusterNewFaces.push({ indices: orientedIndices });
+          clusterNewFaces.push({
+            indices: orientedIndices,
+            uvs: hasAnyUV ? orientedIndices.map(vi => getVertexUV(vi) || [0, 0]) : undefined,
+            materialIndex: clusterMat
+          });
         }
       }
     });
@@ -1323,7 +1542,11 @@ export function dissolveCoplanarFaces(
       clusterNewFaces.forEach(f => finalFaces.push(f));
     } else {
       // Fallback to original cluster faces
-      faceIndices.forEach(fi => finalFaces.push({ indices: triFaces[fi] }));
+      faceIndices.forEach(fi => finalFaces.push({
+        indices: [...triFaces[fi].indices],
+        uvs: triFaces[fi].uvs ? [...triFaces[fi].uvs!] : undefined,
+        materialIndex: triFaces[fi].materialIndex
+      }));
     }
   });
 
