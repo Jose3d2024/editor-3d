@@ -425,7 +425,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = project.environment.exposure ?? 1.2;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     rendererRef.current = renderer;
 
     // ── Cámara y Evaluación de Ruta / Objetivo ─────────────────────────────
@@ -883,7 +883,7 @@ export const RenderModal: React.FC<RenderModalProps> = ({ onClose }) => {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = project.environment.exposure ?? 1.2;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
 
     const camera = new THREE.PerspectiveCamera(fov, w / h, 0.01, 1000);
     const scene = new THREE.Scene();

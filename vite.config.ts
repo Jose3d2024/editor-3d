@@ -50,7 +50,7 @@ export default defineConfig(({ mode }) => {
         'three/examples/jsm/postprocessing/Pass',
       ],
       // Excluir solo los que tienen WASM o workers nativos que Vite no puede pre-bundlear
-      exclude: ['three-bvh-csg', 'three-csg-ts', 'three-mesh-bvh'],
+      exclude: ['three-bvh-csg', 'three-csg-ts', 'three-mesh-bvh', 'manifold-3d'],
     },
     server: {
       host: '0.0.0.0',

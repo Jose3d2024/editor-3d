@@ -9,6 +9,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { extractPBRMaterialsFromObject3D } from '../utils/materialUtils';
 import {
   Layers,
   Sparkles,
@@ -62,7 +66,12 @@ import {
   Grid,
   Columns,
   ArrowDownToLine,
-  FlaskConical
+  FlaskConical,
+  Package,
+  Map as MapIcon,
+  Download,
+  Camera,
+  X
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import {
@@ -83,11 +92,13 @@ import {
   BlueprintDetectionMode,
   BlueprintImageConfig,
   ProcessedSilhouette,
-  GhostOverlayData
+  GhostOverlayData,
+  BlueprintDepthZone,
+  autoDetectDepthZones
 } from '../utils/blueprintCarver';
 import { V3, MeshFace, CSGObject, MaterialData } from '../types';
 import { safeParseFixed } from '../utils/numberUtils';
-import { generateFullPBRMapsFromSource, GeneratedPBRSet } from '../utils/textureColorUtils';
+import { generateFullPBRMapsFromSource, GeneratedPBRSet, extractDominantObjectColor } from '../utils/textureColorUtils';
 import { generateUVs } from '../utils/modifiers';
 import {
   buildUnifiedMultiViewPBRAtlas,
@@ -96,7 +107,6 @@ import {
   MultiViewAtlasResult,
   ViewPBRData
 } from '../utils/blueprintAtlasPBR';
-import { UVMappingStudio } from './UVMappingStudio';
 
 interface BlueprintCarverModalProps {
   isOpen: boolean;
@@ -158,6 +168,12 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     invert: false,
     dilation: 1,
     blurRadius: 1,
+    contourMode: 'ROUNDED_ADAPTIVE',
+    blur: 1,
+    simplify: 3.5,
+    cornerAngle: 65,
+    curveFidelity: 8,
+    roundnessSmooth: 2,
     denoiseIslandSize: 15,
     thinFeatureBoost: 45,
     autoDetectHoles: true,
@@ -169,49 +185,92 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     texFlipH: false,
     texFlipV: false,
     texMirrorOpposite: false,
-    invertNormalY: false
+    invertNormalY: false,
+    depthLimit: 0.5,
+    carveEnabled: true
   });
 
-  // ── Estado de las 3 Vistas Ortográficas ──
+  // ── Estado de las 4 Vistas Ortográficas (Frontal, Superior, Lateral, Trasera) ──
   const [viewConfigs, setViewConfigs] = useState<{
     front: BlueprintImageConfig;
     top: BlueprintImageConfig;
     side: BlueprintImageConfig;
+    back: BlueprintImageConfig;
   }>({
     front: createDefaultConfig(),
     top: createDefaultConfig(),
-    side: createDefaultConfig()
+    side: createDefaultConfig(),
+    back: createDefaultConfig()
   });
 
-  const [activeTab, setActiveTab] = useState<'front' | 'top' | 'side'>('front');
+  const [activeTab, setActiveTab] = useState<BlueprintViewKey>('front');
   const [isEyedropperActive, setIsEyedropperActive] = useState(false);
   const [isHolePickerActive, setIsHolePickerActive] = useState(false);
-  const [subSection, setSubSection] = useState<'detection' | 'scale' | 'align' | 'filters' | 'transform' | 'pbr'>('detection');
+  const [subSection, setSubSection] = useState<'detection' | 'scale' | 'depth' | 'align' | 'filters' | 'transform' | 'pbr'>('detection');
+
+  // ── Color de Malla Base para Disimular Costuras & Muestreo Automático ──
+  const [baseMeshColor, setBaseMeshColor] = useState<string>('#64748b');
+  const [isAutoMeshColor, setIsAutoMeshColor] = useState<boolean>(true);
+  const [backDepthLimit, setBackDepthLimit] = useState<number>(0.5); // 0.1 a 1.0 (def: 50% de profundidad trasera)
+  const [isBackCarvingEnabled, setIsBackCarvingEnabled] = useState<boolean>(true); // true = modela silueta 3D, false = solo textura
+
+  // ── Modo Zonas de Altura / Cavidad (ej. Asiento vs Brazos de sofá) ──
+  const [isDepthZoneMode, setIsDepthZoneMode] = useState<boolean>(false);
+  const [selectedDepthZoneId, setSelectedDepthZoneId] = useState<string | null>(null);
+  const [isDrawingDepthZone, setIsDrawingDepthZone] = useState<boolean>(false);
+  const [drawingDepthZone, setDrawingDepthZone] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const [draggingDepthZoneCorner, setDraggingDepthZoneCorner] = useState<'nw' | 'ne' | 'se' | 'sw' | 'move' | null>(null);
+  const depthZoneDragStartRef = useRef<{ x: number; y: number; originalZone: BlueprintDepthZone } | null>(null);
 
   // ── Generación de Textura & Mapas PBR desde Bocetos Ortográficos ──
   const [isGeneratingPBR, setIsGeneratingPBR] = useState(false);
   const [pbrNormalStrength, setPbrNormalStrength] = useState<number>(2.5);
   const [applyPBRMaterialToCarve, setApplyPBRMaterialToCarve] = useState<boolean>(true);
   const [textureTargetMode, setTextureTargetMode] = useState<'atlas' | 'view'>('atlas');
-  const [viewPBRDataMap, setViewPBRDataMap] = useState<Partial<Record<'front' | 'top' | 'side', ViewPBRData>>>({});
+  const [viewPBRDataMap, setViewPBRDataMap] = useState<Partial<Record<BlueprintViewKey, ViewPBRData>>>({});
   const [atlasPBRResult, setAtlasPBRResult] = useState<MultiViewAtlasResult | null>(null);
   const [atlasPBRMaterial, setAtlasPBRMaterial] = useState<MaterialData | null>(null);
   const [generatedPBRMaterials, setGeneratedPBRMaterials] = useState<{
     front: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
     top: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
     side: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
-  }>({ front: null, top: null, side: null });
-  const [selectedPBRViewKey, setSelectedPBRViewKey] = useState<'front' | 'top' | 'side'>('front');
+    back: { materialId: string; material: MaterialData; pbrSet: GeneratedPBRSet } | null;
+  }>({ front: null, top: null, side: null, back: null });
+  const [selectedPBRViewKey, setSelectedPBRViewKey] = useState<BlueprintViewKey>('front');
+
+  // ── Importación de Modelos 3D Externos (GLB / GLTF / OBJ) & Visor de Mapa UV ──
+  const import3DFileInputRef = useRef<HTMLInputElement>(null);
+  const uvCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [showUVInspectorModal, setShowUVInspectorModal] = useState<boolean>(false);
+  const [imported3DData, setImported3DData] = useState<{
+    fileName: string;
+    object3D?: THREE.Object3D;
+    primaryTextureUrl: string | null;
+    normalMapUrl: string | null;
+    roughnessMapUrl: string | null;
+    metalnessMapUrl: string | null;
+    materials: MaterialData[];
+    vertexCount: number;
+    triangleCount: number;
+    uvCoords: Float32Array | null;
+    indices: Uint16Array | Uint32Array | null;
+  } | null>(null);
+  const [uvWireframeColor, setUvWireframeColor] = useState<string>('#06b6d4');
+  const [showUVWireframe, setShowUVWireframe] = useState<boolean>(true);
+  const [uvWireframeOpacity, setUvWireframeOpacity] = useState<number>(0.85);
+  const [activeTextureChannel, setActiveTextureChannel] = useState<'albedo' | 'normal' | 'roughness' | 'metalness'>('albedo');
 
   // ── Estado de Zoom & Pan 2D para cada vista ──
   const [viewTransforms, setViewTransforms] = useState<{
     front: { zoom: number; panX: number; panY: number };
     top: { zoom: number; panX: number; panY: number };
     side: { zoom: number; panX: number; panY: number };
+    back: { zoom: number; panX: number; panY: number };
   }>({
     front: { zoom: 1, panX: 0, panY: 0 },
     top: { zoom: 1, panX: 0, panY: 0 },
     side: { zoom: 1, panX: 0, panY: 0 },
+    back: { zoom: 1, panX: 0, panY: 0 },
   });
 
   // ── Modo Edición Manual de Puntos de Silueta y Selección Múltiple ──
@@ -230,8 +289,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
   // ── Historial de Acciones (Deshacer / Rehacer - Undo / Redo) ──
   interface HistorySnapshot {
-    viewConfigs: Record<'front' | 'top' | 'side', BlueprintImageConfig>;
-    processedSilhouettes: Record<'front' | 'top' | 'side', ProcessedSilhouette | null>;
+    viewConfigs: Record<BlueprintViewKey, BlueprintImageConfig>;
+    processedSilhouettes: Record<BlueprintViewKey, ProcessedSilhouette | null>;
     dimensions: V3;
     resolution: number;
     engineMode: CarverEngineMode;
@@ -258,22 +317,77 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   const [statusMsg, setStatusMsg] = useState<string>('');
   const lastRawMeshDataRef = useRef<{ vertices: V3[]; faces: MeshFace[] } | null>(null);
 
+  // ── Controles de Redondeo, Abombado de Cojines y Curvatura 3D ──
+  const [roundness, setRoundness] = useState<number>(0.0); // 0 a 1: Fillet / Redondeo de aristas
+  const [cushionInflation, setCushionInflation] = useState<number>(0.0); // 0 a 1: Abombado / Tapicería
+  const [subdivisionLevel, setSubdivisionLevel] = useState<number>(0); // 0: Normal, 1: Subdivisión suave continua
+  const [showRoundnessPanel, setShowRoundnessPanel] = useState<boolean>(true); // Desplegable de redondeo en 3D
+
+  const applyRoundnessPreset = (preset: 'sofa' | 'organic' | 'fillet' | 'sharp') => {
+    if (preset === 'sofa') {
+      setEngineMode('CUSHION_INFLATION');
+      setCushionInflation(0.65);
+      setRoundness(0.55);
+      setSmoothIterations(6);
+      setCarverTopologyMode('CUSHION_UPHOLSTERY');
+      setFlattenPlanarFaces(false);
+    } else if (preset === 'organic') {
+      setEngineMode('CUSHION_INFLATION');
+      setCushionInflation(0.85);
+      setRoundness(0.80);
+      setSmoothIterations(8);
+      setCarverTopologyMode('ROUNDED_ORGANIC');
+      setFlattenPlanarFaces(false);
+    } else if (preset === 'fillet') {
+      setCushionInflation(0.0);
+      setRoundness(0.50);
+      setSmoothIterations(4);
+      setCarverTopologyMode('CURVED_FILLET');
+      setFlattenPlanarFaces(true);
+    } else if (preset === 'sharp') {
+      setEngineMode('VISUAL_HULL');
+      setCushionInflation(0.0);
+      setRoundness(0.0);
+      setSmoothIterations(2);
+      setCarverTopologyMode('PLANAR_POLISHED');
+      setFlattenPlanarFaces(true);
+    }
+  };
+
   // ── Previsualización 2D de siluetas ──
   const [processedSilhouettes, setProcessedSilhouettes] = useState<{
     front: ProcessedSilhouette | null;
     top: ProcessedSilhouette | null;
     side: ProcessedSilhouette | null;
-  }>({ front: null, top: null, side: null });
+    back: ProcessedSilhouette | null;
+  }>({ front: null, top: null, side: null, back: null });
 
   const [rawImages, setRawImages] = useState<{
     front: ImageData | null;
     top: ImageData | null;
     side: ImageData | null;
-  }>({ front: null, top: null, side: null });
+    back: ImageData | null;
+  }>({ front: null, top: null, side: null, back: null });
+
+  // Referencias para caché instantáneo en memoria (Cero Latencia en Sliders)
+  const loadedImageHashRef = useRef<{ [k in BlueprintViewKey]: string }>({
+    front: '',
+    top: '',
+    side: '',
+    back: ''
+  });
+  const rawImagesRef = useRef<{ [k in BlueprintViewKey]: ImageData | null }>({
+    front: null,
+    top: null,
+    side: null,
+    back: null
+  });
+  rawImagesRef.current = rawImages;
 
   const canvasFrontRef = useRef<HTMLCanvasElement>(null);
   const canvasTopRef = useRef<HTMLCanvasElement>(null);
   const canvasSideRef = useRef<HTMLCanvasElement>(null);
+  const canvasBackRef = useRef<HTMLCanvasElement>(null);
 
   // ── Visor 3D Interactivo & Plano de Textura de Referencia ──
   const threeMountRef = useRef<HTMLDivElement>(null);
@@ -281,9 +395,9 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const previewMeshRef = useRef<THREE.Mesh | null>(null);
   const previewCageRef = useRef<THREE.LineSegments | null>(null);
-  const refPlaneMeshRef = useRef<THREE.Mesh | null>(null);
+  const refPlaneMeshRef = useRef<THREE.Object3D | null>(null);
   const laserPlaneMeshRef = useRef<THREE.Mesh | null>(null);
-  const [show3DRefPlane, setShow3DRefPlane] = useState<'active' | 'front' | 'side' | 'top' | 'atlas' | 'none'>('active');
+  const [show3DRefPlane, setShow3DRefPlane] = useState<'none' | 'active' | 'all' | 'front' | 'back' | 'side' | 'top' | 'atlas'>('active');
   const [refPlaneOpacity, setRefPlaneOpacity] = useState<number>(0.65);
   const [showSymmetryGuides, setShowSymmetryGuides] = useState<boolean>(true);
   const [laserProportionsEnabled, setLaserProportionsEnabled] = useState<boolean>(false);
@@ -301,24 +415,16 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   const [showAlignmentRails, setShowAlignmentRails] = useState<boolean>(true);
   const [ghostOpacity, setGhostOpacity] = useState<number>(0.35);
   const [showMultiViewComparator, setShowMultiViewComparator] = useState<boolean>(false);
-  const [showUVStudio, setShowUVStudio] = useState<boolean>(false);
-
-  const handleOpenUVStudio = () => {
-    if (!lastRawMeshDataRef.current || lastRawMeshDataRef.current.vertices.length === 0) {
-      update3DPreview(true);
-    }
-    setShowUVStudio(true);
-  };
 
   const canvasCompFrontRef = useRef<HTMLCanvasElement>(null);
   const canvasCompSideRef = useRef<HTMLCanvasElement>(null);
   const canvasCompTopRef = useRef<HTMLCanvasElement>(null);
 
   // ── Helper para construir capas fantasma de referencia ──
-  const getGhostOverlaysFor = (key: 'front' | 'top' | 'side'): GhostOverlayData[] => {
+  const getGhostOverlaysFor = (key: BlueprintViewKey): GhostOverlayData[] => {
     if (ghostOverlayView === 'none') return [];
     const ghosts: GhostOverlayData[] = [];
-    const addG = (k: 'front' | 'top' | 'side', label: string, color: string) => {
+    const addG = (k: BlueprintViewKey, label: string, color: string) => {
       if (k !== key && viewConfigs[k].url && (rawImages[k] || processedSilhouettes[k])) {
         ghosts.push({
           viewKey: k,
@@ -337,6 +443,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       addG('front', 'Frontal', '#38bdf8');
       addG('side', 'Lateral', '#10b981');
       addG('top', 'Superior', '#f59e0b');
+      addG('back', 'Trasera', '#a855f7');
     } else if (ghostOverlayView === 'front') {
       addG('front', 'Frontal', '#38bdf8');
     } else if (ghostOverlayView === 'side') {
@@ -355,11 +462,13 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     const initialFront = refs?.front?.url ?? null;
     const initialTop = refs?.top?.url ?? null;
     const initialSide = refs?.left?.url ?? refs?.right?.url ?? null;
+    const initialBack = refs?.back?.url ?? null;
 
     setViewConfigs(prev => ({
       front: { ...prev.front, url: prev.front.url || initialFront },
       top:   { ...prev.top,   url: prev.top.url || initialTop },
-      side:  { ...prev.side,  url: prev.side.url || initialSide }
+      side:  { ...prev.side,  url: prev.side.url || initialSide },
+      back:  { ...prev.back,  url: prev.back.url || initialBack }
     }));
   }, [isOpen]);
 
@@ -368,43 +477,61 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     if (!isOpen) return;
 
     let isMounted = true;
-    const processAll = async () => {
-      const keys: ('front' | 'top' | 'side')[] = ['front', 'top', 'side'];
-      const newImages: any = { ...rawImages };
-      const newSilhouettes: any = { ...processedSilhouettes };
+    const keys: BlueprintViewKey[] = ['front', 'top', 'side', 'back'];
 
-      for (const key of keys) {
-        const cfg = viewConfigs[key];
-        if (cfg.url) {
-          try {
-            const imgData = await loadCanvasImageData(cfg.url, cfg);
-            if (imgData && isMounted) {
-              newImages[key] = imgData;
-              newSilhouettes[key] = processSilhouette(imgData, cfg);
-            }
-          } catch (e) {
-            console.warn('Error procesando imagen para', key, e);
-          }
-        } else {
-          newImages[key] = null;
-          newSilhouettes[key] = null;
+    for (const key of keys) {
+      const cfg = viewConfigs[key];
+      if (!cfg.url) {
+        if (rawImagesRef.current[key] !== null) {
+          rawImagesRef.current[key] = null;
+          setRawImages(prev => ({ ...prev, [key]: null }));
         }
+        setProcessedSilhouettes(prev => {
+          if (!prev[key]) return prev;
+          return { ...prev, [key]: null };
+        });
+        continue;
       }
 
-      if (isMounted) {
-        setRawImages(newImages);
-        setProcessedSilhouettes(newSilhouettes);
-      }
-    };
+      // Hash de los parámetros que alteran la imagen cruda (rotación, escala, color, filtros de píxel)
+      const imgParamsHash = `${cfg.url}|${cfg.flipH}|${cfg.flipV}|${cfg.rotation}|${cfg.scaleX}|${cfg.scaleY}|${cfg.scaleUniform}|${cfg.preserveAspectRatio}|${cfg.offsetX}|${cfg.offsetY}|${cfg.contrast}|${cfg.brightness}|${cfg.grayscale}|${cfg.sharpen}`;
 
-    processAll();
+      if (imgParamsHash === loadedImageHashRef.current[key] && rawImagesRef.current[key]) {
+        // ACTUALIZACIÓN SÍNCRONA EN TIEMPO REAL (< 1 ms):
+        // La imagen ya está en memoria GPU/RAM, procesamos la silueta instantáneamente al mover cualquier slider
+        const cachedImg = rawImagesRef.current[key]!;
+        const sil = processSilhouette(cachedImg, cfg);
+        setProcessedSilhouettes(prev => ({ ...prev, [key]: sil }));
+      } else {
+        // Solo recargar la imagen de forma asíncrona si cambiaron transformaciones de píxel
+        loadCanvasImageData(cfg.url, cfg).then(imgData => {
+          if (!isMounted) return;
+          loadedImageHashRef.current[key] = imgParamsHash;
+          rawImagesRef.current[key] = imgData;
+          setRawImages(prev => ({ ...prev, [key]: imgData }));
+          if (imgData) {
+            const sil = processSilhouette(imgData, cfg);
+            setProcessedSilhouettes(prev => ({ ...prev, [key]: sil }));
+            if (isAutoMeshColor) {
+              const autoC = extractDominantObjectColor(imgData, cfg.customBgColor);
+              setBaseMeshColor(autoC);
+            }
+          } else {
+            setProcessedSilhouettes(prev => ({ ...prev, [key]: null }));
+          }
+        }).catch(e => {
+          console.warn('Error cargando imagen para', key, e);
+        });
+      }
+    }
 
     return () => { isMounted = false; };
   }, [
     isOpen,
-    viewConfigs.front.url, viewConfigs.front.threshold, viewConfigs.front.detectionMode, viewConfigs.front.fillInterior, viewConfigs.front.customBgColor, viewConfigs.front.invert, viewConfigs.front.dilation, viewConfigs.front.flipH, viewConfigs.front.flipV, viewConfigs.front.rotation, viewConfigs.front.scaleX, viewConfigs.front.scaleY, viewConfigs.front.scaleUniform, viewConfigs.front.preserveAspectRatio, viewConfigs.front.offsetX, viewConfigs.front.offsetY, viewConfigs.front.contrast, viewConfigs.front.brightness, viewConfigs.front.grayscale, viewConfigs.front.sharpen, viewConfigs.front.denoiseIslandSize, viewConfigs.front.thinFeatureBoost, viewConfigs.front.autoDetectHoles, JSON.stringify(viewConfigs.front.holeSeeds),
-    viewConfigs.top.url, viewConfigs.top.threshold, viewConfigs.top.detectionMode, viewConfigs.top.fillInterior, viewConfigs.top.customBgColor, viewConfigs.top.invert, viewConfigs.top.dilation, viewConfigs.top.flipH, viewConfigs.top.flipV, viewConfigs.top.rotation, viewConfigs.top.scaleX, viewConfigs.top.scaleY, viewConfigs.top.scaleUniform, viewConfigs.top.preserveAspectRatio, viewConfigs.top.offsetX, viewConfigs.top.offsetY, viewConfigs.top.contrast, viewConfigs.top.brightness, viewConfigs.top.grayscale, viewConfigs.top.sharpen, viewConfigs.top.denoiseIslandSize, viewConfigs.top.thinFeatureBoost, viewConfigs.top.autoDetectHoles, JSON.stringify(viewConfigs.top.holeSeeds),
-    viewConfigs.side.url, viewConfigs.side.threshold, viewConfigs.side.detectionMode, viewConfigs.side.fillInterior, viewConfigs.side.customBgColor, viewConfigs.side.invert, viewConfigs.side.dilation, viewConfigs.side.flipH, viewConfigs.side.flipV, viewConfigs.side.rotation, viewConfigs.side.scaleX, viewConfigs.side.scaleY, viewConfigs.side.scaleUniform, viewConfigs.side.preserveAspectRatio, viewConfigs.side.offsetX, viewConfigs.side.offsetY, viewConfigs.side.contrast, viewConfigs.side.brightness, viewConfigs.side.grayscale, viewConfigs.side.sharpen, viewConfigs.side.denoiseIslandSize, viewConfigs.side.thinFeatureBoost, viewConfigs.side.autoDetectHoles, JSON.stringify(viewConfigs.side.holeSeeds)
+    viewConfigs.front.url, viewConfigs.front.threshold, viewConfigs.front.detectionMode, viewConfigs.front.fillInterior, viewConfigs.front.customBgColor, viewConfigs.front.invert, viewConfigs.front.dilation, viewConfigs.front.flipH, viewConfigs.front.flipV, viewConfigs.front.rotation, viewConfigs.front.scaleX, viewConfigs.front.scaleY, viewConfigs.front.scaleUniform, viewConfigs.front.preserveAspectRatio, viewConfigs.front.offsetX, viewConfigs.front.offsetY, viewConfigs.front.contrast, viewConfigs.front.brightness, viewConfigs.front.grayscale, viewConfigs.front.sharpen, viewConfigs.front.contourMode, viewConfigs.front.blur, viewConfigs.front.simplify, viewConfigs.front.cornerAngle, viewConfigs.front.curveFidelity, viewConfigs.front.roundnessSmooth, viewConfigs.front.denoiseIslandSize, viewConfigs.front.thinFeatureBoost, viewConfigs.front.autoDetectHoles, JSON.stringify(viewConfigs.front.holeSeeds), viewConfigs.front.manualControlPoints,
+    viewConfigs.top.url, viewConfigs.top.threshold, viewConfigs.top.detectionMode, viewConfigs.top.fillInterior, viewConfigs.top.customBgColor, viewConfigs.top.invert, viewConfigs.top.dilation, viewConfigs.top.flipH, viewConfigs.top.flipV, viewConfigs.top.rotation, viewConfigs.top.scaleX, viewConfigs.top.scaleY, viewConfigs.top.scaleUniform, viewConfigs.top.preserveAspectRatio, viewConfigs.top.offsetX, viewConfigs.top.offsetY, viewConfigs.top.contrast, viewConfigs.top.brightness, viewConfigs.top.grayscale, viewConfigs.top.sharpen, viewConfigs.top.contourMode, viewConfigs.top.blur, viewConfigs.top.simplify, viewConfigs.top.cornerAngle, viewConfigs.top.curveFidelity, viewConfigs.top.roundnessSmooth, viewConfigs.top.denoiseIslandSize, viewConfigs.top.thinFeatureBoost, viewConfigs.top.autoDetectHoles, JSON.stringify(viewConfigs.top.holeSeeds), viewConfigs.top.manualControlPoints,
+    viewConfigs.side.url, viewConfigs.side.threshold, viewConfigs.side.detectionMode, viewConfigs.side.fillInterior, viewConfigs.side.customBgColor, viewConfigs.side.invert, viewConfigs.side.dilation, viewConfigs.side.flipH, viewConfigs.side.flipV, viewConfigs.side.rotation, viewConfigs.side.scaleX, viewConfigs.side.scaleY, viewConfigs.side.scaleUniform, viewConfigs.side.preserveAspectRatio, viewConfigs.side.offsetX, viewConfigs.side.offsetY, viewConfigs.side.contrast, viewConfigs.side.brightness, viewConfigs.side.grayscale, viewConfigs.side.sharpen, viewConfigs.side.contourMode, viewConfigs.side.blur, viewConfigs.side.simplify, viewConfigs.side.cornerAngle, viewConfigs.side.curveFidelity, viewConfigs.side.roundnessSmooth, viewConfigs.side.denoiseIslandSize, viewConfigs.side.thinFeatureBoost, viewConfigs.side.autoDetectHoles, JSON.stringify(viewConfigs.side.holeSeeds), viewConfigs.side.manualControlPoints,
+    viewConfigs.back.url, viewConfigs.back.threshold, viewConfigs.back.detectionMode, viewConfigs.back.fillInterior, viewConfigs.back.customBgColor, viewConfigs.back.invert, viewConfigs.back.dilation, viewConfigs.back.flipH, viewConfigs.back.flipV, viewConfigs.back.rotation, viewConfigs.back.scaleX, viewConfigs.back.scaleY, viewConfigs.back.scaleUniform, viewConfigs.back.preserveAspectRatio, viewConfigs.back.offsetX, viewConfigs.back.offsetY, viewConfigs.back.contrast, viewConfigs.back.brightness, viewConfigs.back.grayscale, viewConfigs.back.sharpen, viewConfigs.back.contourMode, viewConfigs.back.blur, viewConfigs.back.simplify, viewConfigs.back.cornerAngle, viewConfigs.back.curveFidelity, viewConfigs.back.roundnessSmooth, viewConfigs.back.denoiseIslandSize, viewConfigs.back.thinFeatureBoost, viewConfigs.back.autoDetectHoles, JSON.stringify(viewConfigs.back.holeSeeds), viewConfigs.back.manualControlPoints
   ]);
 
   // ── Redibujar canvas 2D con Zoom, Pan, Puntos de Control, Selección y Mapas Fantasma ──
@@ -432,7 +559,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         selectionBox,
         showSymmetryGuides,
         getGhostOverlaysFor('front'),
-        laserOpts
+        laserOpts,
+        viewConfigs.front.depthZones || [],
+        selectedDepthZoneId,
+        activeTab === 'front' && isDepthZoneMode ? drawingDepthZone : null
       );
     }
     if (activeTab === 'top' && canvasTopRef.current) {
@@ -450,7 +580,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         selectionBox,
         showSymmetryGuides,
         getGhostOverlaysFor('top'),
-        laserOpts
+        laserOpts,
+        viewConfigs.top.depthZones || [],
+        selectedDepthZoneId,
+        activeTab === 'top' && isDepthZoneMode ? drawingDepthZone : null
       );
     }
     if (activeTab === 'side' && canvasSideRef.current) {
@@ -468,7 +601,31 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         selectionBox,
         showSymmetryGuides,
         getGhostOverlaysFor('side'),
-        laserOpts
+        laserOpts,
+        viewConfigs.side.depthZones || [],
+        selectedDepthZoneId,
+        activeTab === 'side' && isDepthZoneMode ? drawingDepthZone : null
+      );
+    }
+    if (activeTab === 'back' && canvasBackRef.current) {
+      drawBlueprintPreview(
+        canvasBackRef.current,
+        rawImages.back,
+        processedSilhouettes.back,
+        '#a855f7',
+        viewTransforms.back,
+        selectedPoint,
+        isEditPointsMode,
+        hoveredPoint,
+        viewConfigs.back.holeSeeds || [],
+        multiSelectedPoints,
+        selectionBox,
+        showSymmetryGuides,
+        getGhostOverlaysFor('back'),
+        laserOpts,
+        viewConfigs.back.depthZones || [],
+        selectedDepthZoneId,
+        activeTab === 'back' && isDepthZoneMode ? drawingDepthZone : null
       );
     }
   }, [
@@ -493,7 +650,13 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     viewOriginalSketchOnly,
     viewConfigs.front.holeSeeds,
     viewConfigs.top.holeSeeds,
-    viewConfigs.side.holeSeeds
+    viewConfigs.side.holeSeeds,
+    viewConfigs.front.depthZones,
+    viewConfigs.top.depthZones,
+    viewConfigs.side.depthZones,
+    isDepthZoneMode,
+    selectedDepthZoneId,
+    drawingDepthZone
   ]);
 
   // ── Dibujar Lienzos del Comparador Multi-Vista 3 en 1 ──
@@ -554,7 +717,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   }, [showMultiViewComparator, rawImages, processedSilhouettes, viewTransforms, viewConfigs]);
 
   // ── Controles de Zoom 2D y Auto-Encuadre / Llenar Visor ──
-  const handleZoom = (key: 'front' | 'top' | 'side', delta: number) => {
+  const handleZoom = (key: BlueprintViewKey, delta: number) => {
     setViewTransforms(prev => ({
       ...prev,
       [key]: {
@@ -564,7 +727,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }));
   };
 
-  const handleResetZoomPan = (key: 'front' | 'top' | 'side') => {
+  const handleResetZoomPan = (key: BlueprintViewKey) => {
     setViewTransforms(prev => ({
       ...prev,
       [key]: { zoom: 1, panX: 0, panY: 0 }
@@ -574,7 +737,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Ajustar y Llenar Visor 2D al 100% sin Zonas Negras Desperdiciadas ──
-  const handleAutoFitViewport = (key: 'front' | 'top' | 'side') => {
+  const handleAutoFitViewport = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (sil && sil.boundsNormalized) {
       const b = sil.boundsNormalized;
@@ -602,7 +765,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Igualar Proporciones Entre 2 Vistas Específicas (1-Click) ──
-  const handleEqualizePair = (sourceKey: 'front' | 'side' | 'top', targetKey: 'front' | 'side' | 'top', mode: 'height' | 'width' | 'depth') => {
+  const handleEqualizePair = (sourceKey: BlueprintViewKey, targetKey: BlueprintViewKey, mode: 'height' | 'width' | 'depth') => {
     const srcSil = processedSilhouettes[sourceKey];
     const tgtSil = processedSilhouettes[targetKey];
     if (!srcSil?.boundsNormalized || !tgtSil?.boundsNormalized) {
@@ -692,7 +855,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Centrar y Alinear Silueta en el Eje de Simetría X=0 e Y=0 ──
-  const handleAutoAlignSymmetry = (key: 'front' | 'top' | 'side') => {
+  const handleAutoAlignSymmetry = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.boundsNormalized) {
       setStatusMsg('No se detectó silueta para alinear en el eje de simetría');
@@ -721,7 +884,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Alinear Silueta al Suelo / Base Inferior ──
-  const handleAlignGround = (key: 'front' | 'top' | 'side') => {
+  const handleAlignGround = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.boundsNormalized) {
       setStatusMsg('No se detectó silueta para alinear al suelo');
@@ -747,10 +910,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
   // ── Sincronizar y Ajustar Proporciones de Silueta entre Todas las Vistas ──
   const handleAutoEqualizeProportionsAcrossViews = () => {
-    const activeKeys: ('front' | 'top' | 'side')[] = [];
+    const activeKeys: BlueprintViewKey[] = [];
     if (processedSilhouettes.front?.boundsNormalized) activeKeys.push('front');
     if (processedSilhouettes.side?.boundsNormalized) activeKeys.push('side');
     if (processedSilhouettes.top?.boundsNormalized) activeKeys.push('top');
+    if (processedSilhouettes.back?.boundsNormalized) activeKeys.push('back');
 
     if (activeKeys.length < 2) {
       setStatusMsg('Carga al menos 2 vistas con siluetas detectadas para sincronizar proporciones');
@@ -758,7 +922,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }
 
     pushHistory();
-    const result = calculateMultiViewAutoAlignment(processedSilhouettes, viewConfigs);
+    const result = calculateMultiViewAutoAlignment(processedSilhouettes, viewConfigs, dimensions);
 
     const nextConfigs = { ...viewConfigs };
     if (result.updatedConfigs.front) {
@@ -770,14 +934,20 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     if (result.updatedConfigs.top) {
       nextConfigs.top = { ...nextConfigs.top, ...result.updatedConfigs.top };
     }
+    if (result.updatedConfigs.back) {
+      nextConfigs.back = { ...nextConfigs.back, ...result.updatedConfigs.back };
+    }
 
     setDimensions(result.dimensions);
     setViewConfigs(nextConfigs);
-    setStatusMsg(result.report);
+    setStatusMsg(`✓ ${result.report}`);
+    setTimeout(() => {
+      update3DPreview(true);
+    }, 60);
   };
 
   // ── Auto-Calibrar Mapeo UV con la Silueta (Escalado Isotrópico Unificado) ──
-  const handleAutoCalibrateUV = (key: 'front' | 'top' | 'side') => {
+  const handleAutoCalibrateUV = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.boundsNormalized) {
       setStatusMsg('No se detectó silueta para calibrar UV');
@@ -806,7 +976,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Transformaciones Precisas de Coordenadas Pantalla -> Normalizadas [-1, 1] ──
-  const getCanvasPointInfo = (canvas: HTMLCanvasElement, clientX: number, clientY: number, key: 'front' | 'top' | 'side') => {
+  const getCanvasPointInfo = (canvas: HTMLCanvasElement, clientX: number, clientY: number, key: BlueprintViewKey) => {
     const rect = canvas.getBoundingClientRect();
     const cssX = clientX - rect.left;
     const cssY = clientY - rect.top;
@@ -827,7 +997,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Detección de Punto más Cercano en Espacio de Píxeles de Pantalla (Hit-Test Inmune a Zoom) ──
-  const findClosestPoint = (canvas: HTMLCanvasElement, clientX: number, clientY: number, key: 'front' | 'top' | 'side', thresholdPx = 24) => {
+  const findClosestPoint = (canvas: HTMLCanvasElement, clientX: number, clientY: number, key: BlueprintViewKey, thresholdPx = 24) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.contours || sil.contours.length === 0) return null;
 
@@ -921,7 +1091,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Aplicar y Re-calcular Contornos Manuales Inmediatamente ──
-  const commitManualContours = (key: 'front' | 'top' | 'side', updatedContours: [number, number][][]) => {
+  const commitManualContours = (key: BlueprintViewKey, updatedContours: [number, number][][]) => {
     pushHistory();
     const imgData = rawImages[key];
     const newCfg = {
@@ -956,7 +1126,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Manejadores de Interacción con Puntos y Canvas 2D ──
-  const handleCanvasPointerDown = (key: 'front' | 'top' | 'side', e: React.PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerDown = (key: BlueprintViewKey, e: React.PointerEvent<HTMLCanvasElement>) => {
     if (isEyedropperActive || isHolePickerActive) return;
     const canvas = e.currentTarget;
     const rect = canvas.getBoundingClientRect();
@@ -964,9 +1134,64 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     const clickY = ((e.clientY - rect.top) / rect.height) * canvas.height;
 
     // Clic Central o Shift+Clic para hacer Pan
-    if (e.button === 1 || e.shiftKey || (!isEditPointsMode && e.button === 0)) {
+    if (e.button === 1 || e.shiftKey || (!isEditPointsMode && !isDepthZoneMode && e.button === 0)) {
       setIsPanningCanvas(true);
       setPanStart({ x: e.clientX - viewTransforms[key].panX, y: e.clientY - viewTransforms[key].panY });
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    // Modo Zonas de Altura / Cavidad (ej. Asiento de sofá vs brazos)
+    if (isDepthZoneMode && e.button === 0) {
+      const info = getCanvasPointInfo(canvas, e.clientX, e.clientY, key);
+      const zones = viewConfigs[key].depthZones || [];
+
+      // 1. Comprobar esquinas interactivas de la zona seleccionada para redimensionarla
+      if (selectedDepthZoneId) {
+        const currentZone = zones.find(z => z.id === selectedDepthZoneId);
+        if (currentZone) {
+          const minU = Math.min(currentZone.x1, currentZone.x2);
+          const maxU = Math.max(currentZone.x1, currentZone.x2);
+          const minV = Math.min(currentZone.y1, currentZone.y2);
+          const maxV = Math.max(currentZone.y1, currentZone.y2);
+
+          const corners: { corner: 'nw' | 'ne' | 'se' | 'sw'; u: number; v: number }[] = [
+            { corner: 'nw', u: minU, v: maxV },
+            { corner: 'ne', u: maxU, v: maxV },
+            { corner: 'se', u: maxU, v: minV },
+            { corner: 'sw', u: minU, v: minV }
+          ];
+
+          const cornerHit = corners.find(c => Math.hypot(info.normX - c.u, info.normY - c.v) < 0.14);
+          if (cornerHit) {
+            setDraggingDepthZoneCorner(cornerHit.corner);
+            depthZoneDragStartRef.current = { x: info.normX, y: info.normY, originalZone: { ...currentZone } };
+            canvas.setPointerCapture(e.pointerId);
+            return;
+          }
+        }
+      }
+
+      // 2. Comprobar si se hace clic dentro de alguna zona existente (para moverla o seleccionarla)
+      const hitZone = zones.slice().reverse().find(z => {
+        const minU = Math.min(z.x1, z.x2);
+        const maxU = Math.max(z.x1, z.x2);
+        const minV = Math.min(z.y1, z.y2);
+        const maxV = Math.max(z.y1, z.y2);
+        return info.normX >= minU && info.normX <= maxU && info.normY >= minV && info.normY <= maxV;
+      });
+
+      if (hitZone) {
+        setSelectedDepthZoneId(hitZone.id);
+        setDraggingDepthZoneCorner('move');
+        depthZoneDragStartRef.current = { x: info.normX, y: info.normY, originalZone: { ...hitZone } };
+        canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      // 3. Clic en espacio vacío: Iniciar trazado de un nuevo rectángulo de zona
+      setIsDrawingDepthZone(true);
+      setDrawingDepthZone({ x1: info.normX, y1: info.normY, x2: info.normX, y2: info.normY });
       canvas.setPointerCapture(e.pointerId);
       return;
     }
@@ -1025,7 +1250,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }
   };
 
-  const handleCanvasPointerMove = (key: 'front' | 'top' | 'side', e: React.PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerMove = (key: BlueprintViewKey, e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = e.currentTarget;
     const rect = canvas.getBoundingClientRect();
     const curX = ((e.clientX - rect.left) / rect.width) * canvas.width;
@@ -1048,6 +1273,48 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         x2: curX,
         y2: curY
       });
+      return;
+    }
+
+    if (isDrawingDepthZone && drawingDepthZone) {
+      const info = getCanvasPointInfo(canvas, e.clientX, e.clientY, key);
+      setDrawingDepthZone(prev => prev ? ({ ...prev, x2: info.normX, y2: info.normY }) : null);
+      return;
+    }
+
+    if (draggingDepthZoneCorner && depthZoneDragStartRef.current && selectedDepthZoneId) {
+      const info = getCanvasPointInfo(canvas, e.clientX, e.clientY, key);
+      const dx = info.normX - depthZoneDragStartRef.current.x;
+      const dy = info.normY - depthZoneDragStartRef.current.y;
+      const orig = depthZoneDragStartRef.current.originalZone;
+
+      setViewConfigs(prev => ({
+        ...prev,
+        [key]: {
+          ...prev[key],
+          depthZones: (prev[key].depthZones || []).map(z => {
+            if (z.id !== selectedDepthZoneId) return z;
+            if (draggingDepthZoneCorner === 'move') {
+              return {
+                ...z,
+                x1: orig.x1 + dx,
+                x2: orig.x2 + dx,
+                y1: orig.y1 + dy,
+                y2: orig.y2 + dy
+              };
+            } else if (draggingDepthZoneCorner === 'nw') {
+              return { ...z, x1: orig.x1 + dx, y1: orig.y1 + dy };
+            } else if (draggingDepthZoneCorner === 'ne') {
+              return { ...z, x2: orig.x2 + dx, y1: orig.y1 + dy };
+            } else if (draggingDepthZoneCorner === 'se') {
+              return { ...z, x2: orig.x2 + dx, y2: orig.y2 + dy };
+            } else if (draggingDepthZoneCorner === 'sw') {
+              return { ...z, x1: orig.x1 + dx, y2: orig.y2 + dy };
+            }
+            return z;
+          })
+        }
+      }));
       return;
     }
 
@@ -1089,10 +1356,48 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }
   };
 
-  const handleCanvasPointerUp = (key: 'front' | 'top' | 'side', e: React.PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerUp = (key: BlueprintViewKey, e: React.PointerEvent<HTMLCanvasElement>) => {
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
     } catch {}
+
+    if (isDrawingDepthZone) {
+      if (drawingDepthZone && Math.abs(drawingDepthZone.x2 - drawingDepthZone.x1) > 0.04 && Math.abs(drawingDepthZone.y2 - drawingDepthZone.y1) > 0.04) {
+        const newZone: BlueprintDepthZone = {
+          id: `depth_zone_${Date.now()}`,
+          name: `Cavidad / Asiento ${(viewConfigs[key].depthZones?.length || 0) + 1}`,
+          x1: Math.min(drawingDepthZone.x1, drawingDepthZone.x2),
+          y1: Math.max(drawingDepthZone.y1, drawingDepthZone.y2),
+          x2: Math.max(drawingDepthZone.x1, drawingDepthZone.x2),
+          y2: Math.min(drawingDepthZone.y1, drawingDepthZone.y2),
+          heightMax: 0.40,
+          heightMin: 0.0,
+          bevelRadius: 0.08,
+          mode: 'DEPRESSION',
+          enabled: true
+        };
+        setViewConfigs(prev => ({
+          ...prev,
+          [key]: {
+            ...prev[key],
+            depthZones: [...(prev[key].depthZones || []), newZone]
+          }
+        }));
+        setSelectedDepthZoneId(newZone.id);
+        setStatusMsg('✓ Nueva cavidad trazada. Altura al 40% (ajustable en la pestaña Alturas). Actualizando 3D...');
+        setTimeout(() => update3DPreview(true), 50);
+      }
+      setIsDrawingDepthZone(false);
+      setDrawingDepthZone(null);
+      return;
+    }
+
+    if (draggingDepthZoneCorner) {
+      setDraggingDepthZoneCorner(null);
+      depthZoneDragStartRef.current = null;
+      setTimeout(() => update3DPreview(true), 50);
+      return;
+    }
 
     if (isDrawingSelectionBox && selectionBox) {
       const canvas = e.currentTarget;
@@ -1148,7 +1453,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Doble Clic para Insertar un Punto Nuevo en el Contorno ──
-  const handleCanvasDoubleClick = (key: 'front' | 'top' | 'side', e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasDoubleClick = (key: BlueprintViewKey, e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isEditPointsMode) return;
     const canvas = e.currentTarget;
     const info = getCanvasPointInfo(canvas, e.clientX, e.clientY, key);
@@ -1199,7 +1504,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Clic Derecho para Eliminar Punto ──
-  const handleCanvasContextMenu = (key: 'front' | 'top' | 'side', e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasContextMenu = (key: BlueprintViewKey, e: React.MouseEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     if (!isEditPointsMode) return;
     const canvas = e.currentTarget;
@@ -1224,7 +1529,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Herramientas de Puntos Manuales (Subdividir, Simplificar, Eliminar, Restablecer) ──
-  const handleSubdividePoints = (key: 'front' | 'top' | 'side') => {
+  const handleSubdividePoints = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.contours) return;
     pushHistory();
@@ -1242,7 +1547,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setStatusMsg('✓ Puntos subdivididos');
   };
 
-  const handleSimplifyPoints = (key: 'front' | 'top' | 'side') => {
+  const handleSimplifyPoints = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.contours) return;
     pushHistory();
@@ -1267,7 +1572,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setStatusMsg(`✓ Silueta simplificada de forma inteligente`);
   };
 
-  const handleDeleteSelectedPoints = (key: 'front' | 'top' | 'side') => {
+  const handleDeleteSelectedPoints = (key: BlueprintViewKey) => {
     const sil = processedSilhouettes[key];
     if (!sil || !sil.contours) return;
 
@@ -1292,12 +1597,13 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setStatusMsg(`✓ ${pointsToDelete.size} punto(s) eliminado(s) de la silueta`);
   };
 
-  // ── Estandarizar y Normalizar las 3 Vistas a 1024x1024 (Misma Resolución y Escala) ──
+  // ── Estandarizar y Normalizar las Vistas a 1024x1024 (Misma Resolución y Escala) ──
   const handleStandardizeAndEqualizeViews = async () => {
-    const activeKeys: ('front' | 'top' | 'side')[] = [];
+    const activeKeys: BlueprintViewKey[] = [];
     if (viewConfigs.front.url) activeKeys.push('front');
     if (viewConfigs.top.url) activeKeys.push('top');
     if (viewConfigs.side.url) activeKeys.push('side');
+    if (viewConfigs.back.url) activeKeys.push('back');
 
     if (activeKeys.length === 0) {
       setStatusMsg('Carga al menos un boceto para estandarizar');
@@ -1460,7 +1766,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setViewPBRDataMap({});
     setAtlasPBRResult(null);
     setAtlasPBRMaterial(null);
-    setGeneratedPBRMaterials({ front: null, top: null, side: null });
+    setGeneratedPBRMaterials({ front: null, top: null, side: null, back: null });
     lastRawMeshDataRef.current = null;
 
     setViewConfigs(prev => ({
@@ -1479,6 +1785,12 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       side: {
         ...createDefaultConfig(),
         url: prev.side.url,
+        manualControlPoints: null,
+        holeSeeds: []
+      },
+      back: {
+        ...createDefaultConfig(),
+        url: prev.back.url,
         manualControlPoints: null,
         holeSeeds: []
       }
@@ -1507,15 +1819,16 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setViewConfigs({
       front: createDefaultConfig(),
       top: createDefaultConfig(),
-      side: createDefaultConfig()
+      side: createDefaultConfig(),
+      back: createDefaultConfig()
     });
 
-    setProcessedSilhouettes({ front: null, top: null, side: null });
-    setRawImages({ front: null, top: null, side: null });
+    setProcessedSilhouettes({ front: null, top: null, side: null, back: null });
+    setRawImages({ front: null, top: null, side: null, back: null });
     setViewPBRDataMap({});
     setAtlasPBRResult(null);
     setAtlasPBRMaterial(null);
-    setGeneratedPBRMaterials({ front: null, top: null, side: null });
+    setGeneratedPBRMaterials({ front: null, top: null, side: null, back: null });
     setTextureTargetMode('atlas');
     setSelectedPoint(null);
     setMultiSelectedPoints([]);
@@ -1532,7 +1845,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Eliminar Imagen de una Vista Específica ──
-  const handleRemoveImage = (key: 'front' | 'top' | 'side') => {
+  const handleRemoveImage = (key: BlueprintViewKey) => {
     pushHistory();
     setViewConfigs(prev => ({
       ...prev,
@@ -1561,14 +1874,14 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }, 50);
   };
 
-  const handleCanvasWheel = (key: 'front' | 'top' | 'side', e: React.WheelEvent<HTMLCanvasElement>) => {
+  const handleCanvasWheel = (key: BlueprintViewKey, e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
     const zoomDelta = e.deltaY < 0 ? 0.15 : -0.15;
     handleZoom(key, zoomDelta);
   };
 
   // ── Restablecer Puntos Manuales al Cálculo Automático ──
-  const handleResetManualPoints = (key: 'front' | 'top' | 'side') => {
+  const handleResetManualPoints = (key: BlueprintViewKey) => {
     const imgData = rawImages[key];
     const newCfg = {
       ...viewConfigs[key],
@@ -1592,70 +1905,132 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setHoveredPoint(null);
   };
 
-  // ── Auto-Ajustar Silueta con Análisis Inteligente (Escalado y Centrado Isotrópico) ──
-  const handleAutoCalibrate = (key: 'front' | 'top' | 'side') => {
+  // ── Auto-Ajustar Silueta con Análisis Inteligente (Preservando Escala y Posición de la Imagen) ──
+  const handleAutoCalibrate = (key: BlueprintViewKey) => {
     const imgData = rawImages[key];
     if (!imgData) return;
     pushHistory();
     const analysis = analyzeImageCharacteristics(imgData);
-    const sil = processedSilhouettes[key];
-    const calib = sil ? calculateAutoCalibration(sil) : null;
-    const uniScale = calib?.scaleUniform ?? 1.0;
 
-    setViewConfigs(prev => ({
-      ...prev,
-      [key]: {
-        ...prev[key],
-        detectionMode: analysis.suggestedMode,
-        threshold: analysis.suggestedThreshold,
-        fillInterior: analysis.suggestedMode === 'LINE_ART',
-        customBgColor: analysis.bgColor,
-        invert: false,
-        dilation: 1,
-        denoiseIslandSize: 15,
-        thinFeatureBoost: 45,
-        manualControlPoints: null,
-        // Escala isotrópica idéntica para no deformar las proporciones del dibujo
-        scaleUniform: uniScale,
-        scaleX: uniScale,
-        scaleY: uniScale,
-        lockAspectRatio: true,
-        preserveAspectRatio: true,
-        texScaleX: uniScale,
-        texScaleY: uniScale,
-        texOffsetX: calib?.texOffsetX ?? 0,
-        texOffsetY: calib?.texOffsetY ?? 0
-      }
-    }));
+    setViewConfigs(prev => {
+      const cur = prev[key];
+      return {
+        ...prev,
+        [key]: {
+          ...cur,
+          detectionMode: analysis.suggestedMode,
+          threshold: analysis.suggestedThreshold,
+          fillInterior: analysis.suggestedMode === 'LINE_ART',
+          customBgColor: analysis.bgColor,
+          invert: false,
+          dilation: 0,
+          denoiseIslandSize: 15,
+          thinFeatureBoost: 35,
+          manualControlPoints: null
+          // CRÍTICO: La escala y posición de la imagen de referencia (scaleUniform, scaleX, scaleY, offsetX, offsetY)
+          // se mantienen intactas sin alterarse.
+        }
+      };
+    });
     setSelectedPoint(null);
     setHoveredPoint(null);
-    setStatusMsg(`✓ Auto-calibrado isotrópico: modo ${analysis.suggestedMode === 'LINE_ART' ? 'Boceto / Fondo Claro' : analysis.suggestedMode === 'TRANSPARENT_ALPHA' ? 'Canal Alfa Transparente' : 'Figura Brillante'}`);
+    setStatusMsg(`✓ Silueta calibrada automáticamente: modo ${analysis.suggestedMode === 'LINE_ART' ? 'Boceto / Fondo Claro' : analysis.suggestedMode === 'TRANSPARENT_ALPHA' ? 'Canal Alfa Transparente' : 'Figura Brillante'} adaptado sin alterar la escala del boceto`);
   };
 
   // ── Transformaciones Rápidas (Espejo y Rotación) ──
-  const toggleFlipH = (key: 'front' | 'top' | 'side') => {
-    setViewConfigs(prev => ({
-      ...prev,
-      [key]: { ...prev[key], flipH: !prev[key].flipH }
-    }));
+  const toggleFlipH = (key: BlueprintViewKey) => {
+    setViewConfigs(prev => {
+      const cur = prev[key];
+      let flippedPoints = cur.manualControlPoints;
+      if (flippedPoints && flippedPoints.length > 0) {
+        flippedPoints = flippedPoints.map(contour =>
+          contour.map(([x, y]) => [-x, y] as [number, number])
+        );
+      }
+      let flippedSeeds = cur.holeSeeds;
+      if (flippedSeeds && flippedSeeds.length > 0) {
+        flippedSeeds = flippedSeeds.map(([x, y]) => [-x, y] as [number, number]);
+      }
+      return {
+        ...prev,
+        [key]: {
+          ...cur,
+          flipH: !cur.flipH,
+          manualControlPoints: flippedPoints,
+          holeSeeds: flippedSeeds
+        }
+      };
+    });
+    loadedImageHashRef.current[key] = '';
+    rawImagesRef.current[key] = null;
+    lastRawMeshDataRef.current = null;
+    setStatusMsg(`Volteada vista ${key.toUpperCase()} horizontalmente - recalculando silueta y 3D...`);
+    setTimeout(() => update3DPreview(true), 100);
   };
 
-  const toggleFlipV = (key: 'front' | 'top' | 'side') => {
-    setViewConfigs(prev => ({
-      ...prev,
-      [key]: { ...prev[key], flipV: !prev[key].flipV }
-    }));
+  const toggleFlipV = (key: BlueprintViewKey) => {
+    setViewConfigs(prev => {
+      const cur = prev[key];
+      let flippedPoints = cur.manualControlPoints;
+      if (flippedPoints && flippedPoints.length > 0) {
+        flippedPoints = flippedPoints.map(contour =>
+          contour.map(([x, y]) => [x, -y] as [number, number])
+        );
+      }
+      let flippedSeeds = cur.holeSeeds;
+      if (flippedSeeds && flippedSeeds.length > 0) {
+        flippedSeeds = flippedSeeds.map(([x, y]) => [x, -y] as [number, number]);
+      }
+      return {
+        ...prev,
+        [key]: {
+          ...cur,
+          flipV: !cur.flipV,
+          manualControlPoints: flippedPoints,
+          holeSeeds: flippedSeeds
+        }
+      };
+    });
+    loadedImageHashRef.current[key] = '';
+    rawImagesRef.current[key] = null;
+    lastRawMeshDataRef.current = null;
+    setStatusMsg(`Volteada vista ${key.toUpperCase()} verticalmente - recalculando silueta y 3D...`);
+    setTimeout(() => update3DPreview(true), 100);
   };
 
-  const rotate90 = (key: 'front' | 'top' | 'side') => {
-    setViewConfigs(prev => ({
-      ...prev,
-      [key]: { ...prev[key], rotation: ((prev[key].rotation || 0) + 90) % 360 }
-    }));
+  const rotate90 = (key: BlueprintViewKey) => {
+    setViewConfigs(prev => {
+      const cur = prev[key];
+      const newRot = ((cur.rotation || 0) + 90) % 360;
+      let rotatedPoints = cur.manualControlPoints;
+      if (rotatedPoints && rotatedPoints.length > 0) {
+        rotatedPoints = rotatedPoints.map(contour =>
+          contour.map(([x, y]) => [y, -x] as [number, number])
+        );
+      }
+      let rotatedSeeds = cur.holeSeeds;
+      if (rotatedSeeds && rotatedSeeds.length > 0) {
+        rotatedSeeds = rotatedSeeds.map(([x, y]) => [y, -x] as [number, number]);
+      }
+      return {
+        ...prev,
+        [key]: {
+          ...cur,
+          rotation: newRot,
+          manualControlPoints: rotatedPoints,
+          holeSeeds: rotatedSeeds
+        }
+      };
+    });
+    loadedImageHashRef.current[key] = '';
+    rawImagesRef.current[key] = null;
+    lastRawMeshDataRef.current = null;
+    setStatusMsg(`Rotada vista ${key.toUpperCase()} a 90° - actualizando modelo 3D...`);
+    setTimeout(() => update3DPreview(true), 100);
   };
 
   // ── Manejador de Clic en Canvas para Cuentagotas y Selector de Huecos ──
-  const handleCanvasClick = (key: 'front' | 'top' | 'side', e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasClick = (key: BlueprintViewKey, e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = e.currentTarget;
     const info = getCanvasPointInfo(canvas, e.clientX, e.clientY, key);
 
@@ -1700,7 +2075,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }
   };
 
-  const handleClearHoleSeeds = (key: 'front' | 'top' | 'side') => {
+  const handleClearHoleSeeds = (key: BlueprintViewKey) => {
     setViewConfigs(prev => ({
       ...prev,
       [key]: {
@@ -1708,6 +2083,105 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         holeSeeds: []
       }
     }));
+  };
+
+  // ── Auto-Detectar Cavidades / Asiento entre Brazos ──
+  const handleAutoDetectDepthZones = (key: BlueprintViewKey) => {
+    const raw = rawImages[key];
+    const sil = processedSilhouettes[key];
+    if (!raw || !sil || !sil.mask) {
+      setStatusMsg('⚠️ Carga y procesa primero una silueta en esta vista para auto-detectar zonas');
+      return;
+    }
+    const detected = autoDetectDepthZones(raw, sil.mask, raw.width, raw.height, key);
+    if (!detected || detected.length === 0) {
+      setStatusMsg('ℹ️ No se detectó una depresión obvia en esta vista. Puedes trazarla arrastrando en el lienzo.');
+      setIsDepthZoneMode(true);
+      setSubSection('depth');
+      return;
+    }
+
+    setViewConfigs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        depthZones: [...(prev[key].depthZones || []), ...detected]
+      }
+    }));
+    setSelectedDepthZoneId(detected[0].id);
+    setIsDepthZoneMode(true);
+    setSubSection('depth');
+    setStatusMsg(`✓ Cavidad/Asiento detectado automáticamente (${Math.round(detected[0].heightMax * 100)}% de altura). Actualizando 3D...`);
+    setTimeout(() => update3DPreview(true), 50);
+  };
+
+  // ── Añadir Zona de Altura Manual en el Centro ──
+  const handleAddManualDepthZone = (key: BlueprintViewKey) => {
+    const newZone: BlueprintDepthZone = {
+      id: `depth_zone_${Date.now()}`,
+      name: `Cavidad / Asiento ${(viewConfigs[key].depthZones?.length || 0) + 1}`,
+      x1: -0.4,
+      y1: 0.1,
+      x2: 0.4,
+      y2: -0.5,
+      heightMax: 0.40,
+      heightMin: 0.0,
+      bevelRadius: 0.08,
+      mode: 'DEPRESSION',
+      enabled: true
+    };
+    setViewConfigs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        depthZones: [...(prev[key].depthZones || []), newZone]
+      }
+    }));
+    setSelectedDepthZoneId(newZone.id);
+    setIsDepthZoneMode(true);
+    setSubSection('depth');
+    setStatusMsg('✓ Zona de altura añadida. Ajusta su nivel de altura o mueve sus esquinas interactivas en el lienzo.');
+    setTimeout(() => update3DPreview(true), 50);
+  };
+
+  // ── Actualizar Propiedades de Zona de Altura ──
+  const handleUpdateDepthZone = (key: BlueprintViewKey, zoneId: string, updates: Partial<BlueprintDepthZone>) => {
+    setViewConfigs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        depthZones: (prev[key].depthZones || []).map(z => z.id === zoneId ? { ...z, ...updates } : z)
+      }
+    }));
+    setTimeout(() => update3DPreview(true), 40);
+  };
+
+  // ── Eliminar Zona de Altura Específica ──
+  const handleDeleteDepthZone = (key: BlueprintViewKey, zoneId: string) => {
+    setViewConfigs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        depthZones: (prev[key].depthZones || []).filter(z => z.id !== zoneId)
+      }
+    }));
+    if (selectedDepthZoneId === zoneId) setSelectedDepthZoneId(null);
+    setStatusMsg('✓ Zona de altura eliminada');
+    setTimeout(() => update3DPreview(true), 50);
+  };
+
+  // ── Limpiar Todas las Zonas de Altura ──
+  const handleClearAllDepthZones = (key: BlueprintViewKey) => {
+    setViewConfigs(prev => ({
+      ...prev,
+      [key]: {
+        ...prev[key],
+        depthZones: []
+      }
+    }));
+    setSelectedDepthZoneId(null);
+    setStatusMsg('✓ Zonas de altura eliminadas');
+    setTimeout(() => update3DPreview(true), 50);
   };
 
   // ── Inicializar Escena Three.js para Mini-Visor 3D ──
@@ -1794,71 +2268,20 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
     if (refPlaneMeshRef.current) {
       sceneRef.current.remove(refPlaneMeshRef.current);
-      refPlaneMeshRef.current.geometry.dispose();
-      if (Array.isArray(refPlaneMeshRef.current.material)) {
-        refPlaneMeshRef.current.material.forEach(m => m.dispose());
-      } else {
-        refPlaneMeshRef.current.material.dispose();
-      }
+      refPlaneMeshRef.current.traverse((child: any) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) child.material.forEach((m: any) => m.dispose());
+          else child.material.dispose();
+        }
+      });
       refPlaneMeshRef.current = null;
     }
 
     if (show3DRefPlane === 'none' || (show3DRefPlane as any) === false) return;
 
-    const targetKey = show3DRefPlane === 'active' ? activeTab : show3DRefPlane;
-
-    const applyPlaneTexture = (texture: THREE.Texture) => {
-      if (!sceneRef.current) return;
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-
-      let planeGeo: THREE.BufferGeometry;
-      const planeMat = new THREE.MeshBasicMaterial({
-        map: texture,
-        transparent: true,
-        opacity: refPlaneOpacity,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      });
-
-      if (targetKey === 'front') {
-        planeGeo = new THREE.PlaneGeometry(dimensions[0], dimensions[1]);
-        const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-        planeMesh.position.set(0, 0, -dimensions[2] / 2 - 0.01);
-        refPlaneMeshRef.current = planeMesh;
-        sceneRef.current.add(planeMesh);
-      } else if (targetKey === 'side') {
-        planeGeo = new THREE.PlaneGeometry(dimensions[2], dimensions[1]);
-        const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-        planeMesh.rotation.y = -Math.PI / 2;
-        planeMesh.position.set(-dimensions[0] / 2 - 0.01, 0, 0);
-        refPlaneMeshRef.current = planeMesh;
-        sceneRef.current.add(planeMesh);
-      } else if (targetKey === 'top') {
-        planeGeo = new THREE.PlaneGeometry(dimensions[0], dimensions[2]);
-        const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-        planeMesh.rotation.x = Math.PI / 2;
-        planeMesh.position.set(0, -dimensions[1] / 2 - 0.01, 0);
-        refPlaneMeshRef.current = planeMesh;
-        sceneRef.current.add(planeMesh);
-      } else {
-        const maxD = Math.max(...dimensions);
-        planeGeo = new THREE.PlaneGeometry(maxD * 1.3, maxD * 1.3);
-        const planeMesh = new THREE.Mesh(planeGeo, planeMat);
-        planeMesh.position.set(0, 0, -dimensions[2] / 2 - 0.02);
-        refPlaneMeshRef.current = planeMesh;
-        sceneRef.current.add(planeMesh);
-      }
-    };
-
-    if (targetKey === 'atlas') {
-      const imgUrl = atlasPBRResult?.albedoAtlasUrl;
-      if (imgUrl) {
-        new THREE.TextureLoader().load(imgUrl, applyPlaneTexture);
-      }
-    } else if (targetKey === 'front' || targetKey === 'side' || targetKey === 'top') {
-      const imgData = rawImages[targetKey];
+    const getTextureForView = (key: BlueprintViewKey): THREE.Texture | null => {
+      const imgData = rawImages[key];
       if (imgData) {
         const canvas = document.createElement('canvas');
         canvas.width = imgData.width;
@@ -1867,11 +2290,162 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         if (ctx) {
           ctx.putImageData(imgData, 0, 0);
           const texture = new THREE.CanvasTexture(canvas);
-          applyPlaneTexture(texture);
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.wrapS = THREE.ClampToEdgeWrapping;
+          texture.wrapT = THREE.ClampToEdgeWrapping;
+          return texture;
         }
-      } else if (viewConfigs[targetKey]?.url) {
-        new THREE.TextureLoader().load(viewConfigs[targetKey]!.url!, applyPlaneTexture);
+      } else if (viewConfigs[key]?.url) {
+        const texture = new THREE.TextureLoader().load(viewConfigs[key]!.url!);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.wrapS = THREE.ClampToEdgeWrapping;
+        texture.wrapT = THREE.ClampToEdgeWrapping;
+        return texture;
       }
+      return null;
+    };
+
+    const buildPlaneMesh = (key: BlueprintViewKey, texture: THREE.Texture): THREE.Mesh => {
+      let width = dimensions[0];
+      let height = dimensions[1];
+      let posX = 0;
+      let posY = 0;
+      let posZ = 0;
+      let rotX = 0;
+      let rotY = 0;
+      let rotZ = 0;
+      let borderColor = 0x06b6d4; // Cyan por defecto
+
+      const cfg = viewConfigs[key];
+
+      if (key === 'front') {
+        width = dimensions[0];
+        height = dimensions[1];
+        posX = 0;
+        posY = 0;
+        posZ = -dimensions[2] / 2 - 0.005; // Plano Frontal en -Z
+        rotY = 0;
+        borderColor = 0x06b6d4; // Cyan
+      } else if (key === 'back') {
+        width = dimensions[0];
+        height = dimensions[1];
+        posX = 0;
+        posY = 0;
+        posZ = dimensions[2] / 2 + 0.005; // Plano Trasero en +Z
+        rotY = Math.PI; // Mirando hacia +Z (hacia atrás)
+        borderColor = 0xa855f7; // Púrpura
+      } else if (key === 'side') {
+        width = dimensions[2];
+        height = dimensions[1];
+        posX = -dimensions[0] / 2 - 0.005;
+        posY = 0;
+        posZ = 0;
+        rotY = -Math.PI / 2; // Mirando hacia -X
+        borderColor = 0x3b82f6; // Azul
+      } else if (key === 'top') {
+        const isRotated90 = (cfg.rotation === 90 || cfg.rotation === 270);
+        width = isRotated90 ? dimensions[2] : dimensions[0];
+        height = isRotated90 ? dimensions[0] : dimensions[2];
+        posX = 0;
+        posY = dimensions[1] / 2 + 0.005;
+        posZ = 0;
+        rotX = -Math.PI / 2; // Plano horizontal en +Y
+        rotY = -((cfg.rotation ?? 0) * Math.PI) / 180;
+        rotZ = 0;
+        borderColor = 0x10b981; // Esmeralda
+      }
+
+      const planeGeo = new THREE.PlaneGeometry(width, height);
+      const uvAttr = planeGeo.attributes.uv;
+
+      // Sincronizar volteos UV, rotación y transformaciones interactivas directamente con el plano 3D
+      const shouldFlipH = Boolean(cfg.texFlipH) !== Boolean(cfg.flipH);
+      const shouldFlipV = Boolean(cfg.texFlipV) !== Boolean(cfg.flipV);
+      const scaleX = Math.max(0.01, cfg.texScaleX ?? 1.0);
+      const scaleY = Math.max(0.01, cfg.texScaleY ?? 1.0);
+      const offX = cfg.texOffsetX ?? 0.0;
+      const offY = cfg.texOffsetY ?? 0.0;
+
+      for (let i = 0; i < uvAttr.count; i++) {
+        let u = uvAttr.getX(i);
+        let v = uvAttr.getY(i);
+        if (shouldFlipH) u = 1.0 - u;
+        if (shouldFlipV) v = 1.0 - v;
+        // Escala y desplazamiento interactivo idéntico a la proyección en la malla 3D
+        u = (u - 0.5) / scaleX + 0.5 - offX;
+        v = (v - 0.5) / scaleY + 0.5 - offY;
+        uvAttr.setXY(i, u, v);
+      }
+      uvAttr.needsUpdate = true;
+
+      const planeMat = new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+        opacity: refPlaneOpacity,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+
+      const mesh = new THREE.Mesh(planeGeo, planeMat);
+      mesh.position.set(posX, posY, posZ);
+      mesh.rotation.set(rotX, rotY, rotZ);
+
+      const edgesGeo = new THREE.EdgesGeometry(planeGeo);
+      const edgesMat = new THREE.LineBasicMaterial({
+        color: borderColor,
+        transparent: true,
+        opacity: Math.min(1.0, refPlaneOpacity + 0.3)
+      });
+      mesh.add(new THREE.LineSegments(edgesGeo, edgesMat));
+
+      return mesh;
+    };
+
+    if (show3DRefPlane === 'all') {
+      const group = new THREE.Group();
+      (['front', 'back', 'side', 'top'] as BlueprintViewKey[]).forEach(vKey => {
+        const tex = getTextureForView(vKey);
+        if (tex) {
+          const plane = buildPlaneMesh(vKey, tex);
+          group.add(plane);
+        }
+      });
+      sceneRef.current.add(group);
+      refPlaneMeshRef.current = group;
+      return;
+    }
+
+    const targetKey = show3DRefPlane === 'active' ? activeTab : show3DRefPlane;
+
+    if (targetKey === 'atlas') {
+      const imgUrl = atlasPBRResult?.albedoAtlasUrl;
+      if (imgUrl) {
+        new THREE.TextureLoader().load(imgUrl, (texture) => {
+          if (!sceneRef.current) return;
+          texture.colorSpace = THREE.SRGBColorSpace;
+          const maxD = Math.max(...dimensions);
+          const planeGeo = new THREE.PlaneGeometry(maxD * 1.3, maxD * 1.3);
+          const planeMat = new THREE.MeshBasicMaterial({
+            map: texture,
+            transparent: true,
+            opacity: refPlaneOpacity,
+            depthWrite: false,
+            side: THREE.DoubleSide
+          });
+          const mesh = new THREE.Mesh(planeGeo, planeMat);
+          mesh.position.set(0, 0, -dimensions[2] / 2 - 0.02);
+          sceneRef.current.add(mesh);
+          refPlaneMeshRef.current = mesh;
+        });
+      }
+      return;
+    }
+
+    const tex = getTextureForView(targetKey as BlueprintViewKey);
+    if (tex) {
+      const mesh = buildPlaneMesh(targetKey as BlueprintViewKey, tex);
+      sceneRef.current.add(mesh);
+      refPlaneMeshRef.current = mesh;
     }
   };
 
@@ -1922,9 +2496,31 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     rawImages.front,
     rawImages.top,
     rawImages.side,
+    rawImages.back,
+    viewConfigs.front.texFlipH,
+    viewConfigs.front.texFlipV,
+    viewConfigs.front.flipH,
+    viewConfigs.front.flipV,
+    viewConfigs.front.rotation,
+    viewConfigs.back.texFlipH,
+    viewConfigs.back.texFlipV,
+    viewConfigs.back.flipH,
+    viewConfigs.back.flipV,
+    viewConfigs.back.rotation,
+    viewConfigs.side.texFlipH,
+    viewConfigs.side.texFlipV,
+    viewConfigs.side.flipH,
+    viewConfigs.side.flipV,
+    viewConfigs.side.rotation,
+    viewConfigs.top.texFlipH,
+    viewConfigs.top.texFlipV,
+    viewConfigs.top.flipH,
+    viewConfigs.top.flipV,
+    viewConfigs.top.rotation,
     viewConfigs.front.url,
     viewConfigs.top.url,
     viewConfigs.side.url,
+    viewConfigs.back.url,
     atlasPBRResult?.albedoAtlasUrl,
     dimensions[0],
     dimensions[1],
@@ -1951,20 +2547,21 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     const meshData = lastRawMeshDataRef.current;
     const isAtlasActive = applyPBRMaterialToCarve && textureTargetMode === 'atlas' && !!atlasPBRMaterial;
     const activeViewGenerated = applyPBRMaterialToCarve && textureTargetMode === 'view'
-      ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab])
+      ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab] || generatedPBRMaterials.front || generatedPBRMaterials.back || generatedPBRMaterials.side || generatedPBRMaterials.top)
       : null;
 
     const boundsMap = {
       front: processedSilhouettes.front?.boundsNormalized,
       top: processedSilhouettes.top?.boundsNormalized,
-      side: processedSilhouettes.side?.boundsNormalized
+      side: processedSilhouettes.side?.boundsNormalized,
+      back: processedSilhouettes.back?.boundsNormalized
     };
 
     let uvMesh;
     if (isAtlasActive) {
       uvMesh = generateMultiViewAtlasUVs(
         meshData,
-        atlasPBRResult?.activeViews || ['side', 'top', 'front'],
+        atlasPBRResult?.activeViews || ['side', 'top', 'front', 'back'],
         dimensions,
         viewConfigs,
         boundsMap
@@ -2066,7 +2663,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   const update3DPreview = async (forceRecarve = true) => {
     if (!isOpen || !sceneRef.current) return;
 
-    const hasAnyImage = !!(viewConfigs.front.url || viewConfigs.top.url || viewConfigs.side.url);
+    const hasAnyImage = !!(viewConfigs.front.url || viewConfigs.top.url || viewConfigs.side.url || viewConfigs.back.url);
     if (!hasAnyImage) {
       if (previewMeshRef.current) {
         sceneRef.current.remove(previewMeshRef.current);
@@ -2084,20 +2681,35 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     try {
       let meshData = lastRawMeshDataRef.current;
       if (forceRecarve || !meshData) {
-        meshData = await carveModelFromBlueprints({
+        const newMeshData = await carveModelFromBlueprints({
           mode: engineMode,
           resolution: resolution,
           dimensions: dimensions,
           smoothIterations: smoothIterations,
           smoothFactor: smoothFactor,
           views: viewConfigs,
+          preprocessedViews: processedSilhouettes,
           topologyMode: carverTopologyMode,
           snapToPlanes: flattenPlanarFaces,
           planarAngleToleranceDeg: planarAngleTol,
           decimationRatio: topologyDecimationRatio,
-          featureAngleDeg: featureAngleDeg
+          featureAngleDeg: featureAngleDeg,
+          roundness: roundness,
+          cushionInflation: cushionInflation,
+          edgeFilletRadius: roundness * 0.25,
+          subdivisionLevel: subdivisionLevel
         });
-        lastRawMeshDataRef.current = meshData;
+
+        if (newMeshData && newMeshData.vertices.length > 0) {
+          meshData = newMeshData;
+          lastRawMeshDataRef.current = newMeshData;
+        } else if (lastRawMeshDataRef.current && lastRawMeshDataRef.current.vertices.length > 0) {
+          setStatusMsg('⚠️ El tallado actual produjo 0 vértices. Se conservó el modelo previo para evitar que desaparezca.');
+          meshData = lastRawMeshDataRef.current;
+        } else {
+          meshData = newMeshData;
+          lastRawMeshDataRef.current = newMeshData;
+        }
       }
 
       if (meshData && sceneRef.current) {
@@ -2109,20 +2721,21 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         // Determinar modo de mapeo UV y material a previsualizar
         const isAtlasActive = applyPBRMaterialToCarve && textureTargetMode === 'atlas' && !!atlasPBRMaterial;
         const activeViewGenerated = applyPBRMaterialToCarve && textureTargetMode === 'view'
-          ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab])
+          ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab] || generatedPBRMaterials.front || generatedPBRMaterials.back || generatedPBRMaterials.side || generatedPBRMaterials.top)
           : null;
 
         const boundsMap = {
           front: processedSilhouettes.front?.boundsNormalized,
           top: processedSilhouettes.top?.boundsNormalized,
-          side: processedSilhouettes.side?.boundsNormalized
+          side: processedSilhouettes.side?.boundsNormalized,
+          back: processedSilhouettes.back?.boundsNormalized
         };
 
         let uvMesh;
         if (isAtlasActive) {
           uvMesh = generateMultiViewAtlasUVs(
             meshData,
-            atlasPBRResult?.activeViews || ['side', 'top', 'front'],
+            atlasPBRResult?.activeViews || ['side', 'top', 'front', 'back'],
             dimensions,
             viewConfigs,
             boundsMap
@@ -2282,7 +2895,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     carverTopologyMode,
     topologyDecimationRatio,
     featureAngleDeg,
-    showWireframe
+    showWireframe,
+    roundness,
+    cushionInflation,
+    subdivisionLevel
   ]);
 
   // Actualización reactiva instantánea de coordenadas UV y materiales cuando se mueven los sliders o cambian ajustes de textura
@@ -2291,9 +2907,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     updateUVsOnly();
   }, [
     isOpen,
-    viewConfigs.front.texOffsetX, viewConfigs.front.texOffsetY, viewConfigs.front.texScaleX, viewConfigs.front.texScaleY, viewConfigs.front.texFlipH, viewConfigs.front.texFlipV, viewConfigs.front.texMirrorOpposite, viewConfigs.front.invertNormalY,
-    viewConfigs.top.texOffsetX, viewConfigs.top.texOffsetY, viewConfigs.top.texScaleX, viewConfigs.top.texScaleY, viewConfigs.top.texFlipH, viewConfigs.top.texFlipV, viewConfigs.top.texMirrorOpposite, viewConfigs.top.invertNormalY,
-    viewConfigs.side.texOffsetX, viewConfigs.side.texOffsetY, viewConfigs.side.texScaleX, viewConfigs.side.texScaleY, viewConfigs.side.texFlipH, viewConfigs.side.texFlipV, viewConfigs.side.texMirrorOpposite, viewConfigs.side.invertNormalY,
+    viewConfigs.front.texOffsetX, viewConfigs.front.texOffsetY, viewConfigs.front.texScaleX, viewConfigs.front.texScaleY, viewConfigs.front.texFlipH, viewConfigs.front.texFlipV, viewConfigs.front.texMirrorOpposite, viewConfigs.front.texProjectBothSides, viewConfigs.front.invertNormalY,
+    viewConfigs.top.texOffsetX, viewConfigs.top.texOffsetY, viewConfigs.top.texScaleX, viewConfigs.top.texScaleY, viewConfigs.top.texFlipH, viewConfigs.top.texFlipV, viewConfigs.top.texMirrorOpposite, viewConfigs.top.texProjectBothSides, viewConfigs.top.invertNormalY,
+    viewConfigs.side.texOffsetX, viewConfigs.side.texOffsetY, viewConfigs.side.texScaleX, viewConfigs.side.texScaleY, viewConfigs.side.texFlipH, viewConfigs.side.texFlipV, viewConfigs.side.texMirrorOpposite, viewConfigs.side.texProjectBothSides, viewConfigs.side.invertNormalY,
+    viewConfigs.back.texOffsetX, viewConfigs.back.texOffsetY, viewConfigs.back.texScaleX, viewConfigs.back.texScaleY, viewConfigs.back.texFlipH, viewConfigs.back.texFlipV, viewConfigs.back.texMirrorOpposite, viewConfigs.back.texProjectBothSides, viewConfigs.back.invertNormalY,
     generatedPBRMaterials,
     selectedPBRViewKey,
     applyPBRMaterialToCarve,
@@ -2304,14 +2921,14 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   ]);
 
   // ── Generar Material y Mapas PBR para una Vista Individual ──
-  const handleGeneratePBRFromBlueprint = async (viewKey: 'front' | 'top' | 'side') => {
+  const handleGeneratePBRFromBlueprint = async (viewKey: BlueprintViewKey) => {
     const cfg = viewConfigs[viewKey];
     if (!cfg.url) {
       setStatusMsg('Carga primero una imagen en esta vista para generar los mapas PBR');
       return;
     }
     setIsGeneratingPBR(true);
-    const viewName = viewKey === 'front' ? 'Frontal' : viewKey === 'top' ? 'Superior' : 'Lateral';
+    const viewName = viewKey === 'front' ? 'Frontal' : viewKey === 'top' ? 'Superior' : viewKey === 'side' ? 'Lateral' : 'Trasera';
     setStatusMsg(`⚡ Extrayendo mapas Normal, Bump, Rugosidad y AO de la imagen (${viewName})...`);
 
     try {
@@ -2319,7 +2936,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       if (!vData) throw new Error('No se pudo procesar la imagen de la vista');
 
       // Mantener solo vistas que tengan imágenes actualmente cargadas
-      const loadedKeys = (['front', 'top', 'side'] as const).filter(k => !!viewConfigs[k].url);
+      const loadedKeys = (['front', 'top', 'side', 'back'] as const).filter(k => !!viewConfigs[k].url);
       const updatedViewDataMap: Partial<Record<BlueprintViewKey, ViewPBRData>> = {};
       
       for (const k of loadedKeys) {
@@ -2387,7 +3004,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         }
         setViewPBRDataMap(updatedViewDataMap);
 
-        const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048);
+        const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048, { baseMeshColor });
         if (atlasRes) {
           const atlasMat: MaterialData = {
             id: atlasRes.materialId,
@@ -2436,7 +3053,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
   // ── Generar o Re-construir el Atlas Multi-Vista PBR Directamente ──
   const handleGenerateUnifiedAtlasPBR = async () => {
-    const loadedKeys = (['front', 'top', 'side'] as const).filter(k => !!viewConfigs[k].url);
+    const loadedKeys = (['front', 'top', 'side', 'back'] as const).filter(k => !!viewConfigs[k].url);
     if (loadedKeys.length === 0) {
       setStatusMsg('Carga primero al menos 1 o más vistas con bocetos');
       return;
@@ -2455,7 +3072,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
           updatedViewDataMap[k] = vData;
           
           // También crear material individual fresco
-          const vName = k === 'front' ? 'Frontal' : k === 'top' ? 'Superior' : 'Lateral';
+          const vName = k === 'front' ? 'Frontal' : k === 'top' ? 'Superior' : k === 'side' ? 'Lateral' : 'Trasera';
           const newMatId = 'mat_pbr_' + Math.random().toString(36).substr(2, 9);
           const newMaterial: MaterialData = {
             id: newMatId,
@@ -2493,7 +3110,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
       setViewPBRDataMap(updatedViewDataMap);
 
-      const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048);
+      const atlasRes = await buildUnifiedMultiViewPBRAtlas(updatedViewDataMap, 2048, { baseMeshColor });
       if (!atlasRes) throw new Error('No se pudo generar el Atlas Multi-Vista');
 
       const atlasMat: MaterialData = {
@@ -2550,7 +3167,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   }, [dimensions]);
 
   // ── Manejo de subida de archivos ──
-  const handleFileUpload = (key: 'front' | 'top' | 'side', file: File) => {
+  const handleFileUpload = (key: BlueprintViewKey, file: File) => {
     setActiveTab(key);
     const reader = new FileReader();
     reader.onload = async e => {
@@ -2565,6 +3182,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         suggestedMode = analysis.suggestedMode;
         suggestedThresh = analysis.suggestedThreshold;
         bgColor = analysis.bgColor;
+
+        if (isAutoMeshColor) {
+          const autoColor = extractDominantObjectColor(imgData, bgColor);
+          setBaseMeshColor(autoColor);
+        }
       }
 
       // Invalidar cachés PBR y Atlas de inmediato para evitar que queden texturas del modelo anterior
@@ -2601,6 +3223,9 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
           brightness: 0,
           grayscale: false,
           sharpen: 1,
+          blur: 1,
+          simplify: 6.5,
+          cornerAngle: 75,
           denoiseIslandSize: 15,
           thinFeatureBoost: 45,
           manualControlPoints: null,
@@ -2619,15 +3244,16 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     const fUrl = refs?.front?.url ?? null;
     const tUrl = refs?.top?.url ?? null;
     const sUrl = refs?.left?.url ?? refs?.right?.url ?? null;
+    const bUrl = refs?.back?.url ?? null;
 
-    if (!fUrl && !tUrl && !sUrl) {
+    if (!fUrl && !tUrl && !sUrl && !bUrl) {
       setStatusMsg('No se encontraron imágenes de referencia cargadas en los visores. Sube tus imágenes con "Subir Boceto".');
       return;
     }
 
     // Invalidar cachés PBR y Atlas al importar nuevas referencias
     setViewPBRDataMap({});
-    setGeneratedPBRMaterials({ front: null, top: null, side: null });
+    setGeneratedPBRMaterials({ front: null, top: null, side: null, back: null });
     setAtlasPBRResult(null);
     setAtlasPBRMaterial(null);
     lastRawMeshDataRef.current = null;
@@ -2635,13 +3261,14 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setViewConfigs(prev => ({
       front: { ...prev.front, url: fUrl || prev.front.url, manualControlPoints: null },
       top:   { ...prev.top, url: tUrl || prev.top.url, manualControlPoints: null },
-      side:  { ...prev.side, url: sUrl || prev.side.url, manualControlPoints: null }
+      side:  { ...prev.side, url: sUrl || prev.side.url, manualControlPoints: null },
+      back:  { ...prev.back, url: bUrl || prev.back.url, manualControlPoints: null }
     }));
     setStatusMsg('✓ Referencias importadas desde los visores 3D');
   };
 
   // ── Modificar Escala Horizontal/Vertical con soporte de bloqueo de proporción ──
-  const handleScaleChange = (key: 'front' | 'top' | 'side', axis: 'x' | 'y' | 'uniform', value: number) => {
+  const handleScaleChange = (key: BlueprintViewKey, axis: 'x' | 'y' | 'uniform', value: number) => {
     setViewConfigs(prev => {
       const current = prev[key];
       if (axis === 'uniform') {
@@ -2659,7 +3286,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   };
 
   // ── Restablecer Escala y Desplazamiento ──
-  const handleResetScale = (key: 'front' | 'top' | 'side') => {
+  const handleResetScale = (key: BlueprintViewKey) => {
     setViewConfigs(prev => ({
       ...prev,
       [key]: {
@@ -2726,7 +3353,332 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     }
   };
 
-  // ── Generar y Añadir a la Escena ──
+  // ── Importar Modelo 3D Externo (.glb, .gltf, .obj) con Texturas y UVs ──
+  const handleImport3DFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== 'glb' && ext !== 'gltf' && ext !== 'obj') {
+      setStatusMsg('Formato no soportado. Usa .glb, .gltf o .obj');
+      return;
+    }
+
+    setStatusMsg(`Importando modelo 3D: ${file.name}...`);
+    setIsGenerating(true);
+
+    try {
+      let object3D: THREE.Object3D;
+
+      if (ext === 'obj') {
+        const text = await file.text();
+        const objLoader = new OBJLoader();
+        object3D = objLoader.parse(text);
+      } else {
+        const arrayBuffer = await file.arrayBuffer();
+        const gltfLoader = new GLTFLoader();
+        const dracoLoader = new DRACOLoader();
+        dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+        gltfLoader.setDRACOLoader(dracoLoader);
+
+        const gltf = await new Promise<any>((resolve, reject) => {
+          gltfLoader.parse(arrayBuffer, '', resolve, reject);
+        });
+        object3D = gltf.scene || gltf.scenes[0];
+      }
+
+      // Centrar y calcular bounding box
+      const box = new THREE.Box3().setFromObject(object3D);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+
+      // Normalizar dimensiones
+      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+      const targetScale = 2.0 / maxDim;
+      object3D.scale.setScalar(targetScale);
+      object3D.position.sub(center.multiplyScalar(targetScale));
+      // Base al suelo (y = 0)
+      const rebox = new THREE.Box3().setFromObject(object3D);
+      object3D.position.y += -rebox.min.y;
+
+      // Extraer materiales y texturas PBR
+      const extractedMaterials = extractPBRMaterialsFromObject3D(object3D, file.name.replace(/\.[^/.]+$/, ''));
+      const primaryMat = extractedMaterials[0] || null;
+
+      // Extraer geometría combinada para UVs y estadísticas
+      let primaryUVs: Float32Array | null = null;
+      let primaryIndices: Uint16Array | Uint32Array | null = null;
+      let totalVertices = 0;
+      let totalTriangles = 0;
+
+      object3D.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const m = child as THREE.Mesh;
+          const pos = m.geometry.attributes.position;
+          if (pos) totalVertices += pos.count;
+          const ind = m.geometry.index;
+          if (ind) totalTriangles += ind.count / 3;
+          else if (pos) totalTriangles += pos.count / 3;
+
+          const uv = m.geometry.attributes.uv;
+          if (uv && !primaryUVs) {
+            primaryUVs = uv.array as Float32Array;
+            if (ind) primaryIndices = ind.array as any;
+          }
+        }
+      });
+
+      // Actualizar dimensiones
+      const newDims: V3 = [
+        Math.max(0.2, parseFloat((size.x * targetScale).toFixed(2))),
+        Math.max(0.2, parseFloat((size.y * targetScale).toFixed(2))),
+        Math.max(0.2, parseFloat((size.z * targetScale).toFixed(2))),
+      ];
+      setDimensions(newDims);
+
+      const imported = {
+        fileName: file.name,
+        object3D,
+        primaryTextureUrl: primaryMat?.map || null,
+        normalMapUrl: primaryMat?.normalMap || null,
+        roughnessMapUrl: primaryMat?.roughnessMap || null,
+        metalnessMapUrl: primaryMat?.metalnessMap || null,
+        materials: extractedMaterials,
+        vertexCount: totalVertices,
+        triangleCount: Math.round(totalTriangles),
+        uvCoords: primaryUVs,
+        indices: primaryIndices
+      };
+      setImported3DData(imported);
+
+      // Si el modelo tiene textura, asignarla al atlas y activar visualización
+      if (primaryMat?.map) {
+        const atlasRes: MultiViewAtlasResult = {
+          materialId: primaryMat.id,
+          materialName: primaryMat.name,
+          albedoAtlasUrl: primaryMat.map,
+          normalAtlasUrl: primaryMat.normalMap || '',
+          displacementAtlasUrl: '',
+          roughnessAtlasUrl: primaryMat.roughnessMap || '',
+          metalnessAtlasUrl: primaryMat.metalnessMap || '',
+          aoAtlasUrl: primaryMat.aoMap || '',
+          activeViews: ['front', 'top', 'side', 'back']
+        };
+        setAtlasPBRResult(atlasRes);
+        setAtlasPBRMaterial(primaryMat);
+        setTextureTargetMode('atlas');
+        setApplyPBRMaterialToCarve(true);
+      }
+
+      // Mostrar en visor 3D
+      if (sceneRef.current) {
+        if (previewMeshRef.current) {
+          sceneRef.current.remove(previewMeshRef.current);
+          previewMeshRef.current = null;
+        }
+        sceneRef.current.add(object3D);
+        previewMeshRef.current = object3D as any;
+      }
+
+      setPreviewStats({ vertices: totalVertices, triangles: Math.round(totalTriangles) });
+      setStatusMsg(`✓ Modelo 3D importado: ${file.name} (${totalVertices} vértices, ${Math.round(totalTriangles)} triángulos)`);
+    } catch (err) {
+      console.error('Error importando modelo 3D:', err);
+      setStatusMsg(`Error al importar modelo 3D: ${(err as any).message || 'Archivo inválido'}`);
+    } finally {
+      setIsGenerating(false);
+      if (import3DFileInputRef.current) import3DFileInputRef.current.value = '';
+    }
+  };
+
+  // ── Capturar Vistas Ortográficas de la Figura 3D Hacia los Bocetos ──
+  const handleSnapshotImported3DToBlueprints = async () => {
+    if (!imported3DData?.object3D) {
+      setStatusMsg('Primero importa un modelo 3D con el botón "Importar 3D"');
+      return;
+    }
+
+    setStatusMsg('Renderizando vistas ortográficas (Frontal, Superior, Lateral, Trasera)...');
+    try {
+      const offscreenRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+      offscreenRenderer.setSize(512, 512);
+      offscreenRenderer.setClearColor(0xffffff, 1);
+
+      const offscreenScene = new THREE.Scene();
+      const cloneObj = imported3DData.object3D.clone(true);
+      offscreenScene.add(cloneObj);
+
+      const ambLight = new THREE.AmbientLight(0xffffff, 1.4);
+      offscreenScene.add(ambLight);
+      const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight1.position.set(2, 4, 3);
+      offscreenScene.add(dirLight1);
+
+      const box = new THREE.Box3().setFromObject(cloneObj);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+      const camHalf = (maxDim * 1.12) / 2;
+
+      const captureView = (camPos: THREE.Vector3, lookAt: THREE.Vector3, up: THREE.Vector3): string => {
+        const cam = new THREE.OrthographicCamera(-camHalf, camHalf, camHalf, -camHalf, 0.01, 100);
+        cam.position.copy(camPos);
+        cam.up.copy(up);
+        cam.lookAt(lookAt);
+        cam.updateProjectionMatrix();
+        offscreenRenderer.render(offscreenScene, cam);
+        return offscreenRenderer.domElement.toDataURL('image/png');
+      };
+
+      const dist = maxDim * 2.5;
+      // Frontal (mirando hacia -Z)
+      const frontUrl = captureView(new THREE.Vector3(center.x, center.y, center.z + dist), center, new THREE.Vector3(0, 1, 0));
+      // Trasera (mirando hacia +Z)
+      const backUrl = captureView(new THREE.Vector3(center.x, center.y, center.z - dist), center, new THREE.Vector3(0, 1, 0));
+      // Lateral (mirando desde -X hacia +X)
+      const sideUrl = captureView(new THREE.Vector3(center.x - dist, center.y, center.z), center, new THREE.Vector3(0, 1, 0));
+      // Superior (mirando desde +Y hacia abajo; la delantera +Z hacia arriba de la imagen)
+      const topUrl = captureView(new THREE.Vector3(center.x, center.y + dist, center.z), center, new THREE.Vector3(0, 0, 1));
+
+      offscreenRenderer.dispose();
+
+      setViewConfigs(prev => ({
+        front: { ...prev.front, url: frontUrl, enabled: true },
+        top:   { ...prev.top,   url: topUrl,   enabled: true },
+        side:  { ...prev.side,  url: sideUrl,  enabled: true },
+        back:  { ...prev.back,  url: backUrl,  enabled: true },
+      }));
+
+      setStatusMsg('✓ Vistas ortográficas capturadas directamente en las 4 ranuras de bocetos');
+    } catch (err) {
+      console.error('Error capturando vistas ortográficas:', err);
+      setStatusMsg('Error al capturar vistas');
+    }
+  };
+
+  // ── Dibujar Inspección de Mapa UV en Canvas ──
+  const drawUVMapInspection = () => {
+    const canvas = uvCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // Fondo ajedrezado
+    ctx.fillStyle = '#18181b';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#27272a';
+    const tileSize = 32;
+    for (let y = 0; y < H; y += tileSize) {
+      for (let x = 0; x < W; x += tileSize) {
+        if (((x / tileSize) + (y / tileSize)) % 2 === 0) {
+          ctx.fillRect(x, y, tileSize, tileSize);
+        }
+      }
+    }
+
+    let texUrl: string | null = null;
+    if (activeTextureChannel === 'albedo') {
+      texUrl = imported3DData?.primaryTextureUrl || atlasPBRResult?.albedoAtlasUrl || null;
+    } else if (activeTextureChannel === 'normal') {
+      texUrl = imported3DData?.normalMapUrl || atlasPBRResult?.normalAtlasUrl || null;
+    } else if (activeTextureChannel === 'roughness') {
+      texUrl = imported3DData?.roughnessMapUrl || atlasPBRResult?.roughnessAtlasUrl || null;
+    } else if (activeTextureChannel === 'metalness') {
+      texUrl = imported3DData?.metalnessMapUrl || atlasPBRResult?.metalnessAtlasUrl || null;
+    }
+
+    const renderUVLines = () => {
+      if (!showUVWireframe) return;
+      const uvs = imported3DData?.uvCoords;
+      const indices = imported3DData?.indices;
+
+      ctx.save();
+      ctx.strokeStyle = uvWireframeColor;
+      ctx.lineWidth = 1;
+      ctx.globalAlpha = uvWireframeOpacity;
+
+      if (uvs && uvs.length >= 6) {
+        ctx.beginPath();
+        if (indices && indices.length >= 3) {
+          for (let i = 0; i < indices.length; i += 3) {
+            const i0 = indices[i];
+            const i1 = indices[i + 1];
+            const i2 = indices[i + 2];
+            const u0 = uvs[i0 * 2] * W;
+            const v0 = (1 - uvs[i0 * 2 + 1]) * H;
+            const u1 = uvs[i1 * 2] * W;
+            const v1 = (1 - uvs[i1 * 2 + 1]) * H;
+            const u2 = uvs[i2 * 2] * W;
+            const v2 = (1 - uvs[i2 * 2 + 1]) * H;
+
+            ctx.moveTo(u0, v0);
+            ctx.lineTo(u1, v1);
+            ctx.lineTo(u2, v2);
+            ctx.closePath();
+          }
+        } else {
+          for (let i = 0; i < uvs.length; i += 6) {
+            const u0 = uvs[i] * W;
+            const v0 = (1 - uvs[i + 1]) * H;
+            const u1 = uvs[i + 2] * W;
+            const v1 = (1 - uvs[i + 3]) * H;
+            const u2 = uvs[i + 4] * W;
+            const v2 = (1 - uvs[i + 5]) * H;
+
+            ctx.moveTo(u0, v0);
+            ctx.lineTo(u1, v1);
+            ctx.lineTo(u2, v2);
+            ctx.closePath();
+          }
+        }
+        ctx.stroke();
+      } else if (lastRawMeshDataRef.current?.faces) {
+        ctx.beginPath();
+        lastRawMeshDataRef.current.faces.forEach(f => {
+          if (f.uvs && f.uvs.length >= 3) {
+            const p0 = [f.uvs[0][0] * W, (1 - f.uvs[0][1]) * H];
+            ctx.moveTo(p0[0], p0[1]);
+            for (let k = 1; k < f.uvs.length; k++) {
+              ctx.lineTo(f.uvs[k][0] * W, (1 - f.uvs[k][1]) * H);
+            }
+            ctx.closePath();
+          }
+        });
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    if (texUrl) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, W, H);
+        renderUVLines();
+      };
+      img.onerror = () => {
+        renderUVLines();
+      };
+      img.src = texUrl;
+    } else {
+      renderUVLines();
+    }
+  };
+
+  useEffect(() => {
+    if (showUVInspectorModal) {
+      const timer = setTimeout(() => {
+        drawUVMapInspection();
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [showUVInspectorModal, showUVWireframe, uvWireframeColor, uvWireframeOpacity, activeTextureChannel, imported3DData, atlasPBRResult]);
   const handleCommitToScene = async () => {
     setIsGenerating(true);
     setStatusMsg('Construyendo geometría final...');
@@ -2753,13 +3705,14 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
 
       const isAtlasActive = applyPBRMaterialToCarve && textureTargetMode === 'atlas' && !!atlasPBRMaterial;
       const activeViewGenerated = applyPBRMaterialToCarve && textureTargetMode === 'view'
-        ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab] || generatedPBRMaterials.front || generatedPBRMaterials.side || generatedPBRMaterials.top)
+        ? (generatedPBRMaterials[selectedPBRViewKey] || generatedPBRMaterials[activeTab] || generatedPBRMaterials.front || generatedPBRMaterials.back || generatedPBRMaterials.side || generatedPBRMaterials.top)
         : null;
 
       const boundsMap = {
         front: processedSilhouettes.front?.boundsNormalized,
         top: processedSilhouettes.top?.boundsNormalized,
-        side: processedSilhouettes.side?.boundsNormalized
+        side: processedSilhouettes.side?.boundsNormalized,
+        back: processedSilhouettes.back?.boundsNormalized
       };
 
       let uvMesh;
@@ -2769,7 +3722,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       if (isAtlasActive && atlasPBRMaterial) {
         uvMesh = generateMultiViewAtlasUVs(
           { vertices: result.vertices, faces: result.faces },
-          atlasPBRResult?.activeViews || ['side', 'top', 'front'],
+          atlasPBRResult?.activeViews || ['side', 'top', 'front', 'back'],
           dimensions,
           viewConfigs,
           boundsMap
@@ -2853,7 +3806,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, historyIndex, historyStack, selectedPoint, multiSelectedPoints, isEditPointsMode, activeTab]);
 
-  const loadedCount = (viewConfigs.front.url ? 1 : 0) + (viewConfigs.top.url ? 1 : 0) + (viewConfigs.side.url ? 1 : 0);
+  const loadedCount = (viewConfigs.front.url ? 1 : 0) + (viewConfigs.top.url ? 1 : 0) + (viewConfigs.side.url ? 1 : 0) + (viewConfigs.back.url ? 1 : 0);
 
   if (!isOpen) return null;
 
@@ -2919,11 +3872,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
               <button
                 onClick={() => setShowPresetMenu(prev => !prev)}
                 className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-indigo-950/80 hover:bg-indigo-900 text-indigo-200 hover:text-white text-xs font-bold border border-indigo-700/80 transition-all cursor-pointer shadow-sm shadow-indigo-900/30"
-                title="Carga modelos de prueba preconfigurados (Cubo, Cilindro, Rampa, Esfera, Vehículo) para calibrar el motor 3D"
+                title="Carga el modelo de prueba preconfigurado (Cilindro Mecánico) para calibrar el motor 3D"
               >
                 <FlaskConical size={13} className="text-indigo-400 animate-pulse" />
                 <span>Banco de Pruebas</span>
-                <span className="text-[8px] bg-indigo-800 px-1 py-0.2 rounded text-indigo-200 font-mono">Presets</span>
+                <span className="text-[8px] bg-indigo-800 px-1 py-0.2 rounded text-indigo-200 font-mono">Cilindro</span>
               </button>
 
               {/* Menú Desplegable de Presets */}
@@ -2935,7 +3888,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                   </div>
                   {(Object.keys(GEOMETRIC_PRESETS) as (keyof typeof GEOMETRIC_PRESETS)[]).map(key => {
                     const preset = GEOMETRIC_PRESETS[key];
-                    const icon = key === 'CUBO' ? '📦' : key === 'CILINDRO' ? '⚙️' : key === 'ESFERA' ? '🌐' : key === 'RAMPA' ? '🔺' : '🚗';
+                    const icon = '⚙️';
                     return (
                       <button
                         key={key}
@@ -2956,6 +3909,50 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                 </div>
               )}
             </div>
+
+            <div className="w-[1px] h-5 bg-zinc-800 mx-0.5 hidden sm:block" />
+
+            {/* INPUT OCULTO PARA IMPORTAR 3D */}
+            <input
+              ref={import3DFileInputRef}
+              type="file"
+              accept=".glb,.gltf,.obj"
+              className="hidden"
+              onChange={handleImport3DFile}
+            />
+
+            {/* BOTÓN IMPORTAR 3D (.GLB / .GLTF / .OBJ) */}
+            <button
+              onClick={() => import3DFileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-950/80 hover:bg-emerald-900 text-emerald-200 hover:text-white text-xs font-bold border border-emerald-700/80 transition-all cursor-pointer shadow-sm shadow-emerald-900/30"
+              title="Importar modelo 3D (.glb, .gltf u .obj) con sus texturas, materiales y coordenadas UV para visualizarlos en el visor 3D y en el atlas"
+            >
+              <Package size={13} className="text-emerald-400" />
+              <span>Importar 3D</span>
+              <span className="text-[8px] bg-emerald-800 px-1 py-0.2 rounded text-emerald-200 font-mono">GLB/OBJ</span>
+            </button>
+
+            {/* BOTÓN MAPA UV & INSPECCIÓN */}
+            <button
+              onClick={() => setShowUVInspectorModal(true)}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 hover:text-white text-xs font-bold border border-cyan-700/80 transition-all cursor-pointer shadow-sm shadow-cyan-900/30"
+              title="Abre el visualizador del mapa de texturas con el trazado UV (wireframe) desplegado sobre la textura"
+            >
+              <MapIcon size={13} className="text-cyan-400" />
+              <span>Mapa UV</span>
+            </button>
+
+            {/* BOTÓN CAPTURAR VISTAS A BOCETOS (SI HAY MODELO 3D IMPORTADO) */}
+            {imported3DData && (
+              <button
+                onClick={handleSnapshotImported3DToBlueprints}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-purple-200 hover:text-white text-xs font-bold border border-purple-700/80 transition-all cursor-pointer shadow-sm shadow-purple-900/30"
+                title="Capturar automáticamente las 4 vistas ortográficas (Frontal, Top, Lateral, Back) del modelo 3D importado hacia las ranuras de bocetos"
+              >
+                <Camera size={13} className="text-purple-400" />
+                <span className="hidden sm:inline">A Bocetos</span>
+              </button>
+            )}
 
             <div className="w-[1px] h-5 bg-zinc-800 mx-0.5 hidden sm:block" />
 
@@ -2991,33 +3988,19 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
               <span className="hidden lg:inline">Comparador 3 Vistas</span>
             </button>
 
-            {/* Estudio de Mapeo UV (3D Coat / Blender Standard) */}
-            <button
-              onClick={handleOpenUVStudio}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-lg text-xs font-semibold border transition-colors ${
-                showUVStudio
-                  ? 'bg-amber-600 text-white border-amber-400 shadow'
-                  : 'bg-zinc-800 hover:bg-zinc-700 text-amber-300 border-amber-900/60 cursor-pointer'
-              }`}
-              title="Abre el Estudio de Mapeo y Despliegue UV 2D / 3D estilo 3D-Coat con proyección, relax, empaquetado y texturas superpuestas"
-            >
-              <Grid size={13} className="text-amber-400" />
-              <span className="hidden sm:inline">Mapeo UV</span>
-            </button>
-
-            {/* Sincronizar Proporciones Multi-Vista (Alto/Ancho/Profundidad) */}
+            {/* Alinear y Centrar Automáticamente Multi-Vista (Alto/Ancho/Profundidad/Suelo) */}
             <button
               onClick={handleAutoEqualizeProportionsAcrossViews}
               disabled={loadedCount < 2}
-              className={`flex items-center gap-1 px-1.5 sm:px-2 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-bold border transition-all ${
                 loadedCount >= 2
-                  ? 'bg-amber-950/60 hover:bg-amber-900/80 text-amber-300 border-amber-600/70 shadow-sm cursor-pointer'
+                  ? 'bg-amber-950/80 hover:bg-amber-900 text-amber-200 border-amber-500/80 shadow-sm cursor-pointer'
                   : 'bg-zinc-900/50 text-zinc-600 border-zinc-800/80 cursor-not-allowed'
               }`}
-              title="Sincroniza la escala y altura/anchura de las siluetas entre frontal, lateral y superior para que coincidan en simetría perfecta 3D"
+              title="Alinea a ras de suelo, centra en eje X e iguala escalas automáticamente entre todas las vistas para una óptima reconstrucción y texturizado 3D"
             >
               <Scale size={13} className="text-amber-400" />
-              <span className="hidden xl:inline">Sincronizar Proporciones</span>
+              <span>Alinear & Centrar Vistas</span>
             </button>
 
             {/* Guardar Proyecto */}
@@ -3095,16 +4078,16 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
             <div className="space-y-1 flex-shrink-0">
               <div className="flex items-center justify-between px-0.5">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Vistas Ortográficas</span>
-                <span className="text-[9px] text-indigo-400 font-semibold">{loadedCount} de 3 Cargadas</span>
+                <span className="text-[9px] text-indigo-400 font-semibold">{loadedCount} de 4 Cargadas</span>
               </div>
 
-              <div className="grid grid-cols-3 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
-                {(['front', 'top', 'side'] as const).map(key => {
+              <div className="grid grid-cols-4 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
+                {(['front', 'top', 'side', 'back'] as const).map(key => {
                   const hasImg = !!viewConfigs[key].url;
                   const imgUrl = viewConfigs[key].url;
-                  const label = key === 'front' ? '1. Frontal' : key === 'top' ? '2. Superior' : '3. Lateral';
-                  const sub = key === 'front' ? 'Alzado (XY)' : key === 'top' ? 'Planta (XZ)' : 'Perfil (ZY)';
-                  const color = key === 'front' ? 'text-red-400' : key === 'top' ? 'text-green-400' : 'text-cyan-400';
+                  const label = key === 'front' ? '1. Frontal' : key === 'top' ? '2. Superior' : key === 'side' ? '3. Lateral' : '4. Trasera';
+                  const sub = key === 'front' ? 'Alzado (XY)' : key === 'top' ? 'Planta (XZ)' : key === 'side' ? 'Perfil (ZY)' : 'Posterior (-XY)';
+                  const color = key === 'front' ? 'text-red-400' : key === 'top' ? 'text-green-400' : key === 'side' ? 'text-cyan-400' : 'text-purple-400';
                   const isActive = activeTab === key;
                   return (
                     <button
@@ -3147,11 +4130,17 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
             </div>
 
             {/* Panel Activo de la Vista Seleccionada */}
-            {(['front', 'top', 'side'] as const).map(key => {
+            {(['front', 'top', 'side', 'back'] as const).map(key => {
               if (activeTab !== key) return null;
               const cfg = viewConfigs[key];
-              const viewName = key === 'front' ? 'Vista Frontal (Ejes X / Y)' : key === 'top' ? 'Vista Superior (Ejes X / Z)' : 'Vista Lateral (Ejes Z / Y)';
-              const canvasRef = key === 'front' ? canvasFrontRef : key === 'top' ? canvasTopRef : canvasSideRef;
+              const viewName = key === 'front' 
+                ? 'Vista Frontal (Ejes X / Y)' 
+                : key === 'top' 
+                ? 'Vista Superior (Ejes X / Z)' 
+                : key === 'side' 
+                ? 'Vista Lateral (Ejes Z / Y)' 
+                : 'Vista Trasera / Posterior (Ejes -X / Y)';
+              const canvasRef = key === 'front' ? canvasFrontRef : key === 'top' ? canvasTopRef : key === 'side' ? canvasSideRef : canvasBackRef;
               const silData = processedSilhouettes[key];
               const transform = viewTransforms[key];
               const hasManualPoints = !!(cfg.manualControlPoints && cfg.manualControlPoints.length > 0);
@@ -3227,6 +4216,43 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                             <Wand2 size={10} className="text-indigo-400" />
                             <span>Auto-Calibrar</span>
                           </button>
+
+                          <button
+                            onClick={() => {
+                              const nextMode = !isDepthZoneMode;
+                              setIsDepthZoneMode(nextMode);
+                              if (nextMode) {
+                                setSubSection('depth');
+                                if (isEditPointsMode) setIsEditPointsMode(false);
+                                if (isHolePickerActive) setIsHolePickerActive(false);
+                              }
+                            }}
+                            className={`px-2 py-1 rounded border text-[9.5px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm ${
+                              isDepthZoneMode
+                                ? 'bg-purple-600 border-purple-400 text-white shadow-purple-500/30 ring-1 ring-purple-300'
+                                : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-300'
+                            }`}
+                            title="Definir alturas diferenciadas o cavidades (ej. el hueco del asiento de un sofá entre los brazos)"
+                          >
+                            <Layers size={11} className={isDepthZoneMode ? 'text-white' : 'text-purple-400'} />
+                            <span>{isDepthZoneMode ? 'Modo Alturas / Asiento' : 'Alturas / Asiento'}</span>
+                            {cfg.depthZones && cfg.depthZones.length > 0 && (
+                              <span className="ml-0.5 px-1 py-0.2 rounded-full bg-purple-900 text-purple-200 text-[8px] font-mono">
+                                {cfg.depthZones.length}
+                              </span>
+                            )}
+                          </button>
+
+                          {isDepthZoneMode && (
+                            <button
+                              onClick={() => handleAutoDetectDepthZones(key)}
+                              className="px-2 py-1 rounded bg-gradient-to-r from-purple-900/90 to-indigo-900/90 hover:from-purple-800 hover:to-indigo-800 border border-purple-500/70 text-purple-100 text-[9.5px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-sm animate-pulse"
+                              title="Auto-detectar el hueco del asiento entre los dos brazos analizando el boceto"
+                            >
+                              <Sparkles size={10} className="text-amber-300" />
+                              <span>🪄 Auto-Detectar Asiento</span>
+                            </button>
+                          )}
                         </>
                       )}
                       <label className="cursor-pointer px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold flex items-center gap-1 shadow-sm transition-colors">
@@ -3318,7 +4344,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                           <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 pt-0.5">
                             {(Object.keys(GEOMETRIC_PRESETS) as (keyof typeof GEOMETRIC_PRESETS)[]).map(pKey => {
                               const preset = GEOMETRIC_PRESETS[pKey];
-                              const icon = pKey === 'CUBO' ? '📦' : pKey === 'CILINDRO' ? '⚙️' : pKey === 'ESFERA' ? '🌐' : pKey === 'RAMPA' ? '🔺' : '🚗';
+                              const icon = '⚙️';
                               return (
                                 <button
                                   key={pKey}
@@ -3562,7 +4588,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                   {/* Sub-Pestañas de Configuración de la Vista */}
                   {cfg.url && (
                     <div className="space-y-2 pt-1 border-t border-zinc-800/80 flex-shrink-0">
-                      <div className="grid grid-cols-6 gap-0.5 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800 text-[9px] font-bold">
+                      <div className="grid grid-cols-7 gap-0.5 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800 text-[9px] font-bold">
                         <button
                           onClick={() => setSubSection('detection')}
                           className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 ${
@@ -3582,6 +4608,24 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                         >
                           <Scale size={9} />
                           <span className="truncate">Escala</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSubSection('depth');
+                            setIsDepthZoneMode(true);
+                            if (isEditPointsMode) setIsEditPointsMode(false);
+                            if (isHolePickerActive) setIsHolePickerActive(false);
+                          }}
+                          className={`py-0.5 px-0.5 rounded transition-colors cursor-pointer flex items-center justify-center gap-0.5 relative ${
+                            subSection === 'depth' ? 'bg-purple-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                          title="Alturas interiores, hueco de asiento y cavidades"
+                        >
+                          <Layers size={9} className={subSection === 'depth' ? 'text-white' : 'text-purple-400'} />
+                          <span className="truncate">Alturas</span>
+                          {cfg.depthZones && cfg.depthZones.length > 0 && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-purple-400 absolute top-0.5 right-0.5 ring-1 ring-black" />
+                          )}
                         </button>
                         <button
                           onClick={() => setSubSection('align')}
@@ -3681,10 +4725,343 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                               value={cfg.threshold}
                               onChange={e => {
                                 const val = parseInt(e.target.value);
-                                setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], threshold: val } }));
+                                setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], threshold: val, manualControlPoints: null } }));
                               }}
                               className="w-full h-1.5 accent-indigo-500 bg-zinc-800 rounded cursor-pointer"
                             />
+                          </div>
+
+                          {/* Aviso de puntos manuales activos si los hubiera */}
+                          {cfg.manualControlPoints && cfg.manualControlPoints.length > 0 && (
+                            <div className="flex items-center justify-between bg-amber-950/60 border border-amber-500/50 px-2 py-1.5 rounded-lg text-[9px] text-amber-200 shadow-sm animate-pulse">
+                              <span className="flex items-center gap-1 font-medium">
+                                📌 Hay vértices editados a mano.
+                              </span>
+                              <button
+                                onClick={() => setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], manualControlPoints: null } }))}
+                                className="px-2 py-0.5 bg-amber-500 text-zinc-950 font-bold text-[8px] rounded hover:bg-amber-400 cursor-pointer transition-colors"
+                              >
+                                🔄 Recalcular con Sliders
+                              </button>
+                            </div>
+                          )}
+
+                          {/* CONTROLES DE CONTORNO VECTORIAL: SILUETA REDONDEADA / HARD SURFACE / BÉZIER / ORTOGONAL */}
+                          <div className="bg-gradient-to-br from-indigo-950/70 via-zinc-950 to-zinc-900/90 p-2.5 rounded-lg border border-indigo-500/40 space-y-2.5 shadow-sm">
+                            <div className="flex items-center justify-between text-[9.5px]">
+                              <div className="flex items-center gap-1 font-bold text-indigo-200">
+                                <Sparkles size={11} className="text-emerald-400" />
+                                <span>Algoritmo de Trazado Vectorial</span>
+                              </div>
+                              <span className="text-[8.5px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-750 font-semibold text-emerald-300">
+                                {cfg.contourMode === 'ROUNDED_ADAPTIVE' || !cfg.contourMode
+                                  ? '⭕ Silueta Redondeada Fiel'
+                                  : cfg.contourMode === 'HARD_SURFACE_RDP'
+                                  ? '⚡ RDP Segmentos Rectos'
+                                  : cfg.contourMode === 'ORTHO_POLY'
+                                  ? '📐 Polígono Ortogonal'
+                                  : '〰️ Curvas Bézier Schneider'}
+                              </span>
+                            </div>
+
+                            {/* Selector de Modo de Trazado de 4 Modos */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 bg-zinc-900/90 p-1 rounded-md border border-zinc-800">
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    contourMode: 'ROUNDED_ADAPTIVE',
+                                    curveFidelity: 8,
+                                    roundnessSmooth: 2,
+                                    simplify: 3.5,
+                                    cornerAngle: 65,
+                                    manualControlPoints: null
+                                  }
+                                }))}
+                                className={`py-1.5 px-1 rounded text-[8px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-all ${
+                                  (cfg.contourMode ?? 'ROUNDED_ADAPTIVE') === 'ROUNDED_ADAPTIVE'
+                                    ? 'bg-emerald-500 text-zinc-950 shadow-sm font-extrabold'
+                                    : 'bg-zinc-850 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                }`}
+                                title="Sigue con máxima fidelidad arcos, cúpulas, ruedas y siluetas redondeadas."
+                              >
+                                <span>⭕ Redondeada</span>
+                                <span className="text-[7px] font-mono opacity-85">Curva Fiel</span>
+                              </button>
+
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    contourMode: 'HARD_SURFACE_RDP',
+                                    blur: 1,
+                                    simplify: 4.5,
+                                    cornerAngle: 35,
+                                    manualControlPoints: null
+                                  }
+                                }))}
+                                className={`py-1.5 px-1 rounded text-[8px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-all ${
+                                  cfg.contourMode === 'HARD_SURFACE_RDP'
+                                    ? 'bg-amber-500 text-zinc-950 shadow-sm font-extrabold'
+                                    : 'bg-zinc-850 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                }`}
+                                title="Traza exactamente segmentos rectos y esquinas afiladas para almenas y torres."
+                              >
+                                <span>🏰 Almenas</span>
+                                <span className="text-[7px] font-mono opacity-85">RDP Recto</span>
+                              </button>
+
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    contourMode: 'ORTHO_POLY',
+                                    blur: 1,
+                                    simplify: 5.0,
+                                    cornerAngle: 45,
+                                    manualControlPoints: null
+                                  }
+                                }))}
+                                className={`py-1.5 px-1 rounded text-[8px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-all ${
+                                  cfg.contourMode === 'ORTHO_POLY'
+                                    ? 'bg-cyan-500 text-zinc-950 shadow-sm font-extrabold'
+                                    : 'bg-zinc-850 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                }`}
+                                title="Aproximación poligonal ortogonal (0°, 45°, 90°) para arquitectura perfecta."
+                              >
+                                <span>📐 Ortogonal</span>
+                                <span className="text-[7px] font-mono opacity-85">Snap 90°/45°</span>
+                              </button>
+
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: {
+                                    ...prev[key],
+                                    contourMode: 'BEZIER_SMOOTH',
+                                    blur: 1,
+                                    simplify: 3.5,
+                                    cornerAngle: 75,
+                                    curveFidelity: 8,
+                                    manualControlPoints: null
+                                  }
+                                }))}
+                                className={`py-1.5 px-1 rounded text-[8px] font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-all ${
+                                  cfg.contourMode === 'BEZIER_SMOOTH'
+                                    ? 'bg-indigo-500 text-white shadow-sm font-extrabold'
+                                    : 'bg-zinc-850 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                }`}
+                                title="Curvas Bézier continuas de Schneider para personajes orgánicos."
+                              >
+                                <span>〰️ Bézier</span>
+                                <span className="text-[7px] font-mono opacity-85">Schneider</span>
+                              </button>
+                            </div>
+
+                            {/* 1. Fidelidad de Curvatura en Arcos / Silueta Redonda (curveFidelity) */}
+                            <div className="space-y-0.5 bg-emerald-950/20 p-1.5 rounded-md border border-emerald-500/20">
+                              <div className="flex items-center justify-between text-[8.5px]">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-emerald-300 font-bold">Fidelidad en Curvas / Arcos</span>
+                                  <span className="text-[7.5px] text-zinc-400 font-normal">(densidad de puntos en siluetas redondas)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-emerald-300 font-extrabold text-[9px]">{cfg.curveFidelity ?? 8}</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {[3, 6, 8, 11, 15].map(f => (
+                                      <button
+                                        key={f}
+                                        onClick={() => setViewConfigs(prev => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], curveFidelity: f, manualControlPoints: null }
+                                        }))}
+                                        className={`px-1 py-0.2 rounded text-[7.5px] font-mono cursor-pointer transition-colors ${
+                                          (cfg.curveFidelity ?? 8) === f ? 'bg-emerald-600 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                      >
+                                        {f}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="range"
+                                min={1}
+                                max={15}
+                                step={1}
+                                value={cfg.curveFidelity ?? 8}
+                                onChange={e => {
+                                  const val = parseInt(e.target.value);
+                                  setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], curveFidelity: val, manualControlPoints: null } }));
+                                }}
+                                className="w-full h-1.5 accent-emerald-400 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
+
+                            {/* 2. Suavizado Redondeado (Chaikin / Anti-pixel) */}
+                            <div className="space-y-0.5 bg-cyan-950/20 p-1.5 rounded-md border border-cyan-500/20">
+                              <div className="flex items-center justify-between text-[8.5px]">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-cyan-300 font-bold">Suavizado de Silueta</span>
+                                  <span className="text-[7.5px] text-zinc-400 font-normal">(elimina dientes de sierra del píxel)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-cyan-300 font-extrabold text-[9px]">{cfg.roundnessSmooth ?? 2}</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {[0, 1, 2, 3, 5].map(sm => (
+                                      <button
+                                        key={sm}
+                                        onClick={() => setViewConfigs(prev => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], roundnessSmooth: sm, manualControlPoints: null }
+                                        }))}
+                                        className={`px-1 py-0.2 rounded text-[7.5px] font-mono cursor-pointer transition-colors ${
+                                          (cfg.roundnessSmooth ?? 2) === sm ? 'bg-cyan-600 text-zinc-950 font-bold' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                      >
+                                        {sm}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="range"
+                                min={0}
+                                max={5}
+                                step={1}
+                                value={cfg.roundnessSmooth ?? 2}
+                                onChange={e => {
+                                  const val = parseInt(e.target.value);
+                                  setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], roundnessSmooth: val, manualControlPoints: null } }));
+                                }}
+                                className="w-full h-1.5 accent-cyan-400 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
+
+                            {/* 3. Tolerancia de Simplificación (RDP ε) */}
+                            <div className="space-y-0.5">
+                              <div className="flex items-center justify-between text-[8.5px]">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-zinc-300">Tolerancia de Simplificación</span>
+                                  <span className="text-[7.5px] text-zinc-400 font-normal">(menor = más puntos y fidelidad)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-indigo-300 font-bold">{cfg.simplify ?? 3.5}</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {[1.5, 3.5, 4.5, 6.5, 10.0].map(s => (
+                                      <button
+                                        key={s}
+                                        onClick={() => setViewConfigs(prev => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], simplify: s, manualControlPoints: null }
+                                        }))}
+                                        className={`px-1 py-0.2 rounded text-[7.5px] font-mono cursor-pointer transition-colors ${
+                                          Math.abs((cfg.simplify ?? 3.5) - s) < 0.1 ? 'bg-indigo-600 text-white font-bold' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                      >
+                                        {s}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="range"
+                                min={0.5}
+                                max={20}
+                                step={0.5}
+                                value={cfg.simplify ?? 3.5}
+                                onChange={e => {
+                                  const val = parseFloat(e.target.value);
+                                  setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], simplify: val, manualControlPoints: null } }));
+                                }}
+                                className="w-full h-1 accent-indigo-400 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
+
+                            {/* 4. Detección Esquinas Rígidas / Ángulo Umbral */}
+                            <div className="space-y-0.5">
+                              <div className="flex items-center justify-between text-[8.5px]">
+                                <div className="flex items-center gap-1">
+                                  <span className="text-zinc-300">Umbral de Esquinas Rígidas</span>
+                                  <span className="text-[7.5px] text-zinc-400 font-normal">(mayor = más curvatura continua)</span>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-amber-300 font-bold">{cfg.cornerAngle ?? 65}°</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {[35, 50, 65, 80, 95].map(deg => (
+                                      <button
+                                        key={deg}
+                                        onClick={() => setViewConfigs(prev => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], cornerAngle: deg, manualControlPoints: null }
+                                        }))}
+                                        className={`px-1 py-0.2 rounded text-[7.5px] font-mono cursor-pointer transition-colors ${
+                                          (cfg.cornerAngle ?? 65) === deg ? 'bg-amber-600 text-white font-bold' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                      >
+                                        {deg}°
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="range"
+                                min={20}
+                                max={120}
+                                step={5}
+                                value={cfg.cornerAngle ?? 65}
+                                onChange={e => {
+                                  const val = parseInt(e.target.value);
+                                  setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], cornerAngle: val, manualControlPoints: null } }));
+                                }}
+                                className="w-full h-1 accent-amber-400 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
+
+                            {/* 5. Desenfoque Previo (Filtro Piedra) */}
+                            <div className="space-y-0.5">
+                              <div className="flex items-center justify-between text-[8.5px]">
+                                <span className="text-zinc-300">Desenfoque Previo (Filtro Piedra / Textura)</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-cyan-300 font-bold">{cfg.blur ?? 1}px</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {[0, 1, 2, 4].map(b => (
+                                      <button
+                                        key={b}
+                                        onClick={() => setViewConfigs(prev => ({
+                                          ...prev,
+                                          [key]: { ...prev[key], blur: b, manualControlPoints: null }
+                                        }))}
+                                        className={`px-1 py-0.2 rounded text-[7.5px] font-mono cursor-pointer transition-colors ${
+                                          (cfg.blur ?? 1) === b ? 'bg-cyan-600 text-white font-bold' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                        }`}
+                                      >
+                                        {b}px
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="range"
+                                min={0}
+                                max={8}
+                                step={0.5}
+                                value={cfg.blur ?? 1}
+                                onChange={e => {
+                                  const val = parseFloat(e.target.value);
+                                  setViewConfigs(prev => ({ ...prev, [key]: { ...prev[key], blur: val, manualControlPoints: null } }));
+                                }}
+                                className="w-full h-1 accent-cyan-400 bg-zinc-800 rounded cursor-pointer"
+                              />
+                            </div>
                           </div>
 
                           {/* Slider de Zonas Finas y Eliminación de Ruido en 2 Columnas */}
@@ -4042,6 +5419,290 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                               </div>
                             );
                           })()}
+                        </div>
+                      )}
+
+                      {/* SUBSECCIÓN: CONTROL DE ALTURAS, ASIENTO Y CAVIDADES INTERIORES */}
+                      {subSection === 'depth' && (
+                        <div className="space-y-2 animate-in fade-in duration-150 text-[10px]">
+                          {/* Banner Explicativo con Botón de Auto-Detección Rápida */}
+                          <div className="bg-gradient-to-br from-purple-950/70 via-zinc-950 to-indigo-950/60 p-2.5 rounded-lg border border-purple-500/40 space-y-2 shadow-sm">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-1.5 font-bold text-purple-200 text-[10.5px]">
+                                  <Layers size={12} className="text-purple-400" />
+                                  <span>Alturas Diferenciadas / Asiento</span>
+                                </div>
+                                <p className="text-[9px] text-zinc-400 leading-tight">
+                                  Define zonas con menor o mayor altura en esta vista (ej. la parte central del sofá más baja que define el hueco entre los dos brazos).
+                                </p>
+                              </div>
+                              <span className="px-1.5 py-0.5 rounded bg-purple-900/60 text-purple-300 font-mono text-[8px] font-bold shrink-0 border border-purple-700/50">
+                                {cfg.depthZones?.length || 0} {cfg.depthZones?.length === 1 ? 'Zona' : 'Zonas'}
+                              </span>
+                            </div>
+
+                            {/* Botones de Acción: Auto-Detectar y Añadir Manual */}
+                            <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                              <button
+                                onClick={() => handleAutoDetectDepthZones(key)}
+                                className="w-full py-1.5 px-2 rounded-md bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-[9.5px] flex items-center justify-center gap-1.5 shadow-md shadow-purple-900/30 transition-all cursor-pointer ring-1 ring-purple-300/40 active:scale-95"
+                                title="Analiza automáticamente las costuras y sombras del boceto para ubicar el asiento entre los brazos"
+                              >
+                                <Sparkles size={11} className="text-amber-300 animate-pulse" />
+                                <span>🪄 Auto-Detectar Asiento</span>
+                              </button>
+
+                              <button
+                                onClick={() => handleAddManualDepthZone(key)}
+                                className="w-full py-1.5 px-2 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-bold text-[9.5px] flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                                title="Añadir un rectángulo de altura en el centro para ajustarlo manualmente"
+                              >
+                                <Plus size={11} className="text-purple-400" />
+                                <span>➕ Añadir Zona</span>
+                              </button>
+                            </div>
+
+                            {/* Modo Interactivo en Canvas */}
+                            <div className="flex items-center justify-between bg-zinc-900/90 px-2 py-1.5 rounded border border-purple-900/40 text-[9px]">
+                              <span className="text-zinc-300 flex items-center gap-1">
+                                <MousePointer size={10} className="text-purple-400" />
+                                <span>Trazar / Arrastrar en Lienzo:</span>
+                              </span>
+                              <button
+                                onClick={() => setIsDepthZoneMode(!isDepthZoneMode)}
+                                className={`px-2 py-0.5 rounded font-bold text-[8.5px] transition-colors cursor-pointer ${
+                                  isDepthZoneMode
+                                    ? 'bg-purple-600 text-white shadow-sm ring-1 ring-purple-400'
+                                    : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                }`}
+                              >
+                                {isDepthZoneMode ? 'Activado (Haz Clic y Arrastra)' : 'Desactivado'}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Lista de Zonas de Altura */}
+                          {(!cfg.depthZones || cfg.depthZones.length === 0) ? (
+                            <div className="text-center py-4 px-3 bg-zinc-950/60 rounded-lg border border-dashed border-zinc-800 space-y-1">
+                              <Box size={18} className="mx-auto text-zinc-600" />
+                              <p className="text-zinc-400 text-[9.5px] font-medium">Sin cavidades ni alturas definidas</p>
+                              <p className="text-zinc-500 text-[8.5px] max-w-[280px] mx-auto">
+                                Pulsa <strong>Auto-Detectar Asiento</strong> para que la IA ubique el hueco entre los brazos, o traza un recuadro directamente con el ratón sobre el boceto.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between text-[9px] px-0.5">
+                                <span className="font-bold text-zinc-400 uppercase tracking-wider">Zonas Activas</span>
+                                <button
+                                  onClick={() => handleClearAllDepthZones(key)}
+                                  className="text-rose-400 hover:text-rose-300 transition-colors cursor-pointer"
+                                >
+                                  Eliminar todas ({cfg.depthZones.length})
+                                </button>
+                              </div>
+
+                              {cfg.depthZones.map((zone) => {
+                                const isSelected = selectedDepthZoneId === zone.id;
+                                return (
+                                  <div
+                                    key={zone.id}
+                                    onClick={() => setSelectedDepthZoneId(zone.id)}
+                                    className={`p-2 rounded-lg border transition-all cursor-pointer space-y-2 ${
+                                      isSelected
+                                        ? 'bg-purple-950/40 border-purple-500/80 shadow-sm ring-1 ring-purple-500/30'
+                                        : 'bg-zinc-950/70 border-zinc-800 hover:border-zinc-700'
+                                    }`}
+                                  >
+                                    {/* Cabecera de la Zona */}
+                                    <div className="flex items-center justify-between gap-1.5">
+                                      <div className="flex items-center gap-1.5 truncate">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleUpdateDepthZone(key, zone.id, { enabled: !zone.enabled });
+                                          }}
+                                          className={`w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-bold transition-colors cursor-pointer ${
+                                            zone.enabled !== false ? 'bg-purple-600 text-white' : 'bg-zinc-800 text-zinc-500'
+                                          }`}
+                                          title="Activar o desactivar esta zona"
+                                        >
+                                          {zone.enabled !== false ? '✓' : ''}
+                                        </button>
+                                        <input
+                                          type="text"
+                                          value={zone.name}
+                                          onClick={e => e.stopPropagation()}
+                                          onChange={e => handleUpdateDepthZone(key, zone.id, { name: e.target.value })}
+                                          className="bg-transparent text-white font-bold text-[9.5px] border-b border-transparent hover:border-zinc-700 focus:border-purple-500 outline-none px-0.5 truncate max-w-[140px]"
+                                        />
+                                      </div>
+
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        <span className="font-mono text-[9px] font-bold text-purple-300 bg-purple-950/80 px-1.5 py-0.5 rounded border border-purple-800/60">
+                                          {Math.round((zone.heightMax ?? 0.40) * 100)}% Altura
+                                        </span>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleDeleteDepthZone(key, zone.id);
+                                          }}
+                                          className="p-1 text-zinc-500 hover:text-rose-400 transition-colors cursor-pointer rounded hover:bg-zinc-800"
+                                          title="Eliminar esta zona"
+                                        >
+                                          <Trash2 size={11} />
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {/* Control Deslizante de Altura / Asiento */}
+                                    <div className="space-y-1 bg-zinc-900/60 p-2 rounded-md border border-zinc-800/80" onClick={e => e.stopPropagation()}>
+                                      <div className="flex items-center justify-between text-[9px]">
+                                        <span className="text-zinc-300 font-medium">Nivel de Altura en el Asiento:</span>
+                                        <span className="font-mono text-purple-300 font-bold">
+                                          {Math.round((zone.heightMax ?? 0.40) * 100)}%
+                                          <span className="text-zinc-500 font-normal ml-1">
+                                            ({Math.round((1 - (zone.heightMax ?? 0.40)) * 100)}% de hueco)
+                                          </span>
+                                        </span>
+                                      </div>
+                                      <input
+                                        type="range"
+                                        min={0}
+                                        max={1}
+                                        step={0.02}
+                                        value={zone.heightMax ?? 0.40}
+                                        onChange={e => handleUpdateDepthZone(key, zone.id, { heightMax: parseFloat(e.target.value) })}
+                                        className="w-full h-1.5 accent-purple-500 bg-zinc-800 rounded cursor-pointer"
+                                      />
+                                      <div className="flex justify-between text-[7.5px] text-zinc-500 font-mono">
+                                        <span>0% (Hueco completo)</span>
+                                        <span className="text-purple-400 font-bold">40% (Asiento estándar)</span>
+                                        <span>100% (Misma altura)</span>
+                                      </div>
+                                    </div>
+
+                                    {/* Controles de Curva/Bisel de Transición */}
+                                    <div className="grid grid-cols-2 gap-2" onClick={e => e.stopPropagation()}>
+                                      {/* Bisel Suave */}
+                                      <div className="space-y-0.5 bg-zinc-900/60 p-1.5 rounded-md border border-zinc-800/80">
+                                        <div className="flex items-center justify-between text-[8.5px]">
+                                          <span className="text-zinc-400">Curva / Bisel:</span>
+                                          <span className="font-mono text-indigo-300 font-bold">
+                                            {Math.round((zone.bevelRadius ?? 0.08) * 100)}%
+                                          </span>
+                                        </div>
+                                        <input
+                                          type="range"
+                                          min={0.01}
+                                          max={0.25}
+                                          step={0.01}
+                                          value={zone.bevelRadius ?? 0.08}
+                                          onChange={e => handleUpdateDepthZone(key, zone.id, { bevelRadius: parseFloat(e.target.value) })}
+                                          className="w-full h-1 accent-indigo-400 bg-zinc-800 rounded cursor-pointer"
+                                        />
+                                      </div>
+
+                                      {/* Altura Base Mínima */}
+                                      <div className="space-y-0.5 bg-zinc-900/60 p-1.5 rounded-md border border-zinc-800/80">
+                                        <div className="flex items-center justify-between text-[8.5px]">
+                                          <span className="text-zinc-400">Base Inferior:</span>
+                                          <span className="font-mono text-indigo-300 font-bold">
+                                            {Math.round((zone.heightMin ?? 0.0) * 100)}%
+                                          </span>
+                                        </div>
+                                        <input
+                                          type="range"
+                                          min={0.0}
+                                          max={0.50}
+                                          step={0.02}
+                                          value={zone.heightMin ?? 0.0}
+                                          onChange={e => handleUpdateDepthZone(key, zone.id, { heightMin: parseFloat(e.target.value) })}
+                                          className="w-full h-1 accent-indigo-400 bg-zinc-800 rounded cursor-pointer"
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* RELIEVE CONTINUO 2.5D POR SOMBRAS Y LUMINANCIA DE IMAGEN */}
+                          <div className="bg-zinc-950 p-2.5 rounded-lg border border-zinc-800 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 font-bold text-zinc-300 text-[9.5px]">
+                                <Sparkles size={11} className="text-amber-400" />
+                                <span>Relieve Continuo por Sombras / Tejido</span>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  const nextState = !cfg.enableHeightmap;
+                                  setViewConfigs(prev => ({
+                                    ...prev,
+                                    [key]: {
+                                      ...prev[key],
+                                      enableHeightmap: nextState,
+                                      heightmapStrength: prev[key].heightmapStrength ?? 0.25
+                                    }
+                                  }));
+                                  setTimeout(() => update3DPreview(true), 50);
+                                }}
+                                className={`px-2 py-0.5 rounded font-bold text-[8.5px] transition-colors cursor-pointer ${
+                                  cfg.enableHeightmap
+                                    ? 'bg-amber-600 text-white shadow-sm'
+                                    : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                                }`}
+                              >
+                                {cfg.enableHeightmap ? 'Activado' : 'Desactivado'}
+                              </button>
+                            </div>
+
+                            {cfg.enableHeightmap && (
+                              <div className="space-y-1.5 pt-1 border-t border-zinc-800/80">
+                                <div className="flex items-center justify-between text-[9px]">
+                                  <span className="text-zinc-400">Intensidad del Relieve 3D:</span>
+                                  <span className="font-mono text-amber-300 font-bold">
+                                    {Math.round((cfg.heightmapStrength ?? 0.25) * 100)}%
+                                  </span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={0.05}
+                                  max={0.80}
+                                  step={0.02}
+                                  value={cfg.heightmapStrength ?? 0.25}
+                                  onChange={e => {
+                                    const val = parseFloat(e.target.value);
+                                    setViewConfigs(prev => ({
+                                      ...prev,
+                                      [key]: { ...prev[key], heightmapStrength: val }
+                                    }));
+                                    setTimeout(() => update3DPreview(true), 40);
+                                  }}
+                                  className="w-full h-1.5 accent-amber-500 bg-zinc-800 rounded cursor-pointer"
+                                />
+                                <div className="flex items-center justify-between text-[8.5px] pt-0.5">
+                                  <span className="text-zinc-400">Invertir Luminancia:</span>
+                                  <button
+                                    onClick={() => {
+                                      setViewConfigs(prev => ({
+                                        ...prev,
+                                        [key]: { ...prev[key], heightmapInvert: !prev[key].heightmapInvert }
+                                      }));
+                                      setTimeout(() => update3DPreview(true), 40);
+                                    }}
+                                    className={`px-1.5 py-0.5 rounded text-[8px] font-bold transition-colors cursor-pointer ${
+                                      cfg.heightmapInvert ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                                    }`}
+                                  >
+                                    {cfg.heightmapInvert ? 'Invertido' : 'Normal'}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
 
@@ -4595,7 +6256,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                       setApplyPBRMaterialToCarve(true);
                                       setTimeout(() => update3DPreview(), 50);
                                     }}
-                                    className={`flex-1 py-1 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                                    className={`w-full py-1 px-2 rounded-lg text-[9px] font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
                                       applyPBRMaterialToCarve && textureTargetMode === 'atlas'
                                         ? 'bg-amber-600 border-amber-400 text-white shadow-md'
                                         : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
@@ -4603,14 +6264,6 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                   >
                                     <Eye size={10} />
                                     <span>Ver Atlas en 3D</span>
-                                  </button>
-                                  <button
-                                    onClick={handleOpenUVStudio}
-                                    className="py-1 px-2 rounded-lg text-[9px] font-bold border border-amber-500/60 bg-amber-950/80 hover:bg-amber-900 text-amber-200 transition-all cursor-pointer flex items-center justify-center gap-1 shadow-sm"
-                                    title="Abrir editor de coordenadas y despliegue UV 2D"
-                                  >
-                                    <Grid size={10} className="text-amber-400" />
-                                    <span>Editor UV 2D</span>
                                   </button>
                                 </div>
                               </div>
@@ -4864,8 +6517,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                               </div>
                             </div>
 
-                            {/* Controles de Volteo de Textura, Cara Trasera y Normal Y */}
-                            <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                            {/* Controles de Volteo de Textura, Rotación 90° y Plano 3D */}
+                            <div className="grid grid-cols-3 gap-1.5 pt-0.5">
                               <button
                                 onClick={() => setViewConfigs(prev => ({
                                   ...prev,
@@ -4874,10 +6527,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                 className={`py-1 px-1.5 rounded border text-[8.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                                   cfg.texFlipH ? 'bg-amber-600 border-amber-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
                                 }`}
-                                title="Invierte horizontalmente la proyección de textura"
+                                title="Invierte horizontalmente la proyección UV y el plano 3D de referencia"
                               >
                                 <FlipHorizontal size={10} />
-                                <span>Voltear Textura H</span>
+                                <span>Voltear H</span>
                               </button>
                               <button
                                 onClick={() => setViewConfigs(prev => ({
@@ -4887,25 +6540,50 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                 className={`py-1 px-1.5 rounded border text-[8.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
                                   cfg.texFlipV ? 'bg-amber-600 border-amber-500 text-white' : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
                                 }`}
-                                title="Invierte verticalmente la proyección de textura"
+                                title="Invierte verticalmente la proyección UV y el plano 3D de referencia"
                               >
                                 <FlipVertical size={10} />
-                                <span>Voltear Textura V</span>
+                                <span>Voltear V</span>
+                              </button>
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], rotation: ((prev[key].rotation ?? 0) + 90) % 360 }
+                                }))}
+                                className="py-1 px-1.5 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-750 text-zinc-300 text-[8.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                                title="Rotar orientación de la vista y plano de textura 90° (0° / 90° / 180° / 270°)"
+                              >
+                                <RotateCw size={10} className="text-amber-400" />
+                                <span>Rotar {(cfg.rotation ?? 0)}°</span>
                               </button>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-1.5">
+                            <div className="grid grid-cols-3 gap-1.5">
+                              <button
+                                onClick={() => setViewConfigs(prev => ({
+                                  ...prev,
+                                  [key]: { ...prev[key], texProjectBothSides: !prev[key].texProjectBothSides }
+                                }))}
+                                className={`py-1 px-1.5 rounded border text-[8.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
+                                  cfg.texProjectBothSides ? 'bg-amber-600 border-amber-500 text-white font-bold' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                }`}
+                                title="Por defecto desactivado: la textura solo se proyecta en la cara hacia la que mira esta vista. Actívalo solo si deseas atravesar todo el modelo."
+                              >
+                                <span>Ambas Caras:</span>
+                                <span className="font-bold">{cfg.texProjectBothSides ? 'SÍ' : 'NO'}</span>
+                              </button>
+
                               <button
                                 onClick={() => setViewConfigs(prev => ({
                                   ...prev,
                                   [key]: { ...prev[key], texMirrorOpposite: !prev[key].texMirrorOpposite }
                                 }))}
                                 className={`py-1 px-1.5 rounded border text-[8.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
-                                  cfg.texMirrorOpposite ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                  cfg.texMirrorOpposite ? 'bg-indigo-600 border-indigo-500 text-white font-bold' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
                                 }`}
-                                title="Por defecto desactivado para que la cara trasera (espalda) NO se vea invertida"
+                                title="Por defecto desactivado para que la cara trasera (espalda) NO se vea invertida como un espejo"
                               >
-                                <span>Espejar Cara Trasera:</span>
+                                <span>Espejar:</span>
                                 <span className="font-bold">{cfg.texMirrorOpposite ? 'SÍ' : 'NO'}</span>
                               </button>
 
@@ -4915,11 +6593,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                                   [key]: { ...prev[key], invertNormalY: !prev[key].invertNormalY }
                                 }))}
                                 className={`py-1 px-1.5 rounded border text-[8.5px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-colors ${
-                                  cfg.invertNormalY ? 'bg-violet-600 border-violet-500 text-white' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
+                                  cfg.invertNormalY ? 'bg-violet-600 border-violet-500 text-white font-bold' : 'bg-zinc-850 border-zinc-700 text-zinc-300 hover:bg-zinc-750'
                                 }`}
-                                title="Invierte el eje verde (Y) del mapa de normales para corregir la iluminación"
+                                title="Invierte el eje verde (Y) del mapa de normales para corregir la iluminación según el estándar"
                               >
-                                <span>Normal Y (DirectX):</span>
+                                <span>Normal Y:</span>
                                 <span className="font-bold">{cfg.invertNormalY ? 'ON' : 'OFF'}</span>
                               </button>
                             </div>
@@ -5138,7 +6816,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
               <div className="flex items-center justify-between gap-1.5 flex-wrap">
                 <div className="flex items-center gap-1 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800 shrink-0">
                   <button
-                    onClick={() => setEngineMode('VISUAL_HULL')}
+                    onClick={() => {
+                      setEngineMode('VISUAL_HULL');
+                      setTimeout(() => update3DPreview(true), 30);
+                    }}
                     className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer ${
                       engineMode === 'VISUAL_HULL' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                     }`}
@@ -5146,7 +6827,10 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                     🧊 Visual Hull
                   </button>
                   <button
-                    onClick={() => setEngineMode('HARD_SURFACE_CSG')}
+                    onClick={() => {
+                      setEngineMode('HARD_SURFACE_CSG');
+                      setTimeout(() => update3DPreview(true), 30);
+                    }}
                     className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer ${
                       engineMode === 'HARD_SURFACE_CSG' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                     }`}
@@ -5154,12 +6838,24 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                     📐 CSG Exacto
                   </button>
                   <button
-                    onClick={() => setEngineMode('SMOOTH_SCULPT')}
+                    onClick={() => {
+                      setEngineMode('SMOOTH_SCULPT');
+                      setTimeout(() => update3DPreview(true), 30);
+                    }}
                     className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer ${
                       engineMode === 'SMOOTH_SCULPT' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
                     ✨ Suave
+                  </button>
+                  <button
+                    onClick={() => applyRoundnessPreset('sofa')}
+                    className={`px-2 py-0.5 rounded text-[9.5px] font-bold transition-all cursor-pointer ${
+                      engineMode === 'CUSHION_INFLATION' ? 'bg-rose-600 text-white shadow' : 'text-rose-400 hover:text-rose-200 hover:bg-rose-950/40'
+                    }`}
+                    title="Inflado orgánico y abombado de cojín para sofás, asientos y tapicería"
+                  >
+                    🛋️ Cojín / Inflado
                   </button>
                 </div>
 
@@ -5190,7 +6886,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                     <input
                       type="range"
                       min={0}
-                      max={6}
+                      max={12}
                       value={smoothIterations}
                       onChange={e => {
                         const val = parseInt(e.target.value);
@@ -5214,8 +6910,11 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                         setTimeout(() => update3DPreview(true), 40);
                       }}
                       className="bg-zinc-800 border border-zinc-700 text-zinc-200 rounded px-1.5 py-0.5 text-[9.5px] font-medium cursor-pointer"
-                      title="Controla la calidad y estructura de la malla 3D"
+                      title="Controla la calidad y curvatura de la superficie de la malla 3D"
                     >
+                      <option value="CUSHION_UPHOLSTERY">🛋️ Tapizado Curvo (Sofá/Cojín)</option>
+                      <option value="ROUNDED_ORGANIC">🫧 Orgánico Curvo (Peluches/Figuras)</option>
+                      <option value="CURVED_FILLET">✨ Bisel Curvo (Fillet Aristas)</option>
                       <option value="PLANAR_POLISHED">⚡ Lados Pulidos (Hard-Surface)</option>
                       <option value="UNIFORM_ISOTROPIC">🔷 Uniforme (Suave)</option>
                       <option value="LOW_POLY">📦 Low-Poly (Game-Ready)</option>
@@ -5228,6 +6927,22 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
               {/* Fila 2: Visualización, Malla, Textura, Planos y Láser */}
               <div className="flex items-center justify-between gap-1.5 flex-wrap pt-1 border-t border-zinc-800/60">
                 <div className="flex items-center gap-1.5 flex-wrap">
+                  {/* Botón y Conmutador de Redondeo & Curvatura 3D */}
+                  <button
+                    onClick={() => setShowRoundnessPanel(!showRoundnessPanel)}
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                      showRoundnessPanel || roundness > 0 || cushionInflation > 0
+                        ? 'bg-fuchsia-950/90 border-fuchsia-400 text-fuchsia-200 shadow-sm'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                    }`}
+                    title="Panel interactivo de redondeo de cantos, inflado de cojines y curvatura continua"
+                  >
+                    <span>🫧 Redondeo 3D</span>
+                    {(roundness > 0 || cushionInflation > 0) && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" />
+                    )}
+                  </button>
+
                   {/* Conmutador de Visor de Malla / Wireframe */}
                   <button
                     onClick={() => setShowWireframe(!showWireframe)}
@@ -5311,47 +7026,99 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                         : 'Vista ' + activeTab.toUpperCase()}
                     </span>
                   </button>
-
-                  {/* Conmutador a Estudio UV */}
-                  <button
-                    onClick={handleOpenUVStudio}
-                    className="px-1.5 py-0.5 rounded text-[9px] font-bold border transition-all cursor-pointer flex items-center gap-1 bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-amber-300 shadow-sm"
-                    title="Abrir editor de coordenadas UV en plano 2D"
-                  >
-                    <Grid size={10} className="text-amber-400" />
-                    <span>UV Studio</span>
-                  </button>
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  {/* Conmutador y Opacidad de Plano Semitransparente 3D de Referencia */}
-                  <button
-                    onClick={() => setShow3DRefPlane(prev => prev === 'none' ? 'active' : 'none')}
-                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                      show3DRefPlane !== 'none'
-                        ? 'bg-cyan-950/80 border-cyan-500/80 text-cyan-300 shadow-sm'
-                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                    }`}
-                    title="Muestra un plano semitransparente con la textura completa en el espacio 3D"
-                  >
-                    <Layers size={10} className={show3DRefPlane !== 'none' ? 'text-cyan-400' : 'text-zinc-500'} />
-                    <span>Plano Ref</span>
-                  </button>
+                  {/* Conmutador y Selector de Planos Semitransparentes 3D de Referencia */}
+                  <div className="flex items-center rounded border border-zinc-700 bg-zinc-900 overflow-hidden text-[9px] font-bold">
+                    <button
+                      onClick={() => setShow3DRefPlane('none')}
+                      className={`px-1.5 py-0.5 transition-colors cursor-pointer ${
+                        show3DRefPlane === 'none' ? 'bg-zinc-700 text-zinc-100 font-extrabold' : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                      title="Ocultar planos de referencia 3D"
+                    >
+                      Off
+                    </button>
+                    <button
+                      onClick={() => setShow3DRefPlane('active')}
+                      className={`px-1.5 py-0.5 transition-colors cursor-pointer flex items-center gap-1 border-x border-zinc-800 ${
+                        show3DRefPlane === 'active' ? 'bg-cyan-950 text-cyan-300 font-extrabold border-x-cyan-800' : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                      title={`Mostrar plano de la vista activa (${activeTab.toUpperCase()}) en el visor 3D`}
+                    >
+                      <Layers size={9} className={show3DRefPlane === 'active' ? 'text-cyan-400' : 'text-zinc-500'} />
+                      <span>Activo</span>
+                    </button>
+                    <button
+                      onClick={() => setShow3DRefPlane('all')}
+                      className={`px-1.5 py-0.5 transition-colors cursor-pointer flex items-center gap-1 ${
+                        show3DRefPlane === 'all' ? 'bg-indigo-950 text-indigo-300 font-extrabold shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                      title="Mostrar TODOS los planos ortográficos simultáneamente en el espacio 3D (Caja ortográfica de referencia)"
+                    >
+                      <Layers size={9} className={show3DRefPlane === 'all' ? 'text-indigo-400' : 'text-zinc-500'} />
+                      <span>Todos los Planos</span>
+                    </button>
+                  </div>
 
                   {show3DRefPlane !== 'none' && (
-                    <div className="flex items-center gap-1 bg-zinc-950 px-1 py-0.5 rounded border border-zinc-800">
-                      <input
-                        type="range"
-                        min={0.05}
-                        max={1.0}
-                        step={0.05}
-                        value={refPlaneOpacity}
-                        onChange={e => setRefPlaneOpacity(parseFloat(e.target.value))}
-                        className="w-10 h-1 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
-                        title={`Opacidad: ${Math.round(refPlaneOpacity * 100)}%`}
-                      />
-                      <span className="text-[8px] font-mono text-cyan-300">{Math.round(refPlaneOpacity * 100)}%</span>
-                    </div>
+                    <>
+                      <div className="flex items-center gap-1 bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800">
+                        <input
+                          type="range"
+                          min={0.05}
+                          max={1.0}
+                          step={0.05}
+                          value={refPlaneOpacity}
+                          onChange={e => setRefPlaneOpacity(parseFloat(e.target.value))}
+                          className="w-12 h-1 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+                          title={`Opacidad: ${Math.round(refPlaneOpacity * 100)}%`}
+                        />
+                        <span className="text-[8px] font-mono text-cyan-300">{Math.round(refPlaneOpacity * 100)}%</span>
+                      </div>
+
+                      {/* Voltear y Rotar plano 3D en sincronía con UV */}
+                      <div className="flex items-center rounded border border-zinc-700 bg-zinc-900 overflow-hidden text-[8.5px] font-bold">
+                        <button
+                          onClick={() => setViewConfigs(prev => ({
+                            ...prev,
+                            [activeTab]: { ...prev[activeTab], texFlipH: !prev[activeTab].texFlipH }
+                          }))}
+                          className={`px-1.5 py-0.5 transition-colors cursor-pointer flex items-center gap-0.5 ${
+                            viewConfigs[activeTab]?.texFlipH ? 'bg-amber-600 text-white font-extrabold' : 'text-zinc-300 hover:bg-zinc-800'
+                          }`}
+                          title={`Voltear horizontalmente el plano 3D y UV de la vista activa (${activeTab.toUpperCase()})`}
+                        >
+                          <FlipHorizontal size={9} />
+                          <span>H</span>
+                        </button>
+                        <button
+                          onClick={() => setViewConfigs(prev => ({
+                            ...prev,
+                            [activeTab]: { ...prev[activeTab], texFlipV: !prev[activeTab].texFlipV }
+                          }))}
+                          className={`px-1.5 py-0.5 border-x border-zinc-800 transition-colors cursor-pointer flex items-center gap-0.5 ${
+                            viewConfigs[activeTab]?.texFlipV ? 'bg-amber-600 text-white font-extrabold' : 'text-zinc-300 hover:bg-zinc-800'
+                          }`}
+                          title={`Voltear verticalmente el plano 3D y UV de la vista activa (${activeTab.toUpperCase()})`}
+                        >
+                          <FlipVertical size={9} />
+                          <span>V</span>
+                        </button>
+                        <button
+                          onClick={() => setViewConfigs(prev => ({
+                            ...prev,
+                            [activeTab]: { ...prev[activeTab], rotation: ((prev[activeTab].rotation ?? 0) + 90) % 360 }
+                          }))}
+                          className="px-1.5 py-0.5 transition-colors cursor-pointer flex items-center gap-0.5 text-zinc-300 hover:bg-zinc-800"
+                          title={`Rotar orientación de la vista activa (${activeTab.toUpperCase()}) 90°`}
+                        >
+                          <RotateCw size={9} className="text-amber-400" />
+                          <span>{(viewConfigs[activeTab]?.rotation ?? 0)}°</span>
+                        </button>
+                      </div>
+                    </>
                   )}
 
                   {/* Plano Láser de Proporciones 3D */}
@@ -5385,6 +7152,140 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                   )}
                 </div>
               </div>
+
+              {/* Panel Específico de Redondeo & Curvatura 3D (Solicitado para figuras redondeadas, sofás y orgánicos) */}
+              {showRoundnessPanel && (
+                <div className="pt-1.5 pb-1 border-t border-fuchsia-950/70 bg-fuchsia-950/20 px-2 rounded-b flex flex-col gap-1.5 transition-all">
+                  {/* Presets automáticos de 1 clic */}
+                  <div className="flex items-center justify-between gap-1 flex-wrap">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[8.5px] font-semibold text-fuchsia-300 uppercase tracking-wide">
+                        Redondeo Auto:
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => applyRoundnessPreset('sofa')}
+                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition-all cursor-pointer ${
+                            engineMode === 'CUSHION_INFLATION' && roundness === 0.55
+                              ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-sm'
+                              : 'bg-zinc-800/80 hover:bg-fuchsia-900/50 border-zinc-700 text-zinc-300 hover:text-white'
+                          }`}
+                          title="Sofá / Butaca: Cojín 65% + Bisel 55% + Topología Tapizado (Ideal para asientos más bajos)"
+                        >
+                          🛋️ Sofá / Tapizado
+                        </button>
+                        <button
+                          onClick={() => applyRoundnessPreset('organic')}
+                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition-all cursor-pointer ${
+                            roundness === 0.80
+                              ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-sm'
+                              : 'bg-zinc-800/80 hover:bg-fuchsia-900/50 border-zinc-700 text-zinc-300 hover:text-white'
+                          }`}
+                          title="Orgánico / Peluche: Redondeo 80% + Inflado 85%"
+                        >
+                          🫧 Peluche / Orgánico
+                        </button>
+                        <button
+                          onClick={() => applyRoundnessPreset('fillet')}
+                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition-all cursor-pointer ${
+                            roundness === 0.50 && cushionInflation === 0
+                              ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow-sm'
+                              : 'bg-zinc-800/80 hover:bg-fuchsia-900/50 border-zinc-700 text-zinc-300 hover:text-white'
+                          }`}
+                          title="Bisel Curvo: Redondea aristas manteniendo lados rectos"
+                        >
+                          ✨ Bisel Fillet
+                        </button>
+                        <button
+                          onClick={() => applyRoundnessPreset('sharp')}
+                          className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition-all cursor-pointer ${
+                            roundness === 0 && cushionInflation === 0
+                              ? 'bg-zinc-700 border-zinc-500 text-white'
+                              : 'bg-zinc-800/80 hover:bg-zinc-700 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                          }`}
+                          title="Restablecer a cantos vivos rectos sin redondeo"
+                        >
+                          📐 Recto
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Conmutador de Subdivisión Suave Continua */}
+                    <button
+                      onClick={() => {
+                        setSubdivisionLevel(prev => prev === 0 ? 1 : 0);
+                        setTimeout(() => update3DPreview(true), 40);
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                        subdivisionLevel >= 1
+                          ? 'bg-indigo-900/90 border-indigo-400 text-indigo-200 shadow-sm'
+                          : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                      title="Aplica subdivisión y curvatura continua tangencial (PN-Triangles) para una superficie ultra-suave"
+                    >
+                      <span>Subdivisión:</span>
+                      <span className={subdivisionLevel >= 1 ? 'text-cyan-300 font-mono' : 'text-zinc-500'}>
+                        {subdivisionLevel >= 1 ? '1x Lisa' : 'OFF'}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Sliders Interactivos de Redondeo y Abombado */}
+                  <div className="grid grid-cols-2 gap-2 pt-0.5">
+                    {/* Slider 1: Redondeo de Aristas / Bisel (Fillet) */}
+                    <div className="flex items-center justify-between gap-1.5 bg-zinc-950/70 border border-zinc-800/80 px-2 py-1 rounded">
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className="text-[8.5px] text-zinc-300 font-medium whitespace-nowrap">Bisel / Curva:</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={roundness}
+                          onChange={e => {
+                            const val = parseFloat(e.target.value);
+                            setRoundness(val);
+                            setTimeout(() => update3DPreview(true), 80);
+                          }}
+                          className="w-16 h-1 accent-fuchsia-500 bg-zinc-800 rounded cursor-pointer"
+                          title={`Redondeo de esquinas y aristas: ${Math.round(roundness * 100)}%`}
+                        />
+                        <span className="text-[8.5px] font-mono text-fuchsia-300 w-7 text-right">
+                          {Math.round(roundness * 100)}%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Slider 2: Abombado / Cojín (Inflado Z) */}
+                    <div className="flex items-center justify-between gap-1.5 bg-zinc-950/70 border border-zinc-800/80 px-2 py-1 rounded">
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className="text-[8.5px] text-zinc-300 font-medium whitespace-nowrap">Abombado / Cojín:</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={cushionInflation}
+                          onChange={e => {
+                            const val = parseFloat(e.target.value);
+                            setCushionInflation(val);
+                            setTimeout(() => update3DPreview(true), 80);
+                          }}
+                          className="w-16 h-1 accent-rose-500 bg-zinc-800 rounded cursor-pointer"
+                          title={`Abombado convexo de cojín / tapicería: ${Math.round(cushionInflation * 100)}%`}
+                        />
+                        <span className="text-[8.5px] font-mono text-rose-300 w-7 text-right">
+                          {Math.round(cushionInflation * 100)}%
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Viewport 3D Three.js */}
@@ -5711,66 +7612,165 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
           </div>
         )}
 
-        {/* ── MODAL ESTUDIO DE MAPEO UV (3D-COAT / BLENDER STANDARD) ── */}
-        {showUVStudio && (
-          <div className="absolute inset-0 z-50 bg-black/95 backdrop-blur-lg flex flex-col animate-in fade-in zoom-in-95 duration-200">
-            {/* Header del Estudio UV */}
-            <div className="px-4 py-2 border-b border-zinc-800 bg-zinc-900 flex items-center justify-between flex-shrink-0">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-amber-500 via-indigo-600 to-violet-600 flex items-center justify-center shadow shadow-amber-500/20">
-                  <Grid size={15} className="text-white" />
+        {/* ── MODAL INSPECTOR DE MAPA DE TEXTURAS & DESPLIEGUE UV (WIREFRAME) ── */}
+        {showUVInspectorModal && (
+          <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
+            <div className="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl max-w-4xl w-full flex flex-col max-h-[90vh] overflow-hidden">
+              {/* Cabecera del Inspector UV */}
+              <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-950/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-cyan-950 border border-cyan-700 text-cyan-400">
+                    <MapIcon size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <span>Inspector de Mapa de Texturas & UVs</span>
+                      <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-700/60 text-[9px] font-mono">
+                        UV Layout 1024×1024
+                      </span>
+                    </h3>
+                    <p className="text-[10px] text-zinc-400">
+                      {imported3DData
+                        ? `${imported3DData.fileName} • ${imported3DData.vertexCount.toLocaleString()} Vértices • ${imported3DData.triangleCount.toLocaleString()} Polígonos`
+                        : `Malla Tallada • ${previewStats.vertices.toLocaleString()} Vértices • ${previewStats.triangles.toLocaleString()} Polígonos`}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-xs font-bold text-white flex items-center gap-2">
-                    Estudio de Mapeo & Despliegue de Coordenadas UV
-                    <span className="text-[9px] font-normal px-1.5 py-0.2 rounded bg-amber-950 border border-amber-700/60 text-amber-300">
-                      3D-Coat & Blender Standard
-                    </span>
-                  </h3>
-                  <p className="text-[9.5px] text-zinc-400">
-                    Inspecciona la malla desplegada en 2D con texturas superpuestas, proyección automática, relax y transformaciones interactivas.
-                  </p>
-                </div>
-              </div>
 
-              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setShowUVStudio(false)}
-                  className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white text-xs font-bold border border-zinc-700 transition-colors cursor-pointer"
+                  onClick={() => setShowUVInspectorModal(false)}
+                  className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  title="Cerrar Inspector UV"
                 >
-                  ✕ Cerrar Estudio UV
+                  <X size={18} />
                 </button>
               </div>
-            </div>
 
-            {/* Contenido UV Mapping Studio */}
-            <div className="flex-1 overflow-hidden p-2">
-              <UVMappingStudio
-                mesh={lastRawMeshDataRef.current || { vertices: [], faces: [] }}
-                onUpdateMeshUVs={(updatedFaces) => {
-                  if (lastRawMeshDataRef.current) {
-                    lastRawMeshDataRef.current.faces = updatedFaces;
-                    updateUVsOnly();
-                  }
-                }}
-                blueprintImages={{
-                  front: viewConfigs.front.url,
-                  top: viewConfigs.top.url,
-                  side: viewConfigs.side.url
-                }}
-                activeTextureUrl={
-                  (applyPBRMaterialToCarve && textureTargetMode === 'atlas' && atlasPBRResult?.albedoAtlasUrl)
-                    ? atlasPBRResult.albedoAtlasUrl
-                    : viewConfigs[activeTab]?.url || null
-                }
-                atlasTextureUrl={atlasPBRResult?.albedoAtlasUrl || null}
-                activeMaterial={
-                  (applyPBRMaterialToCarve && textureTargetMode === 'atlas' && atlasPBRMaterial)
-                    ? atlasPBRMaterial
-                    : generatedPBRMaterials[activeTab]?.material || null
-                }
-                isEmbedded={true}
-              />
+              {/* Barra de Herramientas del Inspector UV */}
+              <div className="px-4 py-2 bg-zinc-900/90 border-b border-zinc-800 flex items-center justify-between gap-3 flex-wrap text-xs">
+                {/* Selector de Canal / Textura */}
+                <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                  <span className="text-[10px] text-zinc-500 font-bold px-1.5">Mapa:</span>
+                  {(['albedo', 'normal', 'roughness', 'metalness'] as const).map(channel => {
+                    const labels = {
+                      albedo: 'Color / Albedo',
+                      normal: 'Normal',
+                      roughness: 'Rugosidad',
+                      metalness: 'Metálico'
+                    };
+                    return (
+                      <button
+                        key={channel}
+                        onClick={() => setActiveTextureChannel(channel)}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                          activeTextureChannel === channel
+                            ? 'bg-cyan-600 text-white shadow'
+                            : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                        }`}
+                      >
+                        {labels[channel]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Controles de Wireframe UV */}
+                <div className="flex items-center gap-3">
+                  {/* Alternar Wireframe */}
+                  <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-zinc-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={showUVWireframe}
+                      onChange={e => setShowUVWireframe(e.target.checked)}
+                      className="accent-cyan-500 rounded"
+                    />
+                    <span>Malla UV (Triángulos)</span>
+                  </label>
+
+                  {/* Selector de Color del Trazado */}
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-zinc-500">Color:</span>
+                    {[
+                      { hex: '#06b6d4', name: 'Cian' },
+                      { hex: '#10b981', name: 'Verde' },
+                      { hex: '#f59e0b', name: 'Oro' },
+                      { hex: '#ffffff', name: 'Blanco' },
+                      { hex: '#ec4899', name: 'Rosa' },
+                    ].map(c => (
+                      <button
+                        key={c.hex}
+                        onClick={() => setUvWireframeColor(c.hex)}
+                        style={{ backgroundColor: c.hex }}
+                        className={`w-4 h-4 rounded-full border transition-transform cursor-pointer ${
+                          uvWireframeColor === c.hex ? 'scale-125 border-white ring-2 ring-cyan-500' : 'border-black/50 hover:scale-110'
+                        }`}
+                        title={c.name}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Opacidad del Trazado */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-zinc-500">Opacidad:</span>
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={1.0}
+                      step={0.05}
+                      value={uvWireframeOpacity}
+                      onChange={e => setUvWireframeOpacity(parseFloat(e.target.value))}
+                      className="w-16 h-1 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+                    />
+                    <span className="text-[9px] font-mono text-cyan-300 w-6">
+                      {Math.round(uvWireframeOpacity * 100)}%
+                    </span>
+                  </div>
+
+                  {/* Botón Descargar Mapa */}
+                  <button
+                    onClick={() => {
+                      if (!uvCanvasRef.current) return;
+                      const link = document.createElement('a');
+                      link.download = `uv_map_${activeTextureChannel}_${Date.now()}.png`;
+                      link.href = uvCanvasRef.current.toDataURL('image/png');
+                      link.click();
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 hover:text-white border border-zinc-700 text-[10px] font-bold transition-all cursor-pointer"
+                    title="Descargar imagen del mapa de textura con el trazado UV superpuesto"
+                  >
+                    <Download size={12} className="text-cyan-400" />
+                    <span>Exportar PNG</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Visor Central del Mapa UV */}
+              <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-zinc-950/60 min-h-[400px]">
+                <div className="relative inline-block border border-zinc-800 rounded-xl overflow-hidden shadow-2xl bg-zinc-950">
+                  <canvas
+                    ref={uvCanvasRef}
+                    width={1024}
+                    height={1024}
+                    className="max-h-[58vh] max-w-full object-contain cursor-crosshair"
+                  />
+                </div>
+              </div>
+
+              {/* Pie del Inspector */}
+              <div className="px-4 py-2.5 border-t border-zinc-800 bg-zinc-950/80 flex items-center justify-between text-[11px] text-zinc-400">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                  <span>
+                    Muestra el despliegue UV 2D de las caras de la figura 3D proyectadas sobre la textura asignada.
+                  </span>
+                </div>
+                <button
+                  onClick={() => setShowUVInspectorModal(false)}
+                  className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs transition-colors cursor-pointer border border-zinc-700"
+                >
+                  Cerrar Inspector
+                </button>
+              </div>
             </div>
           </div>
         )}

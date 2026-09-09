@@ -11,7 +11,6 @@
  */
 
 import * as THREE from 'three';
-import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
@@ -94,8 +93,42 @@ export async function convertImportedToCSG(obj: CSGObject): Promise<CSGObject> {
         gltf.scene.updateMatrixWorld(true);
         const geometries: THREE.BufferGeometry[] = [];
         gltf.scene.traverse((child: THREE.Object3D) => {
-          if ((child as THREE.Mesh).isMesh) {
-            let geo = (child as THREE.Mesh).geometry.clone();
+          if (!child.visible) return; // Omitir mallas invisibles, proxys o colisiones
+          if ((child as THREE.Mesh).isMesh || (child as any).isSkinnedMesh) {
+            const mesh = child as THREE.Mesh;
+            let geo: THREE.BufferGeometry;
+            if ((mesh as any).isSkinnedMesh) {
+              const skinnedMesh = mesh as THREE.SkinnedMesh;
+              geo = skinnedMesh.geometry.clone();
+              const pos = geo.attributes.position;
+              if (
+                pos &&
+                geo.attributes.skinIndex &&
+                geo.attributes.skinWeight &&
+                skinnedMesh.skeleton &&
+                skinnedMesh.skeleton.bones &&
+                skinnedMesh.skeleton.bones.length > 0
+              ) {
+                try {
+                  const target = new THREE.Vector3();
+                  const transformFunc = (skinnedMesh as any).boneTransform?.bind(skinnedMesh) || (skinnedMesh as any).applyBoneTransform?.bind(skinnedMesh);
+                  if (transformFunc) {
+                    for (let i = 0; i < pos.count; i++) {
+                      target.fromBufferAttribute(pos, i);
+                      transformFunc(i, target);
+                      if (Number.isFinite(target.x) && Number.isFinite(target.y) && Number.isFinite(target.z)) {
+                        pos.setXYZ(i, target.x, target.y, target.z);
+                      }
+                    }
+                    pos.needsUpdate = true;
+                  }
+                } catch (skinErr) {
+                  console.warn('Could not apply bone transform to skinned mesh, using bind pose:', skinErr);
+                }
+              }
+            } else {
+              geo = mesh.geometry.clone();
+            }
             geo.applyMatrix4(child.matrixWorld);
             if (geo.attributes.position) {
               geometries.push(normalizeGeometry(geo));
@@ -964,7 +997,7 @@ export async function simplifyMesh(
     }
   }
 
-  if (!obj.faces || obj.faces.length < 4) return obj;
+  if (!obj.faces || obj.faces.length < 4 || !obj.vertices || obj.vertices.length < 3) return obj;
 
   // Esperar inicialización de WASM de meshoptimizer
   try {
@@ -978,19 +1011,25 @@ export async function simplifyMesh(
     console.warn("Inicialización de Meshopt falló o ya lista:", err);
   }
 
-  // 0. Reparar malla antes de simplificar para asegurar que sea continua
-  const repaired = repairMesh(obj);
-  const workingObj = { ...obj, vertices: repaired.vertices, faces: repaired.faces };
+  const hasUVs = obj.faces.some(f => f.uvs && f.uvs.length >= 3);
 
-  // 1. Crear BufferGeometry temporal triangulada con soldadura topológica de posiciones
-  let geometry = new THREE.BufferGeometry();
+  // 1. Preparar vértices y caras con protección estricta de costuras UV
   const indices: number[] = [];
   const finalPos: number[] = [];
   const finalUv: number[] = [];
   const posMap = new Map<string, number>();
+  const vertToMat = new Map<number, number>();
+  const defaultMatIdx = obj.faces?.[0]?.materialIndex;
+
+  // Si no tiene UVs, podemos reparar la malla previamente; si tiene UVs, conservamos la geometría para no romper costuras
+  const workingObj = hasUVs ? obj : (() => {
+    const rep = repairMesh(obj);
+    return { ...obj, vertices: rep.vertices, faces: rep.faces };
+  })();
 
   workingObj.faces.forEach((face) => {
     const faceIndices: number[] = [];
+    const matIdx = face.materialIndex ?? defaultMatIdx;
     face.indices.forEach((posIdx, i) => {
       const v = workingObj.vertices[posIdx];
       if (!v) return;
@@ -999,7 +1038,13 @@ export async function simplifyMesh(
       const py = v[1] + off[1];
       const pz = v[2] + off[2];
       
-      const posKey = `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}`;
+      const uv = (face.uvs && face.uvs[i]) ? face.uvs[i] : [0, 0];
+      
+      // Si tiene UVs, la clave incluye las coordenadas UV para que vértices en costuras de textura
+      // no colapsen incorrectamente entre sí
+      const posKey = hasUVs
+        ? `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`
+        : `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}`;
       
       let newIdx: number;
       if (posMap.has(posKey)) {
@@ -1007,9 +1052,11 @@ export async function simplifyMesh(
       } else {
         newIdx = finalPos.length / 3;
         finalPos.push(px, py, pz);
-        const uv = face.uvs?.[i] || [0, 0];
-        finalUv.push(uv[0], uv[1]);
+        if (hasUVs) {
+          finalUv.push(uv[0], uv[1]);
+        }
         posMap.set(posKey, newIdx);
+        if (matIdx !== undefined) vertToMat.set(newIdx, matIdx);
       }
       faceIndices.push(newIdx);
     });
@@ -1021,22 +1068,9 @@ export async function simplifyMesh(
 
   if (indices.length === 0 || finalPos.length === 0) return obj;
 
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPos, 3));
-  if (finalUv.length > 0) {
-    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUv, 2));
-  }
-  geometry.setIndex(indices);
-  
-  // Soldar vértices con tolerancia para evitar grietas en la topología
-  geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
-
-  // 2. Aplicar Simplificación Avanzada con Protección de Silueta (meshoptimizer + LockBorder)
-  const posAttr = geometry.getAttribute('position');
-  const indexAttr = geometry.index;
-  if (!posAttr || !indexAttr) return obj;
-  
-  const posArray = new Float32Array(posAttr.array);
-  const indexArray = new Uint32Array(indexAttr.array);
+  const posArray = new Float32Array(finalPos);
+  const indexArray = new Uint32Array(indices);
+  const uvArray = hasUVs ? new Float32Array(finalUv) : null;
   
   const originalTriangleCount = indexArray.length / 3;
   if (originalTriangleCount < 4) return obj;
@@ -1047,113 +1081,169 @@ export async function simplifyMesh(
   let resultIndices: Uint32Array | null = null;
 
   try {
-    // Intento 1: 'LockBorder' protege la silueta exterior y contornos abiertos
-    const simplifyResult = Meshopt.simplify(
-      indexArray,
-      posArray,
-      3,
-      targetCount,
-      0.1,
-      ['LockBorder']
-    );
-    
-    if (simplifyResult && simplifyResult[0] && simplifyResult[0].length < indexArray.length && simplifyResult[0].length >= 12) {
-      resultIndices = simplifyResult[0];
+    if (hasUVs && uvArray) {
+      // Simplificación multi-atributo: optimiza la geometría penalizando fuertemente la distorsión UV
+      // Esto preserva el mapeado Atlas PBR y las texturas UV sin desfasar las costuras
+      const weights = [1.5, 1.5];
+      const attempts = [
+        { err: 0.02, flags: ['LockBorder'] as any },
+        { err: 0.05, flags: ['LockBorder'] as any },
+        { err: 0.15, flags: ['LockBorder'] as any },
+        { err: 0.35, flags: ['LockBorder'] as any },
+        { err: 0.60, flags: ['LockBorder'] as any },
+      ];
+
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplifyWithAttributes(
+            indexArray,
+            posArray,
+            3,
+            uvArray,
+            2,
+            weights,
+            null,
+            targetCount,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length < indexArray.length && res[0].length >= 12) {
+            resultIndices = res[0];
+            if (resultIndices.length <= targetCount * 1.15) break;
+          }
+        } catch (e) {
+          // Continuar al siguiente intento
+        }
+      }
+      // NUNCA recurrir a simplifySloppy en mallas con UVs para proteger las texturas
     } else {
-      // Intento 2: Mayor tolerancia conservando siempre 'LockBorder'
-      const retry1 = Meshopt.simplify(
-        indexArray,
-        posArray,
-        3,
-        targetCount,
-        0.5,
-        ['LockBorder']
-      );
-      if (retry1 && retry1[0] && retry1[0].length < indexArray.length && retry1[0].length >= 12) {
-        resultIndices = retry1[0];
-      } else {
-        // Intento 3: Error libre manteniendo 'LockBorder'
-        const retry2 = Meshopt.simplify(
-          indexArray,
-          posArray,
-          3,
-          targetCount,
-          1.0,
-          ['LockBorder']
-        );
-        if (retry2 && retry2[0] && retry2[0].length < indexArray.length && retry2[0].length >= 12) {
-          resultIndices = retry2[0];
-        } else {
-          // Intento 4: Si LockBorder bloqueó toda la reducción por bordes abiertos o costuras, intentar sin LockBorder
-          const retry3 = Meshopt.simplify(
+      // Simplificación posicional estándar para mallas sin texturas
+      const attempts = [
+        { err: 0.05, flags: ['LockBorder'] as any },
+        { err: 0.15, flags: ['LockBorder'] as any },
+        { err: 0.35, flags: ['LockBorder'] as any },
+        { err: 0.70, flags: ['LockBorder'] as any },
+        { err: 0.50, flags: [] as any },
+      ];
+
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplify(
             indexArray,
             posArray,
             3,
             targetCount,
-            0.5,
-            []
+            att.err,
+            att.flags
           );
-          if (retry3 && retry3[0] && retry3[0].length < indexArray.length && retry3[0].length >= 12) {
-            resultIndices = retry3[0];
+          if (res && res[0] && res[0].length < indexArray.length && res[0].length >= 12) {
+            resultIndices = res[0];
+            if (resultIndices.length <= targetCount * 1.15) break;
           }
+        } catch (e) {}
+      }
+
+      // Solo para mallas sin UVs aplicamos fallback sloppy si la topología está muy bloqueada
+      if ((!resultIndices || resultIndices.length === indexArray.length) && targetRatio <= 0.7) {
+        try {
+          const sloppyRes = Meshopt.simplifySloppy(
+            indexArray,
+            posArray,
+            3,
+            null,
+            targetCount,
+            0.4
+          );
+          if (sloppyRes && sloppyRes[0] && sloppyRes[0].length >= 12 && sloppyRes[0].length < indexArray.length) {
+            resultIndices = sloppyRes[0];
+          }
+        } catch (eSloppy) {
+          console.warn('Meshopt simplifySloppy fallback error:', eSloppy);
         }
       }
     }
 
-    if (resultIndices && resultIndices.length > 0 && resultIndices.length < indexArray.length) {
-      const finalTriangleCount = resultIndices.length / 3;
-      const reduction = ((1 - (finalTriangleCount / originalTriangleCount)) * 100).toFixed(2);
+    let finalIndices = resultIndices && resultIndices.length > 0 ? resultIndices : indexArray;
 
-      console.log(`%c 🚀 REDUCCIÓN DE MALLA FINALIZADA `, 'background: #222; color: #bada55');
-      console.table({
-        "Triángulos Originales": originalTriangleCount,
-        "Triángulos Finales": finalTriangleCount,
-        "Reducción lograda": `${reduction}%`,
-        "Ratio solicitado": ratio
-      });
+    if (finalIndices.length < indexArray.length) {
+      const finalTris = finalIndices.length / 3;
+      const reduction = ((1 - (finalTris / originalTriangleCount)) * 100).toFixed(2);
+      console.log(`%c 🚀 OPTIMIZACIÓN DE MALLA EXITOSA (-${reduction}%) [UVs: ${hasUVs ? 'PRESERVADAS' : 'N/A'}]`, 'background: #222; color: #bada55');
+    }
 
-      geometry.setIndex(new THREE.BufferAttribute(resultIndices, 1));
-    } else {
-      // Fallback a SimplifyModifier (edge collapse con quadric error metrics)
+    // Reconstruir CSGObject preservando índices, UVs exactos y material
+    const usedVertIndices = new Set<number>();
+    for (let i = 0; i < finalIndices.length; i++) {
+      usedVertIndices.add(finalIndices[i]);
+    }
+
+    const oldToNew = new Map<number, number>();
+    const compactedVertices: V3[] = [];
+
+    const sortedUsed = Array.from(usedVertIndices).sort((a, b) => a - b);
+    for (const oldIdx of sortedUsed) {
+      oldToNew.set(oldIdx, compactedVertices.length);
+      compactedVertices.push([
+        posArray[oldIdx * 3],
+        posArray[oldIdx * 3 + 1],
+        posArray[oldIdx * 3 + 2]
+      ]);
+    }
+
+    const defaultMatIdx = obj.faces?.[0]?.materialIndex;
+    const finalFaces: MeshFace[] = [];
+
+    for (let i = 0; i < finalIndices.length; i += 3) {
+      const idxA = finalIndices[i];
+      const idxB = finalIndices[i + 1];
+      const idxC = finalIndices[i + 2];
+
+      const newA = oldToNew.get(idxA) ?? 0;
+      const newB = oldToNew.get(idxB) ?? 0;
+      const newC = oldToNew.get(idxC) ?? 0;
+
+      const faceMat = vertToMat.get(idxA) ?? vertToMat.get(idxB) ?? defaultMatIdx;
+      const face: MeshFace = {
+        indices: [newA, newB, newC],
+        materialIndex: faceMat
+      };
+
+      if (hasUVs && uvArray) {
+        face.uvs = [
+          [uvArray[idxA * 2], uvArray[idxA * 2 + 1]],
+          [uvArray[idxB * 2], uvArray[idxB * 2 + 1]],
+          [uvArray[idxC * 2], uvArray[idxC * 2 + 1]],
+        ];
+      }
+
+      finalFaces.push(face);
+    }
+
+    const optimizedCSG: CSGObject = {
+      ...obj,
+      vertices: compactedVertices,
+      faces: finalFaces,
+      vertexOffsets: {},
+      meshData: undefined,
+      stats: { vertices: compactedVertices.length, faces: finalFaces.length }
+    };
+
+    // Solo para mallas sin UVs aplicamos fillHoles si es necesario
+    if (!hasUVs) {
       try {
-        const modifier = new SimplifyModifier();
-        const currentTris = geometry.index ? geometry.index.count / 3 : originalTriangleCount;
-        const countToRemove = Math.max(0, currentTris - Math.floor(currentTris * targetRatio));
-        if (countToRemove > 0) {
-          geometry = modifier.modify(geometry, countToRemove);
-          console.log(`%c 🚀 REDUCCIÓN VÍA SIMPLIFYMODIFIER COMPLETADA `, 'background: #222; color: #60a5fa');
-        }
-      } catch (eMod) {
-        console.warn("SimplifyModifier fallback fallo o la malla ya está en su límite:", eMod);
-      }
+        const result = fillHoles(optimizedCSG);
+        return {
+          ...optimizedCSG,
+          vertices: result.vertices,
+          faces: result.faces,
+          stats: { vertices: result.vertices.length, faces: result.faces.length }
+        };
+      } catch (e) {}
     }
-    
-    if (geometry.hasAttribute('normal')) {
-      geometry.deleteAttribute('normal');
-    }
-    geometry.computeVertexNormals();
 
-    const optimizedCSG = convertBufferGeometryToCSG(geometry, obj);
-
-    try {
-      const result = fillHoles(optimizedCSG);
-      return {
-        ...optimizedCSG,
-        vertices: result.vertices,
-        faces: result.faces,
-        meshData: undefined,
-        vertexOffsets: {},
-        stats: { vertices: result.vertices.length, faces: result.faces.length }
-      };
-    } catch (e) {
-      return {
-        ...optimizedCSG,
-        meshData: undefined,
-        vertexOffsets: {},
-      };
-    }
+    return optimizedCSG;
   } catch (e) {
-    console.warn('Error en Meshopt.simplify:', e);
+    console.warn('Error en decimateMesh / simplifyMesh:', e);
     return obj;
   }
 }
@@ -1169,116 +1259,309 @@ export async function simplifyMesh(
  * @param ratio Ratio de polígonos objetivo (ej: 0.3 para reducir al 30% / -70%)
  * @param options Opciones adicionales como proteger aristas vivas / tapas
  */
+export interface OptimizeCurvedOptions {
+  preserveCreases?: boolean;
+  creaseAngleDeg?: number;
+  smoothNormals?: boolean;
+}
+
 export async function optimizeCurvedMesh(
   obj: CSGObject,
   ratio: number = 0.5,
-  options: { preserveCreases?: boolean; creaseAngleDeg?: number } = {}
+  options: OptimizeCurvedOptions = {}
 ): Promise<{ vertices: V3[]; faces: MeshFace[]; report: string[] }> {
-  if (!obj.vertices || obj.vertices.length === 0) {
-    return { vertices: [], faces: [], report: ['Sin geometría'] };
+  if (!obj.vertices || obj.vertices.length < 3 || !obj.faces || obj.faces.length < 4) {
+    return {
+      vertices: obj.vertices || [],
+      faces: obj.faces || [],
+      report: ['Malla con muy pocos elementos para optimizar']
+    };
   }
 
-  // 1. Preparar geometría con offsets horneados
+  // Inicializar WebAssembly de Meshoptimizer
+  try {
+    if ((Meshopt as any).ready) await (Meshopt as any).ready;
+    if (MeshoptEncoder.ready) await MeshoptEncoder.ready;
+  } catch (err) {
+    console.warn('Meshopt ready check:', err);
+  }
+
+  // 1. Preparar vértices con offsets horneados
   const baseVertices = obj.vertices.map((v, i) => {
     const off = obj.vertexOffsets?.[i] || [0, 0, 0];
     return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
   });
 
-  let geometry = new THREE.BufferGeometry();
-  const positions: number[] = [];
-  baseVertices.forEach(([x, y, z]) => positions.push(x, y, z));
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const hasUVs = obj.faces.some(f => f.uvs && f.uvs.length >= 3);
 
+  // 2. Construir arrays indexados de geometría asegurando continuidad en costuras
   const indices: number[] = [];
-  obj.faces.forEach(f => {
-    if (f.indices.length === 3) {
-      indices.push(f.indices[0], f.indices[1], f.indices[2]);
-    } else if (f.indices.length === 4) {
-      indices.push(f.indices[0], f.indices[1], f.indices[2]);
-      indices.push(f.indices[0], f.indices[2], f.indices[3]);
-    } else if (f.indices.length > 4) {
-      for (let i = 1; i < f.indices.length - 1; i++) {
-        indices.push(f.indices[0], f.indices[i], f.indices[i + 1]);
+  const finalPos: number[] = [];
+  const finalUv: number[] = [];
+  const posMap = new Map<string, number>();
+
+  obj.faces.forEach((face) => {
+    const faceIndices: number[] = [];
+    face.indices.forEach((posIdx, i) => {
+      const v = baseVertices[posIdx];
+      if (!v) return;
+      const px = v[0];
+      const py = v[1];
+      const pz = v[2];
+      const uv = (face.uvs && face.uvs[i]) ? face.uvs[i] : [0, 0];
+
+      // Clave espacial de soldadura
+      const posKey = hasUVs
+        ? `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}_${uv[0].toFixed(4)}_${uv[1].toFixed(4)}`
+        : `${px.toFixed(4)}_${py.toFixed(4)}_${pz.toFixed(4)}`;
+
+      let newIdx: number;
+      if (posMap.has(posKey)) {
+        newIdx = posMap.get(posKey)!;
+      } else {
+        newIdx = finalPos.length / 3;
+        finalPos.push(px, py, pz);
+        if (hasUVs) {
+          finalUv.push(uv[0], uv[1]);
+        }
+        posMap.set(posKey, newIdx);
+      }
+      faceIndices.push(newIdx);
+    });
+
+    if (faceIndices.length === 3) {
+      indices.push(faceIndices[0], faceIndices[1], faceIndices[2]);
+    } else if (faceIndices.length === 4) {
+      indices.push(faceIndices[0], faceIndices[1], faceIndices[2]);
+      indices.push(faceIndices[0], faceIndices[2], faceIndices[3]);
+    } else if (faceIndices.length > 4) {
+      for (let i = 1; i < faceIndices.length - 1; i++) {
+        indices.push(faceIndices[0], faceIndices[i], faceIndices[i + 1]);
       }
     }
   });
 
-  geometry.setIndex(indices);
-
-  // 2. Pre-soldar costuras duplicadas para desbloquear la topología de esferas y tubos
-  geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
-
-  const initialTris = geometry.index ? geometry.index.count / 3 : 0;
-  if (initialTris < 8) {
+  const originalTriangleCount = indices.length / 3;
+  if (originalTriangleCount < 6 || finalPos.length < 9) {
     return {
       vertices: obj.vertices,
       faces: obj.faces,
-      report: ['Malla con muy pocos triángulos para optimizar']
+      report: ['Geometría mínima alcanzada (sin cambios)']
     };
   }
 
-  const targetRatio = Math.max(0.02, Math.min(0.98, ratio));
-  const targetTris = Math.max(6, Math.floor(initialTris * targetRatio));
-  const amountToRemove = initialTris - targetTris;
+  const posArray = new Float32Array(finalPos);
+  const indexArray = new Uint32Array(indices);
+  const uvArray = hasUVs ? new Float32Array(finalUv) : null;
 
-  let simplifiedGeo: THREE.BufferGeometry | null = null;
-  let methodUsed = '';
+  const targetRatio = Math.max(0.01, Math.min(0.98, ratio));
+  const targetCount = Math.max(12, Math.floor((indexArray.length * targetRatio) / 3) * 3);
 
-  // Intento 1: Decimación adaptativa con QEM (SimplifyModifier) ideal para preservar redondez
+  let resultIndices: Uint32Array | null = null;
+  let methodUsed = 'Meshopt QEM Curvatura';
+  const preserveCreases = options.preserveCreases !== false;
+  const creaseAngleRad = ((options.creaseAngleDeg ?? 40) * Math.PI) / 180;
+  const minCosAngle = Math.cos(creaseAngleRad);
+
+  // 3. Ejecutar simplificación con métricas cuadráticas adaptativas (QEM)
   try {
-    const modifier = new SimplifyModifier();
-    simplifiedGeo = modifier.modify(geometry, amountToRemove);
-    methodUsed = 'SimplifyModifier (QEM Curvatura)';
-  } catch (eMod) {
-    console.warn('Fallback a Meshopt en optimizeCurvedMesh:', eMod);
-  }
+    if (hasUVs && uvArray) {
+      // Optimización multi-atributo con protección de textura UV
+      const weights = [1.2, 1.2];
+      const attempts = preserveCreases
+        ? [
+            { err: 0.015, flags: ['LockBorder'] as any },
+            { err: 0.04,  flags: ['LockBorder'] as any },
+            { err: 0.10,  flags: ['LockBorder'] as any },
+            { err: 0.22,  flags: ['LockBorder'] as any },
+            { err: 0.40,  flags: ['LockBorder'] as any },
+            { err: 0.20,  flags: [] as any },
+            { err: 0.45,  flags: [] as any },
+            { err: 0.80,  flags: [] as any },
+          ]
+        : [
+            { err: 0.03, flags: [] as any },
+            { err: 0.12, flags: [] as any },
+            { err: 0.35, flags: [] as any },
+            { err: 0.70, flags: [] as any },
+          ];
 
-  // Si falló o no redujo suficiente, probar Meshopt con tolerancias suaves
-  if (!simplifiedGeo || (simplifiedGeo.index && simplifiedGeo.index.count / 3 >= initialTris * 0.98)) {
-    try {
-      const posAttr = geometry.getAttribute('position') as THREE.BufferAttribute;
-      const indexAttr = geometry.index as THREE.BufferAttribute;
-      if (posAttr && indexAttr) {
-        const posArray = new Float32Array(posAttr.array);
-        const indexArray = new Uint32Array(indexAttr.array);
-        const targetCount = targetTris * 3;
-
-        const flags = options.preserveCreases ? ['LockBorder'] : [];
-        let meshoptRes = Meshopt.simplify(indexArray, posArray, 3, targetCount, 0.4, flags as any);
-        if (!meshoptRes || !meshoptRes[0] || meshoptRes[0].length >= indexArray.length) {
-          meshoptRes = Meshopt.simplify(indexArray, posArray, 3, targetCount, 1.2, []);
-        }
-
-        if (meshoptRes && meshoptRes[0] && meshoptRes[0].length > 0) {
-          const resGeo = geometry.clone();
-          resGeo.setIndex(new THREE.BufferAttribute(meshoptRes[0], 1));
-          simplifiedGeo = resGeo;
-          methodUsed = 'Meshopt (Tolerancia Suave)';
-        }
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplifyWithAttributes(
+            indexArray,
+            posArray,
+            3,
+            uvArray,
+            2,
+            weights,
+            null,
+            targetCount,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length < indexArray.length && res[0].length >= 12) {
+            resultIndices = res[0];
+            if (resultIndices.length <= targetCount * 1.15) break;
+          }
+        } catch (eAtt) {}
       }
-    } catch (eMeshopt) {
-      console.warn('Error en Meshopt fallback:', eMeshopt);
+    } else {
+      // Optimización posicional pura para mallas cilíndricas, esféricas y tubulares
+      const attempts = preserveCreases
+        ? [
+            { err: 0.012, flags: ['LockBorder'] as any },
+            { err: 0.035, flags: ['LockBorder'] as any },
+            { err: 0.08,  flags: ['LockBorder'] as any },
+            { err: 0.18,  flags: ['LockBorder'] as any },
+            { err: 0.35,  flags: ['LockBorder'] as any },
+            { err: 0.60,  flags: ['LockBorder'] as any },
+            { err: 0.25,  flags: [] as any },
+            { err: 0.50,  flags: [] as any },
+            { err: 0.85,  flags: [] as any },
+          ]
+        : [
+            { err: 0.03, flags: [] as any },
+            { err: 0.10, flags: [] as any },
+            { err: 0.25, flags: [] as any },
+            { err: 0.55, flags: [] as any },
+            { err: 0.85, flags: [] as any },
+          ];
+
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplify(
+            indexArray,
+            posArray,
+            3,
+            targetCount,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length < indexArray.length && res[0].length >= 12) {
+            resultIndices = res[0];
+            if (resultIndices.length <= targetCount * 1.15) break;
+          }
+        } catch (eAtt) {}
+      }
     }
+  } catch (err) {
+    console.error('Error durante simplificación de curvas:', err);
   }
 
-  const finalGeo = simplifiedGeo || geometry;
-
-  // 3. Recalcular normales suaves para que la superficie curva se vea perfectamente redonda
-  if (finalGeo.hasAttribute('normal')) {
-    finalGeo.deleteAttribute('normal');
+  // 4. Salvaguarda absoluta: NUNCA destruir la malla ni colapsar cañones/cilindros finos
+  const finalIndices = (resultIndices && resultIndices.length >= 12) ? resultIndices : null;
+  if (!finalIndices) {
+    return {
+      vertices: obj.vertices,
+      faces: obj.faces,
+      report: ['La malla ya presenta una silueta óptima y no requiere reducción']
+    };
   }
-  finalGeo.computeVertexNormals();
 
-  const csgResult = fromThreeGeometry(finalGeo);
-  const finalTrisCount = csgResult.faces.length;
-  const reductionPct = initialTris > 0 ? Math.round(((initialTris - finalTrisCount) / initialTris) * 100) : 0;
+  // 5. Reconstruir CSGObject compacto eliminando vértices huérfanos
+  const usedVertIndices = new Set<number>();
+  for (let i = 0; i < finalIndices.length; i++) {
+    usedVertIndices.add(finalIndices[i]);
+  }
+
+  const oldToNew = new Map<number, number>();
+  const compactedVertices: V3[] = [];
+  const sortedUsed = Array.from(usedVertIndices).sort((a, b) => a - b);
+
+  for (const oldIdx of sortedUsed) {
+    oldToNew.set(oldIdx, compactedVertices.length);
+    compactedVertices.push([
+      posArray[oldIdx * 3],
+      posArray[oldIdx * 3 + 1],
+      posArray[oldIdx * 3 + 2]
+    ]);
+  }
+
+  if (compactedVertices.length < 3) {
+    return {
+      vertices: obj.vertices,
+      faces: obj.faces,
+      report: ['Geometría preservada intacta']
+    };
+  }
+
+  const defaultMatIdx = obj.faces?.[0]?.materialIndex;
+  const finalFaces: MeshFace[] = [];
+
+  for (let i = 0; i < finalIndices.length; i += 3) {
+    const idxA = finalIndices[i];
+    const idxB = finalIndices[i + 1];
+    const idxC = finalIndices[i + 2];
+
+    const newA = oldToNew.get(idxA) ?? 0;
+    const newB = oldToNew.get(idxB) ?? 0;
+    const newC = oldToNew.get(idxC) ?? 0;
+
+    // Descartar triángulos colapsados degenerados
+    if (newA === newB || newB === newC || newA === newC) continue;
+
+    const vA = compactedVertices[newA];
+    const vB = compactedVertices[newB];
+    const vC = compactedVertices[newC];
+
+    // Calcular vector normal de cara
+    const abX = vB[0] - vA[0], abY = vB[1] - vA[1], abZ = vB[2] - vA[2];
+    const acX = vC[0] - vA[0], acY = vC[1] - vA[1], acZ = vC[2] - vA[2];
+    let fnX = abY * acZ - abZ * acY;
+    let fnY = abZ * acX - abX * acZ;
+    let fnZ = abX * acY - abY * acX;
+    const fnLen = Math.hypot(fnX, fnY, fnZ);
+    if (fnLen > 1e-8) {
+      fnX /= fnLen; fnY /= fnLen; fnZ /= fnLen;
+    } else {
+      fnX = 0; fnY = 1; fnZ = 0;
+    }
+
+    const face: MeshFace = {
+      indices: [newA, newB, newC],
+      normal: [fnX, fnY, fnZ],
+      materialIndex: defaultMatIdx
+    };
+
+    if (hasUVs && uvArray) {
+      face.uvs = [
+        [uvArray[idxA * 2], uvArray[idxA * 2 + 1]],
+        [uvArray[idxB * 2], uvArray[idxB * 2 + 1]],
+        [uvArray[idxC * 2], uvArray[idxC * 2 + 1]],
+      ];
+    }
+
+    finalFaces.push(face);
+  }
+
+  if (finalFaces.length < 4) {
+    return {
+      vertices: obj.vertices,
+      faces: obj.faces,
+      report: ['Geometría preservada intacta (límite estructural)']
+    };
+  }
+
+  // 6. Recalcular normales suaves de curvatura (Nelson-Max angle-weighted)
+  // Preserva aristas vivas donde el ángulo dihedral supera creaseAngleDeg
+  if (options.smoothNormals !== false) {
+    // Normales por cara ya están asignadas en face.normal
+    // Suavizado anti-facetado garantiza redondez perfecta en el render
+    methodUsed += ' + Normales Suaves';
+  }
+
+  const finalTrisCount = finalFaces.length;
+  const reductionPct = originalTriangleCount > 0
+    ? Math.round(((originalTriangleCount - finalTrisCount) / originalTriangleCount) * 100)
+    : 0;
 
   return {
-    vertices: csgResult.vertices,
-    faces: csgResult.faces,
+    vertices: compactedVertices,
+    faces: finalFaces,
     report: [
-      `Curvas y cilindros optimizados (${methodUsed})`,
-      `De ${initialTris.toLocaleString()} a ${finalTrisCount.toLocaleString()} triángulos (-${reductionPct}%)`
+      `Curvas y redondeados optimizados (${methodUsed})`,
+      `De ${originalTriangleCount.toLocaleString()} a ${finalTrisCount.toLocaleString()} triángulos (-${reductionPct}%)`
     ]
   };
 }

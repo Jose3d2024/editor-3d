@@ -545,19 +545,22 @@ export interface CSGObject {
   stats?: {
     vertices: number;
     faces: number;
+    quads?: number;
+    triangles?: number;
   };
 }
 
 export interface ReferenceImage {
-  url:      string | null;
-  position: V3;
-  rotation: V3;
-  scale:    V3;
-  opacity:  number;
-  locked:   boolean;
-  flipX?:   boolean; // Espejo horizontal
-  flipY?:   boolean; // Espejo vertical / invertir
-  angle?:   number;  // Rotación en grados
+  url:           string | null;
+  position:      V3;
+  rotation:      V3;
+  scale:         V3;
+  opacity:       number;
+  locked:        boolean;
+  flipX?:        boolean; // Espejo horizontal
+  flipY?:        boolean; // Espejo vertical / invertir
+  angle?:        number;  // Rotación en grados
+  fixedToScreen?: boolean; // Si true, la imagen se mantiene de tamaño fijo en pantalla sin escalar con el zoom
 }
 
 export interface CameraObject {
@@ -600,6 +603,7 @@ export interface Project {
   silueta: SilhouetteState;
   environment: EnvironmentSettings;
   showGrid?: boolean;
+  showSkeleton?: boolean;
 }
 
 export type BackgroundMode = 'HDRI' | 'GRADIENT' | 'COLOR' | 'TRANSPARENT';
@@ -628,6 +632,34 @@ export type ViewportLayoutPreset =
   | 'SPLIT_H' 
   | 'SPLIT_V';
 
+export type SnapTargetType = 'INCREMENT' | 'FACE' | 'VERTEX';
+
+export interface FaceSnapConfig {
+  enabled: boolean;
+  targetType: SnapTargetType;
+  projectIndividualElements: boolean; // Cada vértice se ajusta a la cara debajo en vez de moverse como bloque rígido
+  offset: number; // Offset de separación (evita Z-fighting)
+  targetObjectId?: string | null; // ID del objeto de destino (high-poly), o null para auto
+}
+
+export type ShrinkwrapMode = 
+  | 'NEAREST_SURFACE_POINT' 
+  | 'PROJECT' 
+  | 'NEAREST_VERTEX' 
+  | 'TARGET_NORMAL_PROJECT';
+
+export type ProjectAxis = 'X' | 'Y' | 'Z';
+export type ProjectDirection = 'POSITIVE' | 'NEGATIVE' | 'BOTH';
+
+export interface ShrinkwrapConfig {
+  targetId: string;
+  mode: ShrinkwrapMode;
+  offset: number;
+  projectAxis?: ProjectAxis;
+  projectDirection?: ProjectDirection;
+  onlySelectedVertices?: boolean;
+}
+
 export interface ViewportConfigState {
   preset: ViewportLayoutPreset;
   splitX: number; // 0.15 to 0.85 (default 0.5)
@@ -638,7 +670,19 @@ export interface ViewportConfigState {
 export type EditMode       = 'OBJECT' | 'VERTEX' | 'FACE' | 'EDGE';
 export type TransformMode  = 'translate' | 'rotate' | 'scale' | 'universal';
 export type TransformSpace = 'world' | 'local';
-export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'FACES_VERTICES';
+export type ViewMode       = 'SOLID' | 'WIREFRAME' | 'TEXTURED' | 'TEXTURED_WIREFRAME' | 'FACES_VERTICES';
+
+export interface HistoryStep {
+  id: string;
+  label: string;
+  timestamp: number;
+  objectName?: string;
+  objectId?: string;
+  objectCount?: number;
+  faceCount?: number;
+  vertexCount?: number;
+  category?: 'retopo' | 'edit' | 'transform' | 'boolean' | 'create' | 'delete' | 'material' | 'general';
+}
 
 export interface SilhouetteState {
   front: SilhouetteContour | null;
@@ -718,6 +762,9 @@ export interface AppState {
   setLoopCutSlide: (slide: number) => void;
   showCSG:        boolean;
   gridSnapEnabled: boolean;
+  faceSnapConfig: FaceSnapConfig;
+  setFaceSnapConfig: (cfg: Partial<FaceSnapConfig>) => void;
+  toggleFaceSnap: () => void;
   moveReferenceMode: boolean;
   activeViewport:    ViewportType;
   maximizedViewport: ViewportType | null;
@@ -730,7 +777,11 @@ export interface AppState {
   setSnapStep: (step: number) => void;
   resetViewportSplits: () => void;
   history:      Project[];
+  historySteps: HistoryStep[];
   historyIndex: number;
+  saveHistory:  (actionLabel?: string, category?: HistoryStep['category']) => void;
+  jumpToHistory: (targetIndex: number) => void;
+  clearHistory: () => void;
   isMaterialStudioOpen: boolean;
   materialStudioMaterialId: string | null;
   openMaterialStudio: (materialId?: string | null) => void;

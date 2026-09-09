@@ -318,8 +318,10 @@ export interface MarchingCubesOptions {
   isolevel?: number;           // Umbral de corte (por defecto 0.0 para SDF o 0.5 para densidades)
   boundsMin?: V3;              // Coordenada mínima en espacio 3D (ej: [-1, -1, -1])
   boundsMax?: V3;              // Coordenada máxima en espacio 3D (ej: [1, 1, 1])
-  smoothIterations?: number;   // Iteraciones de suavizado Laplaciano (0 para nada, 1-4 para orgánico)
+  smoothIterations?: number;   // Iteraciones de suavizado Laplaciano (0 para nada, 1-16 para orgánico)
   smoothFactor?: number;       // Peso del suavizado (0.0 a 1.0)
+  laplacianRounding?: boolean; // Redondeo activo de esquinas y aristas vivas (estilo cojín / orgánico)
+  roundness?: number;          // Factor de redondeo (0.0 a 1.0)
 }
 
 /**
@@ -365,7 +367,9 @@ export function marchingCubes(
     boundsMin = [-1, -1, -1],
     boundsMax = [1, 1, 1],
     smoothIterations = 0,
-    smoothFactor = 0.5
+    smoothFactor = 0.5,
+    laplacianRounding = false,
+    roundness = 0.0
   } = options;
 
   const dx = (boundsMax[0] - boundsMin[0]) / (resX - 1);
@@ -477,7 +481,10 @@ export function marchingCubes(
     }
 
     const lambda = Math.min(0.5, Math.max(0.1, smoothFactor * 0.6));
-    const mu = -(lambda / (1 - 0.05 * lambda)); // Factor Taubin μ < -λ para preservar volumen
+    const baseMu = -(lambda / (1 - 0.05 * lambda)); // Factor Taubin μ < -λ para preservar volumen
+    // Si laplacianRounding está activo o roundness > 0, atenuamos la anti-contracción para que las esquinas y cantos se redondeen suavemente
+    const roundWeight = laplacianRounding ? Math.max(0.25, roundness || 0.5) : (roundness || 0.0);
+    const mu = baseMu * (1.0 - Math.min(0.85, roundWeight * 0.75));
 
     for (let iter = 0; iter < smoothIterations; iter++) {
       // Paso 1: Relajación positiva (λ)

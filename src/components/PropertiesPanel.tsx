@@ -8,6 +8,7 @@
 import { MaterialPanel } from './MaterialPanel';
 import { ConfigPanel } from './ConfigPanel';
 import { EditMeshPanel } from './EditMeshPanel';
+import { HistoryPanel } from './HistoryPanel';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import * as THREE from 'three';
@@ -21,7 +22,8 @@ import {
   sweepMesh, SWEEP_PROFILES, makeStraightPath, makeArcPath, makeHelixPath,
   loftMesh, circleSection, squareSection, starSection,
 } from '../utils/modifiers';
-import type { V3, MeshFace, MaterialData, CameraObject, Transform, BackgroundMode } from '../types';
+import { createRetopoQuadPlane, createRetopoCage, getObjectRealBoundingBox } from '../utils/shrinkwrap';
+import type { V3, MeshFace, MaterialData, CameraObject, Transform, BackgroundMode, ShrinkwrapMode } from '../types';
 import { PRESET_HDRIS } from '../utils/environmentHelper';
 import { useStore } from '../store/useStore';
 import type { CSGObject } from '../types';
@@ -40,7 +42,8 @@ import {
   ArrowUpFromLine, Target, ArrowDownNarrowWide, Compass, Route,
   Spline, Waves, Orbit, Sparkles, RefreshCw, RotateCcw, ArrowRightLeft, GitMerge, FileDigit,
   SlidersHorizontal, Keyboard, Scissors, Combine, ArrowLeftRight, Cloud, Wind, Flame, Zap,
-  Activity, Shield, Magnet, Disc, Droplets, Lock, Unlock, CircleDot
+  Activity, Shield, Magnet, Disc, Droplets, Lock, Unlock, CircleDot, Bone,
+  AlertCircle, History
 } from 'lucide-react';
 import { UnifiedBooleanOp } from '../utils/booleanOperations';
 import { safeFixed, safeNum, safeParseFixed } from '../utils/numberUtils';
@@ -2109,6 +2112,7 @@ const ObjectMaterialSection: React.FC<{ obj: CSGObject; onOpenMaterialTab: () =>
 
 const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const {
+    project,
     smoothObject,
     roundAnglesObject,
     subdivideObject,
@@ -2117,8 +2121,16 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     optimizeCurvedObject,
     regularizeObject,
     isotropicRemeshObject,
+    retopologizeObject,
+    applyShrinkwrapToObject,
+    applySilhouetteVacuumWrapToObject,
+    solidifyObject,
+    faceSnapConfig,
+    setFaceSnapConfig,
+    toggleFaceSnap,
     dissolveCoplanarObject,
     cleanIslandsObject,
+    repairNormalsObject,
     updateObject,
     fillHolesObject,
     capSelectedFacesObject,
@@ -2130,7 +2142,9 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     selectedGLTFMeshes,
     setSelectedGLTFMeshes,
     isolateGLTFSelection,
-    setIsolateGLTFSelection
+    setIsolateGLTFSelection,
+    addObject,
+    selectObject
   } = useStore();
   const [smoothFactor, setSmoothFactor] = useState(0.5);
   const [smoothIters, setSmoothIters] = useState(1);
@@ -2146,16 +2160,36 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [meshSearch, setMeshSearch] = useState('');
 
   // Estados de Regularización y Limpieza Avanzada de Topología
-  const [regStrength, setRegStrength] = useState(0.65);
+  const [regStrength, setRegStrength] = useState(0.30);
   const [regIters, setRegIters] = useState(3);
   const [regFeatureAngle, setRegFeatureAngle] = useState(40);
   const [remeshIters, setRemeshIters] = useState(2);
-  const [coplanarTolerance, setCoplanarTolerance] = useState(3.5);
+  const [coplanarTolerance, setCoplanarTolerance] = useState(5.0);
   const [islandRatio, setIslandRatio] = useState(0.05);
+
+  // Estados de Snapping, Shrinkwrap (Envolver) y Solidify (Solidificar)
+  const [shrinkTargetId, setShrinkTargetId] = useState<string>('');
+  const [shrinkwrapMode, setShrinkwrapMode] = useState<ShrinkwrapMode>('NEAREST_SURFACE_POINT');
+  const [shrinkwrapOffset, setShrinkwrapOffset] = useState<number>(0.002);
+  const [shrinkwrapProjectAxis, setShrinkwrapProjectAxis] = useState<'X' | 'Y' | 'Z'>('Z');
+  const [shrinkwrapProjectDir, setShrinkwrapProjectDir] = useState<'POSITIVE' | 'NEGATIVE' | 'BOTH'>('BOTH');
+  const [shrinkwrapOnlySelected, setShrinkwrapOnlySelected] = useState<boolean>(false);
+  const [isApplyingShrinkwrap, setIsApplyingShrinkwrap] = useState<boolean>(false);
+  const [retopoPlaneSubdivs, setRetopoPlaneSubdivs] = useState<number>(100);
+  const [retopoPlaneOrientation, setRetopoPlaneOrientation] = useState<'FRONT' | 'TOP' | 'SIDE'>('FRONT');
+  const [retopoCageSubdivs, setRetopoCageSubdivs] = useState<number>(64);
+  const [retopoCageShape, setRetopoCageShape] = useState<'ELLIPSOID' | 'BOX'>('ELLIPSOID');
+  const [isApplyingVacuum, setIsApplyingVacuum] = useState<boolean>(false);
+
+  const [solidifyThickness, setSolidifyThickness] = useState<number>(0.05);
+  const [solidifyOffset, setSolidifyOffset] = useState<number>(0.0);
+  const [isSolidifying, setIsSolidifying] = useState<boolean>(false);
 
   // Estados de Optimización de Curvas & Redondeados (Esferas, Tubos, Cilindros)
   const [curvedOptRatio, setCurvedOptRatio] = useState(0.4);
   const [curvedPreserveCreases, setCurvedPreserveCreases] = useState(true);
+  const [curvedCreaseAngle, setCurvedCreaseAngle] = useState(40);
+  const [curvedSmoothNormals, setCurvedSmoothNormals] = useState(true);
 
   // Estados del Deformador de Malla por Ruido
   const [noiseType, setNoiseType] = useState<MeshNoiseType>('VORONOI_CELLULAR');
@@ -2551,37 +2585,638 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
           {/* 1. Regularización Tangencial */}
           <div className="space-y-1 bg-zinc-950/60 border border-zinc-800 p-1.5 rounded">
-            <span className="text-[9px] text-teal-200 font-bold flex items-center justify-between">
-              <span>1. Relajación Tangencial (Triángulos Equiláteros)</span>
-            </span>
-            <NumRow label="Fuerza Relajación" value={regStrength} min={0.1} max={1.0} step={0.05} onChange={setRegStrength} slider />
-            <NumRow label="Iteraciones" value={regIters} min={1} max={10} step={1} onChange={setRegIters} slider />
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] text-teal-200 font-bold flex items-center gap-1">
+                <span>1. Relajación Tangencial (Equiláteros)</span>
+              </span>
+              <span className="text-[7.5px] bg-teal-950/90 text-teal-300 border border-teal-500/40 px-1 py-0.5 rounded font-mono font-bold">
+                0 Caras Extra
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Equilibra los ángulos hacia triángulos equiláteros manteniendo el 100% de las caras y protegiendo aristas vivas y texturas.
+            </p>
+            <NumRow label="Fuerza Relajación" value={regStrength} min={0.05} max={0.65} step={0.05} onChange={setRegStrength} slider />
+            <NumRow label="Iteraciones" value={regIters} min={1} max={8} step={1} onChange={setRegIters} slider />
             <NumRow label="Ángulo Aristas Vivas (°)" value={regFeatureAngle} min={15} max={85} step={5} onChange={setRegFeatureAngle} slider />
             <button
               onClick={() => regularizeObject(obj.id, regStrength, regIters, regFeatureAngle)}
-              className="w-full py-1.5 bg-teal-700 hover:bg-teal-600 rounded text-[10px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
-              title="Equilibra y regulariza los triángulos a lo largo de la superficie preservando aristas vivas mecánicas"
+              className="w-full py-1.5 bg-teal-700 hover:bg-teal-600 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
+              title="Equilibra y regulariza los triángulos a lo largo de la superficie manteniendo exactamente el mismo recuento de caras"
             >
-              Regularizar Malla (Topología Equilibrada)
+              Regularizar Malla (Topología Equilibrada · 0 Caras Extra)
             </button>
           </div>
 
           {/* 2. Remallado Isótropo Uniforme */}
           <div className="space-y-1 bg-zinc-950/60 border border-zinc-800 p-1.5 rounded">
-            <span className="text-[9px] text-emerald-200 font-bold flex items-center justify-between">
-              <span>2. Remallado Isótropo Uniforme</span>
-            </span>
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] text-emerald-200 font-bold flex items-center gap-1">
+                <span>2. Remallado Isótropo Uniforme</span>
+              </span>
+              <span className="text-[7.5px] bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 px-1 py-0.5 rounded font-mono font-bold">
+                Sin Inflar Caras
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Unifica la longitud de aristas mediante división y colapso mutuo, garantizando que el recuento de caras nunca supere el actual.
+            </p>
             <NumRow label="Pasadas" value={remeshIters} min={1} max={5} step={1} onChange={setRemeshIters} slider />
             <button
               onClick={() => isotropicRemeshObject(obj.id, undefined, remeshIters)}
-              className="w-full py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-[10px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
-              title="Divide aristas largas y colapsa aristas microscópicas para crear una rejilla triangular uniforme"
+              className="w-full py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-0.5"
+              title="Divide aristas largas y colapsa aristas microscópicas garantizando que el recuento de polígonos no aumente"
             >
-              Remallar Malla Uniforme (Isotropic)
+              Remallar Malla Uniforme (Sin Aumentar Polígonos)
             </button>
           </div>
 
-          {/* 3. Disolver Caras Coplanares & Limpiar Ruido */}
+          {/* 3. ZRemesher: Auto-Retopología (Flujo de Quads) */}
+          <div className="space-y-1.5 bg-zinc-950/70 border border-fuchsia-500/40 p-2 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[9.5px] text-fuchsia-300 font-bold flex items-center gap-1">
+                <Layers size={11} className="text-fuchsia-400" />
+                <span>3. ZRemesher: Auto-Retopología (Quads)</span>
+              </span>
+              <span className="text-[8px] bg-fuchsia-950/80 text-fuchsia-300 border border-fuchsia-600/40 px-1 py-0.5 rounded font-mono font-bold">
+                Quad Flow
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Reorganiza toda la malla en cuadriláteros limpios con bucles de bordes continuos para animación y rigging sin perder volumen.
+            </p>
+            <div className="grid grid-cols-2 gap-1 pt-0.5">
+              <button
+                type="button"
+                onClick={() => retopologizeObject(obj.id, { mode: 'QUAD_DOMINANT', targetRatio: 0.25 })}
+                className="py-1.5 bg-gradient-to-r from-fuchsia-700 to-indigo-700 hover:from-fuchsia-600 hover:to-indigo-600 rounded text-[9px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                title="Genera topología limpia con cuadriláteros dominantes al 25% del recuento original"
+              >
+                <Layers size={11} />
+                Quads Dominantes (25%)
+              </button>
+              <button
+                type="button"
+                onClick={() => retopologizeObject(obj.id, { mode: 'PURE_QUADS', targetRatio: 0.25 })}
+                className="py-1.5 bg-gradient-to-r from-indigo-700 to-violet-700 hover:from-indigo-600 hover:to-violet-600 rounded text-[9px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                title="Genera topología 100% de cuadriláteros puros (Catmull-Clark Flow)"
+              >
+                <Sparkles size={11} />
+                100% Quads (Puros)
+              </button>
+            </div>
+          </div>
+
+          {/* 4. Snapping: Ajuste a Caras (Imán de Retopología) */}
+          <div className="space-y-2 bg-zinc-950/70 border border-amber-500/40 p-2.5 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[9.5px] text-amber-300 font-bold flex items-center gap-1.5">
+                <Magnet size={12} className="text-amber-400" />
+                <span>Snapping: Ajuste a Caras (Imán)</span>
+              </span>
+              <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-bold border ${
+                faceSnapConfig?.enabled
+                  ? 'bg-amber-500 text-black border-amber-400'
+                  : 'bg-zinc-800 text-zinc-400 border-white/10'
+              }`}>
+                {faceSnapConfig?.enabled ? 'ACTIVO' : 'OFF'}
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Ajusta y calca los vértices directamente sobre la superficie del modelo high-poly mientras los mueves, manteniendo fielmente la silueta y los volúmenes del esculpido.
+            </p>
+
+            {/* Toggle Switch */}
+            <button
+              type="button"
+              onClick={() => toggleFaceSnap()}
+              className={`w-full py-1.5 rounded text-[9.5px] font-bold transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 ${
+                faceSnapConfig?.enabled
+                  ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-500/20'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-white/10'
+              }`}
+            >
+              <Magnet size={12} />
+              {faceSnapConfig?.enabled ? 'Desactivar Imán de Superficie' : 'Activar Imán Ajuste a Caras'}
+            </button>
+
+            {/* Project Individual Elements Toggle */}
+            <label className="flex items-start justify-between gap-2 p-1.5 bg-zinc-900/80 border border-white/5 rounded cursor-pointer hover:border-amber-500/30 transition-colors">
+              <div className="flex flex-col">
+                <span className="text-[9px] font-semibold text-zinc-200">Project Individual Elements (Proyectar Individuales)</span>
+                <span className="text-[7.5px] text-zinc-400 leading-tight">
+                  Al mover varios vértices a la vez, cada uno se ajusta a la cara debajo independientemente en vez de como bloque rígido.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={faceSnapConfig?.projectIndividualElements ?? true}
+                onChange={e => setFaceSnapConfig({ projectIndividualElements: e.target.checked })}
+                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
+              />
+            </label>
+
+            {/* Offset / Desplazamiento */}
+            <div className="space-y-1 bg-zinc-900/80 p-1.5 rounded border border-white/5">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] text-zinc-300 font-semibold">Offset (Desplazamiento Z-Fighting):</span>
+                <span className="text-[9px] font-mono text-amber-300 font-bold">{faceSnapConfig?.offset ?? 0.002}</span>
+              </div>
+              <p className="text-[7.5px] text-zinc-400 leading-tight">
+                Evita que la nueva malla se hunda o parpadee visualmente al quedar en la misma coordenada que la escultura original.
+              </p>
+              <div className="flex items-center gap-1 pt-1">
+                {[0, 0.001, 0.002, 0.005, 0.01].map(off => (
+                  <button
+                    key={off}
+                    type="button"
+                    onClick={() => setFaceSnapConfig({ offset: off })}
+                    className={`flex-1 py-0.5 text-[8px] font-mono font-bold rounded cursor-pointer transition-colors ${
+                      (faceSnapConfig?.offset ?? 0.002) === off
+                        ? 'bg-amber-500 text-black'
+                        : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {off}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 5. Modificador Shrinkwrap (Envolver) */}
+          <div className="space-y-2 bg-zinc-950/70 border border-cyan-500/40 p-2.5 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[9.5px] text-cyan-300 font-bold flex items-center gap-1.5">
+                <Layers size={12} className="text-cyan-400" />
+                <span>Modificador Shrinkwrap (Envolver Malla)</span>
+              </span>
+              <span className="text-[8px] bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 px-1 py-0.5 rounded font-mono font-bold">
+                Envolver
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Proyecta toda la malla (o los vértices seleccionados) contra la superficie del modelo High-Poly para calcar perfectamente sus relieves y silueta.
+            </p>
+
+            {(() => {
+              const availableTargets = project.objects.filter(o => o.id !== obj.id);
+              const resolvedTarget = shrinkTargetId 
+                ? project.objects.find(o => o.id === shrinkTargetId) 
+                : availableTargets[0];
+
+              const handleCreateRetopoPlane = (subdivs = retopoPlaneSubdivs, orient = retopoPlaneOrientation) => {
+                const newObj = createRetopoQuadPlane({
+                  targetObj: obj,
+                  subdivisions: subdivs,
+                  orientation: orient,
+                  marginFactor: 1.15
+                });
+
+                addObject(newObj);
+                selectObject(newObj.id);
+                setShrinkTargetId(obj.id);
+              };
+
+              const handleCreateWrapperCage = (subdivs = retopoCageSubdivs, shape = retopoCageShape) => {
+                const newObj = createRetopoCage({
+                  targetObj: obj,
+                  subdivisions: subdivs,
+                  marginFactor: 1.08,
+                  shape: shape
+                });
+
+                addObject(newObj);
+                selectObject(newObj.id);
+                setShrinkTargetId(obj.id);
+              };
+
+              return (
+                <div className="space-y-2">
+                  {/* Selector y Generador de Malla de Retopología: Plano Quads o Cage Envoltura 3D */}
+                  <div className="p-2 bg-cyan-950/30 border border-cyan-500/30 rounded-lg space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-bold text-[9px] text-cyan-300">
+                        <Grid size={12} className="text-cyan-400" />
+                        <span>Generador de Retopología (Auto-Ajuste Bounding)</span>
+                      </div>
+                      <span className="text-[7.5px] bg-cyan-900/60 text-cyan-200 px-1 py-0.5 rounded font-mono">
+                        Silueta 3D
+                      </span>
+                    </div>
+
+                    {/* Opción 1: Plano Quads 2D */}
+                    <div className="bg-zinc-900/70 border border-zinc-700/60 p-1.5 rounded space-y-1.5">
+                      <div className="flex items-center justify-between text-[8px] font-bold text-zinc-300">
+                        <span>1. Plano Quads (Lámina frontal/cenital):</span>
+                        <span className="text-cyan-300 font-mono font-bold">{retopoPlaneSubdivs}x{retopoPlaneSubdivs} quads</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[
+                          { label: '25x25', val: 25 },
+                          { label: '50x50', val: 50 },
+                          { label: '100x100', val: 100, star: true },
+                          { label: '150x150', val: 150 },
+                        ].map(preset => (
+                          <button
+                            key={preset.val}
+                            type="button"
+                            onClick={() => setRetopoPlaneSubdivs(preset.val)}
+                            className={`py-0.5 px-1 rounded text-[7.5px] font-mono font-bold transition-all cursor-pointer ${
+                              retopoPlaneSubdivs === preset.val
+                                ? 'bg-cyan-600 text-white shadow-sm'
+                                : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
+                            }`}
+                          >
+                            {preset.label} {preset.star && '★'}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between gap-1 text-[7.5px]">
+                        <span className="text-zinc-400">Orientación:</span>
+                        <div className="flex gap-1">
+                          {[
+                            { id: 'FRONT', label: 'Frente (Z)' },
+                            { id: 'TOP', label: 'Cenital (Y)' },
+                            { id: 'SIDE', label: 'Lateral (X)' }
+                          ].map(orient => (
+                            <button
+                              key={orient.id}
+                              type="button"
+                              onClick={() => setRetopoPlaneOrientation(orient.id as any)}
+                              className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold cursor-pointer transition-colors ${
+                                retopoPlaneOrientation === orient.id
+                                  ? 'bg-cyan-600 text-white'
+                                  : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              {orient.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCreateRetopoPlane(retopoPlaneSubdivs, retopoPlaneOrientation)}
+                        className="w-full py-1 bg-cyan-700 hover:bg-cyan-600 text-white rounded font-bold text-[8.5px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-sm active:scale-95"
+                      >
+                        <Plus size={11} />
+                        <span>Crear Plano Quads {retopoPlaneSubdivs}x{retopoPlaneSubdivs}</span>
+                      </button>
+                    </div>
+
+                    {/* Opción 2: Cage Envoltura 3D (Silueta Completa) */}
+                    <div className="bg-blue-950/40 border border-blue-500/40 p-1.5 rounded space-y-1.5">
+                      <div className="flex items-center justify-between text-[8px] font-bold text-blue-200">
+                        <span>2. Cage Envoltura 3D (Silueta completa 360°):</span>
+                        <span className="text-blue-300 font-mono font-bold">{retopoCageSubdivs}x{retopoCageSubdivs}</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[
+                          { label: '16x16', val: 16 },
+                          { label: '32x32', val: 32 },
+                          { label: '64x64', val: 64, star: true },
+                          { label: '100x100', val: 100 },
+                        ].map(preset => (
+                          <button
+                            key={preset.val}
+                            type="button"
+                            onClick={() => setRetopoCageSubdivs(preset.val)}
+                            className={`py-0.5 px-1 rounded text-[7.5px] font-mono font-bold transition-all cursor-pointer ${
+                              retopoCageSubdivs === preset.val
+                                ? 'bg-blue-600 text-white shadow-sm'
+                                : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
+                            }`}
+                          >
+                            {preset.label} {preset.star && '★'}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center justify-between gap-1 text-[7.5px]">
+                        <span className="text-zinc-400">Forma 3D:</span>
+                        <div className="flex gap-1">
+                          {[
+                            { id: 'ELLIPSOID', label: 'Elipsoide Proporcional' },
+                            { id: 'BOX', label: 'Caja Bounding' }
+                          ].map(shape => (
+                            <button
+                              key={shape.id}
+                              type="button"
+                              onClick={() => setRetopoCageShape(shape.id as any)}
+                              className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold cursor-pointer transition-colors ${
+                                retopoCageShape === shape.id
+                                  ? 'bg-blue-600 text-white'
+                                  : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              {shape.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCreateWrapperCage(retopoCageSubdivs, retopoCageShape)}
+                        className="w-full py-1 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold text-[8.5px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-sm active:scale-95"
+                      >
+                        <Box size={11} />
+                        <span>Crear Cage Envoltura Silueta ({retopoCageSubdivs}x{retopoCageSubdivs})</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Target Object Selector or Empty State Helper */}
+                  {availableTargets.length === 0 ? (
+                    <div className="space-y-1.5 p-2 bg-amber-950/40 border border-amber-500/40 rounded-lg text-amber-200">
+                      <div className="flex items-center gap-1.5 font-bold text-[9px] text-amber-300">
+                        <AlertCircle size={13} className="text-amber-400 shrink-0" />
+                        <span>Requiere una malla de referencia (High-Poly)</span>
+                      </div>
+                      <p className="text-[8px] text-amber-200/90 leading-tight">
+                        Usa el botón superior para generar un Plano Retopo Quads sobre este modelo. El plano se creará ya adaptado a las dimensiones de tu figura.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8.5px] text-zinc-400 font-semibold">Malla Destino (High-Poly):</span>
+                        {resolvedTarget && (
+                          <span className="text-[8px] font-mono text-cyan-300 bg-cyan-950/80 px-1 py-0.2 rounded border border-cyan-500/30 truncate max-w-[130px]">
+                            {resolvedTarget.name || resolvedTarget.id}
+                          </span>
+                        )}
+                      </div>
+                      <select
+                        value={shrinkTargetId || (resolvedTarget ? resolvedTarget.id : '')}
+                        onChange={e => setShrinkTargetId(e.target.value)}
+                        className="w-full bg-zinc-900 border border-white/10 rounded px-2 py-1 text-[9px] text-zinc-200 focus:border-cyan-400 outline-none"
+                      >
+                        {availableTargets.map(o => (
+                          <option key={o.id} value={o.id}>{o.name || `Objeto ${o.id.slice(0, 6)}`}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Mode Selector */}
+                  <div className="space-y-1">
+                    <span className="text-[8.5px] text-zinc-400 font-semibold">Modo de Ajuste (Shrinkwrap Mode):</span>
+                    <div className="grid grid-cols-2 gap-1">
+                      {[
+                        { id: 'NEAREST_SURFACE_POINT', label: 'Punto Más Cercano' },
+                        { id: 'PROJECT', label: 'Proyectar (Ejes)' },
+                        { id: 'NEAREST_VERTEX', label: 'Vértice Cercano' },
+                        { id: 'TARGET_NORMAL_PROJECT', label: 'Normales Destino' }
+                      ].map(m => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setShrinkwrapMode(m.id as ShrinkwrapMode)}
+                          className={`py-1 px-1.5 rounded text-[8.5px] font-medium transition-colors cursor-pointer text-center ${
+                            shrinkwrapMode === m.id
+                              ? 'bg-cyan-600 text-white font-bold shadow-sm'
+                              : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200 border border-white/5'
+                          }`}
+                        >
+                          {m.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* If Mode is PROJECT: axis and direction */}
+                  {shrinkwrapMode === 'PROJECT' && (
+                    <div className="grid grid-cols-2 gap-1.5 p-1.5 bg-zinc-900/60 rounded border border-white/5">
+                      <div className="space-y-0.5">
+                        <span className="text-[8px] text-zinc-400">Eje de Proyección:</span>
+                        <div className="flex gap-1">
+                          {(['X', 'Y', 'Z'] as const).map(axis => (
+                            <button
+                              key={axis}
+                              type="button"
+                              onClick={() => setShrinkwrapProjectAxis(axis)}
+                              className={`flex-1 py-0.5 text-[8.5px] font-mono font-bold rounded cursor-pointer ${
+                                shrinkwrapProjectAxis === axis ? 'bg-cyan-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                              }`}
+                            >
+                              {axis}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-[8px] text-zinc-400">Dirección:</span>
+                        <div className="flex gap-1">
+                          {[
+                            { id: 'BOTH', label: '+/-' },
+                            { id: 'POSITIVE', label: '+' },
+                            { id: 'NEGATIVE', label: '-' }
+                          ].map(d => (
+                            <button
+                              key={d.id}
+                              type="button"
+                              onClick={() => setShrinkwrapProjectDir(d.id as any)}
+                              className={`flex-1 py-0.5 text-[8.5px] font-mono font-bold rounded cursor-pointer ${
+                                shrinkwrapProjectDir === d.id ? 'bg-cyan-600 text-white' : 'bg-zinc-800 text-zinc-400'
+                              }`}
+                            >
+                              {d.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Offset Slider */}
+                  <div className="space-y-1 bg-zinc-900/60 p-1.5 rounded border border-white/5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[8.5px] text-zinc-300 font-semibold">Offset (Desplazamiento Z):</span>
+                      <span className="text-[8.5px] font-mono text-cyan-300 font-bold">{shrinkwrapOffset}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.02}
+                      step={0.0005}
+                      value={shrinkwrapOffset}
+                      onChange={e => setShrinkwrapOffset(parseFloat(e.target.value))}
+                      className="w-full h-1.5 accent-cyan-400 bg-zinc-800 rounded cursor-pointer"
+                    />
+                    <div className="flex justify-between gap-1 pt-0.5">
+                      {[0, 0.001, 0.002, 0.005, 0.01].map(off => (
+                        <button
+                          key={off}
+                          type="button"
+                          onClick={() => setShrinkwrapOffset(off)}
+                          className={`flex-1 py-0.5 text-[7.5px] font-mono rounded cursor-pointer ${
+                            shrinkwrapOffset === off ? 'bg-cyan-600 text-white font-bold' : 'bg-zinc-800 text-zinc-400'
+                          }`}
+                        >
+                          {off}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Only Selected Vertices checkbox */}
+                  {editMode === 'VERTEX' && (
+                    <label className="flex items-center justify-between gap-2 p-1.5 bg-zinc-900/60 rounded border border-white/5 cursor-pointer">
+                      <span className="text-[8.5px] text-zinc-300">Aplicar solo a vértices seleccionados</span>
+                      <input
+                        type="checkbox"
+                        checked={shrinkwrapOnlySelected}
+                        onChange={e => setShrinkwrapOnlySelected(e.target.checked)}
+                        className="w-3.5 h-3.5 accent-cyan-500 rounded cursor-pointer"
+                      />
+                    </label>
+                  )}
+
+                  {/* Vacuum / Deep Silhouette Shrinkwrap Action Card */}
+                  <div className="p-2.5 bg-gradient-to-br from-cyan-950/80 via-blue-950/70 to-indigo-950/80 border-2 border-cyan-400/80 rounded-lg space-y-2 shadow-lg">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-bold text-[9.5px] text-cyan-200">
+                        <Sparkles size={13} className="text-cyan-400 animate-pulse" />
+                        <span>✨ Ajustar a Silueta Completa (Vacuum Wrap)</span>
+                      </div>
+                      <span className="text-[7.5px] bg-cyan-500/30 text-cyan-200 border border-cyan-400/50 px-1.5 py-0.5 rounded font-mono font-bold">
+                        Recomendado
+                      </span>
+                    </div>
+
+                    <p className="text-[8px] text-cyan-100/90 leading-relaxed">
+                      Succión profunda al vacío por contracción iterativa (5 pasadas con relajación Laplaciana). Si la malla tiene pocas caras (ej. 480 caras), <b>la subdivide automáticamente para alcanzar miles de vértices</b> y ceñirse entre las patas, bajo el vientre, cuello y silueta completa.
+                    </p>
+
+                    <button
+                      type="button"
+                      disabled={isApplyingVacuum || isApplyingShrinkwrap}
+                      onClick={async () => {
+                        const targetObj = resolvedTarget;
+                        if (!targetObj) {
+                          alert('Para ajustar la silueta se requiere una malla objetivo (High-Poly) sobre la cual proyectar los vértices.');
+                          return;
+                        }
+
+                        setIsApplyingVacuum(true);
+                        try {
+                          await applySilhouetteVacuumWrapToObject(obj.id, targetObj.id, {
+                            autoSubdivide: true,
+                            minFacesTarget: 6000,
+                            iterations: 5,
+                            relaxation: 0.42,
+                            offset: shrinkwrapOffset
+                          });
+                        } catch (err) {
+                          console.error('Error applying vacuum shrinkwrap:', err);
+                          alert('Ocurrió un error al ceñir la silueta completa.');
+                        } finally {
+                          setIsApplyingVacuum(false);
+                        }
+                      }}
+                      className="w-full py-2 bg-gradient-to-r from-cyan-600 via-blue-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded font-bold text-[9.5px] flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md active:scale-95"
+                    >
+                      <Sparkles size={12} />
+                      <span>{isApplyingVacuum ? 'Ajustando y Succionando Silueta...' : 'Ceñir a Silueta Completa Ahora'}</span>
+                    </button>
+                  </div>
+
+                  {/* Standard 1-Pass Shrinkwrap Button & Helpers */}
+                  <div className="flex flex-col gap-1 pt-1">
+                    <button
+                      type="button"
+                      disabled={isApplyingShrinkwrap || isApplyingVacuum}
+                      onClick={async () => {
+                        const targetObj = resolvedTarget;
+                        if (!targetObj) {
+                          alert('Para usar Shrinkwrap se requiere una malla objetivo (High-Poly) sobre la cual proyectar los vértices.');
+                          return;
+                        }
+
+                        setIsApplyingShrinkwrap(true);
+                        try {
+                          await applyShrinkwrapToObject(obj.id, targetObj.id, {
+                            targetId: targetObj.id,
+                            mode: shrinkwrapMode,
+                            offset: shrinkwrapOffset,
+                            projectAxis: shrinkwrapProjectAxis,
+                            projectDirection: shrinkwrapProjectDir,
+                            onlySelectedVertices: shrinkwrapOnlySelected
+                          });
+                        } catch (err) {
+                          console.error('Error applying shrinkwrap:', err);
+                          alert('Ocurrió un error al aplicar el modificador Shrinkwrap.');
+                        } finally {
+                          setIsApplyingShrinkwrap(false);
+                        }
+                      }}
+                      className="w-full py-1.5 bg-zinc-800 hover:bg-zinc-700 border border-cyan-500/30 disabled:opacity-50 rounded text-[8.5px] font-bold text-cyan-200 transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+                    >
+                      <Layers size={11} />
+                      <span>{isApplyingShrinkwrap ? 'Envolviendo Malla...' : 'Aplicar Shrinkwrap Estándar (1 Pasada)'}</span>
+                    </button>
+
+                    <div className="grid grid-cols-2 gap-1 pt-0.5">
+                      <button
+                        type="button"
+                        onClick={() => subdivideObject(obj.id)}
+                        className="py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded text-[7.5px] text-zinc-300 font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                        title="Subdivide la malla actual para añadir 4x caras y permitir mayor detalle de silueta"
+                      >
+                        <span>➕ Subdividir Malla (4x)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => regularizeObject(obj.id, 0.4, 2)}
+                        className="py-1 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded text-[7.5px] text-zinc-300 font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                        title="Alisa y redistribuye los vértices para eliminar arrugas y suavizar la silueta"
+                      >
+                        <span>✨ Suavizar y Relajar</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* 6. Modificador Solidify (Solidificar) */}
+          <div className="space-y-2 bg-zinc-950/70 border border-emerald-500/40 p-2.5 rounded-lg shadow-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-[9.5px] text-emerald-300 font-bold flex items-center gap-1.5">
+                <Box size={12} className="text-emerald-400" />
+                <span>Modificador Solidify (Solidificar)</span>
+              </span>
+              <span className="text-[8px] bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 px-1 py-0.5 rounded font-mono font-bold">
+                Grosor 3D
+              </span>
+            </div>
+            <p className="text-[8px] text-zinc-400 leading-tight">
+              Otorga grosor y profundidad física a mallas abiertas o láminas de retopología, cosiendo y sellando los bordes con caras laterales.
+            </p>
+
+            <NumRow label="Grosor" value={solidifyThickness} min={0.005} max={0.5} step={0.005} onChange={setSolidifyThickness} slider />
+            <NumRow label="Offset (-1 a 1)" value={solidifyOffset} min={-1} max={1} step={0.1} onChange={setSolidifyOffset} slider />
+
+            <button
+              type="button"
+              disabled={isSolidifying}
+              onClick={async () => {
+                setIsSolidifying(true);
+                try {
+                  await solidifyObject(obj.id, solidifyThickness, solidifyOffset);
+                } finally {
+                  setIsSolidifying(false);
+                }
+              }}
+              className="w-full py-1.5 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+            >
+              <Box size={11} />
+              {isSolidifying ? 'Solidificando Malla...' : 'Aplicar Solidify (Dar Grosor)'}
+            </button>
+          </div>
+
+          {/* 7. Disolver Caras Coplanares & Limpiar Ruido */}
           <div className="grid grid-cols-2 gap-1.5">
             <div className="space-y-1.5 bg-zinc-950/70 border border-amber-500/30 p-2 rounded-lg flex flex-col justify-between shadow-sm">
               <div className="space-y-1">
@@ -2591,11 +3226,14 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                     {coplanarTolerance}°
                   </span>
                 </div>
+                <div className="text-[8px] text-amber-400/80 font-medium flex items-center gap-1">
+                  <span>🛡️ Texturas UV & PBR 100% protegidas</span>
+                </div>
                 <div className="flex items-center gap-1 pt-0.5">
                   <input
                     type="range"
                     min={0.5}
-                    max={25}
+                    max={40}
                     step={0.5}
                     value={coplanarTolerance}
                     onChange={(e) => setCoplanarTolerance(parseFloat(e.target.value))}
@@ -2603,7 +3241,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                   />
                 </div>
                 <div className="flex justify-between gap-1 pt-0.5">
-                  {[1, 3, 5, 10, 20].map(deg => (
+                  {[2, 5, 10, 18, 30].map(deg => (
                     <button
                       key={deg}
                       type="button"
@@ -2620,9 +3258,11 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                 </div>
               </div>
               <button
-                onClick={() => dissolveCoplanarObject(obj.id, coplanarTolerance)}
+                onClick={() => dissolveCoplanarObject(obj.id, coplanarTolerance, {
+                  selectedMeshes: selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined
+                })}
                 className="w-full py-1.5 bg-gradient-to-r from-amber-700 to-amber-600 hover:from-amber-600 hover:to-amber-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-1"
-                title="Detecta caras triangulares contiguas que yacen en el mismo plano y las fusiona, limpiando las mallas en superficies planas"
+                title="Detecta caras triangulares contiguas que yacen en el mismo plano y las fusiona, limpiando las mallas en superficies planas sin alterar texturas ni UVs"
               >
                 Disolver Coplanares
               </button>
@@ -2664,13 +3304,22 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                   ))}
                 </div>
               </div>
-              <button
-                onClick={() => cleanIslandsObject(obj.id, islandRatio)}
-                className="w-full py-1.5 bg-gradient-to-r from-rose-700 to-rose-600 hover:from-rose-600 hover:to-rose-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer mt-1"
-                title="Elimina fragmentos poligonales flotantes y conchas desconectadas residuales"
-              >
-                🧹 Limpiar Islas 3D
-              </button>
+              <div className="grid grid-cols-2 gap-1.5 mt-1">
+                <button
+                  onClick={() => cleanIslandsObject(obj.id, islandRatio)}
+                  className="w-full py-1.5 bg-gradient-to-r from-rose-700 to-rose-600 hover:from-rose-600 hover:to-rose-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer"
+                  title="Elimina fragmentos poligonales flotantes sin alterar partes funcionales ni orientación"
+                >
+                  🧹 Limpiar Islas 3D
+                </button>
+                <button
+                  onClick={() => repairNormalsObject(obj.id)}
+                  className="w-full py-1.5 bg-gradient-to-r from-amber-700 to-amber-600 hover:from-amber-600 hover:to-amber-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer"
+                  title="Elimina caras montadas/duplicadas superpuestas y unifica normales suaves para corregir texturas oscuras o grises"
+                >
+                  🔧 Reparar Caras/Normales
+                </button>
+              </div>
             </div>
           </div>
 
@@ -2689,13 +3338,13 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             </div>
             
             <p className="text-[8.5px] text-zinc-400 leading-tight">
-              Especial para esferas, tubos, cilindros y curvaturas: decima pasos redundantes y calcula normales suaves sin perder la redondez.
+              Especial para esferas, tubos, cañones y curvaturas: decima pasos radiales redundantes preservando silueta y calcula normales ultra-suaves sin facetado.
             </p>
 
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[9px] text-zinc-400">
                 <span>Ratio de Polígonos Retenidos</span>
-                <span className="font-mono text-cyan-300">{Math.round(curvedOptRatio * 100)}%</span>
+                <span className="font-mono text-cyan-300 font-bold">{Math.round(curvedOptRatio * 100)}%</span>
               </div>
               <input
                 type="range"
@@ -2714,7 +3363,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                     onClick={() => setCurvedOptRatio(r)}
                     className={`py-0.5 text-[8px] font-mono font-bold rounded transition-colors cursor-pointer ${
                       curvedOptRatio === r
-                        ? 'bg-cyan-600 text-white'
+                        ? 'bg-cyan-600 text-white shadow-xs'
                         : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
@@ -2724,23 +3373,59 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
+            <div className="space-y-1.5 pt-1 border-t border-zinc-800/60">
+              <div className="flex items-center justify-between text-[9px] text-zinc-300">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={curvedPreserveCreases}
+                    onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
+                    className="accent-cyan-500 w-3 h-3 rounded"
+                  />
+                  <span>Proteger tapas/aristas vivas</span>
+                </label>
+                {curvedPreserveCreases && (
+                  <span className="font-mono text-[8.5px] text-cyan-400">{curvedCreaseAngle}°</span>
+                )}
+              </div>
+
+              {curvedPreserveCreases && (
+                <div className="flex items-center gap-2 pl-4">
+                  <input
+                    type="range"
+                    min={20}
+                    max={75}
+                    step={5}
+                    value={curvedCreaseAngle}
+                    onChange={(e) => setCurvedCreaseAngle(parseInt(e.target.value, 10))}
+                    className="flex-1 h-1 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+                  />
+                  <span className="text-[7.5px] text-zinc-500">Ángulo de pliegue</span>
+                </div>
+              )}
+
               <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={curvedPreserveCreases}
-                  onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
+                  checked={curvedSmoothNormals}
+                  onChange={(e) => setCurvedSmoothNormals(e.target.checked)}
                   className="accent-cyan-500 w-3 h-3 rounded"
                 />
-                <span>Proteger tapas y aristas vivas</span>
+                <span>Normales ultra-suaves (anti-facetado)</span>
               </label>
+
               <button
                 type="button"
-                onClick={() => optimizeCurvedObject(obj.id, curvedOptRatio, { preserveCreases: curvedPreserveCreases })}
-                className="py-1 px-2.5 bg-gradient-to-r from-cyan-700 to-cyan-600 hover:from-cyan-600 hover:to-cyan-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-95 cursor-pointer"
+                onClick={() => optimizeCurvedObject(obj.id, curvedOptRatio, {
+                  preserveCreases: curvedPreserveCreases,
+                  creaseAngleDeg: curvedCreaseAngle,
+                  smoothNormals: curvedSmoothNormals,
+                  selectedMeshes: selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined
+                })}
+                className="w-full py-1.5 px-2.5 mt-1 bg-gradient-to-r from-cyan-700 to-cyan-600 hover:from-cyan-600 hover:to-cyan-500 rounded text-[9.5px] font-bold text-white transition-all shadow-sm active:scale-98 cursor-pointer flex items-center justify-center gap-1.5"
                 title="Optimiza esferas, tubos y geometrías curvadas reduciendo pasos poligonales redundantes"
               >
-                ⭕ Optimizar Curvas
+                ⭕ Optimizar Curvas & Redondeados {selectedGLTFMeshes.length > 0 ? `(${selectedGLTFMeshes.length} partes)` : ''}
               </button>
             </div>
           </div>
@@ -2767,28 +3452,50 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 /// ─── OPTIMIZACIÓN Y DECIMACIÓN DE MALLA ──────────────────────────────────────────
 const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const {
+    project,
+    toggleShowSkeleton,
     optimizeObject,
     optimizeCurvedObject,
+    retopologizeObject,
     selectedGLTFMeshes,
     setSelectedGLTFMeshes,
     isolateGLTFSelection,
     setIsolateGLTFSelection
   } = useStore();
 
-  const [optTab, setOptTab] = useState<'ALL' | 'CURVED'>('ALL');
+  const [optTab, setOptTab] = useState<'ALL' | 'CURVED' | 'ZREMESHER'>('ALL');
   const [optimizeRatio, setOptimizeRatio] = useState(0.3);
+  const [optimizePreserveCreases, setOptimizePreserveCreases] = useState(true);
   const [curvedRatio, setCurvedRatio] = useState(0.4);
   const [curvedPreserveCreases, setCurvedPreserveCreases] = useState(true);
+  const [curvedCreaseAngle, setCurvedCreaseAngle] = useState(40);
+  const [curvedSmoothNormals, setCurvedSmoothNormals] = useState(true);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [meshSortMode, setMeshSortMode] = useState<'desc' | 'asc' | 'default'>('desc');
   const [meshSearch, setMeshSearch] = useState('');
 
   const currentVerts = obj.stats?.vertices ?? obj.vertices?.length ?? 0;
   const currentFaces = obj.stats?.faces ?? obj.faces?.length ?? 0;
+
+  // Estados para ZRemesher
+  const [retopoTargetPolys, setRetopoTargetPolys] = useState(
+    Math.max(500, Math.min(20000, Math.round(currentFaces * 0.25 || 5000)))
+  );
+  const [retopoMode, setRetopoMode] = useState<'QUAD_DOMINANT' | 'PURE_QUADS' | 'ISOTROPIC_TRI'>('QUAD_DOMINANT');
+  const [retopoAdaptive, setRetopoAdaptive] = useState(true);
+  const [retopoPreserveCreases, setRetopoPreserveCreases] = useState(true);
+  const [retopoCreaseAngle, setRetopoCreaseAngle] = useState(35);
+  const [retopoSymmetry, setRetopoSymmetry] = useState<'NONE' | 'X'>('NONE');
+  const [retopoProject, setRetopoProject] = useState(true);
+  const [retopoConvertToNative, setRetopoConvertToNative] = useState(false);
   
   const activeRatio = optTab === 'ALL' ? optimizeRatio : curvedRatio;
-  const targetFacesEst = Math.max(4, Math.round(currentFaces * activeRatio));
-  const reductionPercent = Math.round((1 - activeRatio) * 100);
+  const targetFacesEst = optTab === 'ZREMESHER'
+    ? retopoTargetPolys
+    : Math.max(4, Math.round(currentFaces * activeRatio));
+  const reductionPercent = optTab === 'ZREMESHER'
+    ? Math.max(0, Math.round(((currentFaces - retopoTargetPolys) / Math.max(1, currentFaces)) * 100))
+    : Math.round((1 - activeRatio) * 100);
 
   const sortedAndFilteredMeshes = useMemo(() => {
     if (!obj.meshData?.meshes) return [];
@@ -2843,10 +3550,32 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const handleExecuteOptimize = async () => {
     setIsOptimizing(true);
     try {
-      if (optTab === 'CURVED') {
-        await optimizeCurvedObject(obj.id, curvedRatio, { preserveCreases: curvedPreserveCreases });
+      if (optTab === 'ZREMESHER') {
+        await retopologizeObject(obj.id, {
+          targetCount: retopoTargetPolys,
+          mode: retopoMode,
+          adaptiveCurvature: retopoAdaptive,
+          preserveCreases: retopoPreserveCreases,
+          creaseAngleDeg: retopoCreaseAngle,
+          symmetryAxis: retopoSymmetry,
+          projectToSurface: retopoProject,
+          convertToNative: retopoConvertToNative,
+          selectedMeshes: selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined
+        });
+      } else if (optTab === 'CURVED') {
+        await optimizeCurvedObject(obj.id, curvedRatio, {
+          preserveCreases: curvedPreserveCreases,
+          creaseAngleDeg: curvedCreaseAngle,
+          smoothNormals: curvedSmoothNormals,
+          selectedMeshes: selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined
+        });
       } else {
-        await optimizeObject(obj.id, optimizeRatio, selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined);
+        await optimizeObject(
+          obj.id,
+          optimizeRatio,
+          selectedGLTFMeshes.length > 0 ? selectedGLTFMeshes : undefined,
+          { preserveCreases: optimizePreserveCreases }
+        );
       }
     } finally {
       setIsOptimizing(false);
@@ -2854,37 +3583,48 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   };
 
   return (
-    <Section title="Optimizar Malla (Decimación)" icon={<Zap size={12} className="text-violet-400" />}>
+    <Section title="Optimizar Malla & Retopología" icon={<Zap size={12} className="text-violet-400" />}>
       <div className="space-y-2.5">
         {/* Selector de Modo */}
-        <div className="grid grid-cols-2 gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
+        <div className="grid grid-cols-3 gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
           <button
             type="button"
             onClick={() => setOptTab('ALL')}
-            className={`py-1 text-[9.5px] font-bold rounded-md transition-all cursor-pointer ${
+            className={`py-1 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
               optTab === 'ALL'
                 ? 'bg-violet-600 text-white shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            ⚡ General / Partes
+            ⚡ General
           </button>
           <button
             type="button"
             onClick={() => setOptTab('CURVED')}
-            className={`py-1 text-[9.5px] font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
+            className={`py-1 text-[9px] font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
               optTab === 'CURVED'
                 ? 'bg-cyan-600 text-white shadow-sm'
                 : 'text-zinc-400 hover:text-cyan-300'
             }`}
           >
-            ⭕ Curvas & Tubos
+            ⭕ Curvas
+          </button>
+          <button
+            type="button"
+            onClick={() => setOptTab('ZREMESHER')}
+            className={`py-1 text-[9px] font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              optTab === 'ZREMESHER'
+                ? 'bg-gradient-to-r from-fuchsia-600 to-indigo-600 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-fuchsia-300'
+            }`}
+          >
+            🔷 ZRemesher
           </button>
         </div>
 
         {/* Resumen de Polígonos Actuales vs Estimados */}
         <div className={`grid grid-cols-2 gap-1.5 p-2 bg-zinc-950/70 border rounded-lg ${
-          optTab === 'CURVED' ? 'border-cyan-500/30' : 'border-violet-500/30'
+          optTab === 'ZREMESHER' ? 'border-fuchsia-500/40 bg-fuchsia-950/20' : optTab === 'CURVED' ? 'border-cyan-500/30' : 'border-violet-500/30'
         }`}>
           <div className="flex flex-col">
             <span className="text-[9px] uppercase font-bold text-zinc-400">Polígonos Actuales</span>
@@ -2892,26 +3632,266 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             <span className="text-[8.5px] text-zinc-500">{currentVerts.toLocaleString()} vértices</span>
           </div>
           <div className="flex flex-col items-end">
-            <span className={`text-[9px] uppercase font-bold ${optTab === 'CURVED' ? 'text-cyan-400' : 'text-violet-400'}`}>
+            <span className={`text-[9px] uppercase font-bold ${
+              optTab === 'ZREMESHER' ? 'text-fuchsia-400' : optTab === 'CURVED' ? 'text-cyan-400' : 'text-violet-400'
+            }`}>
               Objetivo Estimado
             </span>
-            <span className={`text-[12px] font-mono font-bold ${optTab === 'CURVED' ? 'text-cyan-300' : 'text-violet-300'}`}>
+            <span className={`text-[12px] font-mono font-bold ${
+              optTab === 'ZREMESHER' ? 'text-fuchsia-300' : optTab === 'CURVED' ? 'text-cyan-300' : 'text-violet-300'
+            }`}>
               ~{targetFacesEst.toLocaleString()} caras
             </span>
             <span className="text-[8.5px] font-bold text-emerald-400">-{reductionPercent}% reducción</span>
           </div>
         </div>
 
-        {optTab === 'CURVED' ? (
+        {optTab === 'ZREMESHER' ? (
+          /* Modo ZRemesher: Auto-Retopología con Flujo de Quads */
+          <div className="p-2.5 rounded-lg border border-fuchsia-500/30 bg-gradient-to-b from-fuchsia-950/40 via-zinc-900/80 to-zinc-900 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wide flex items-center gap-1.5">
+                <Layers size={13} className="text-fuchsia-400" />
+                ZRemesher: Auto-Retopología
+              </span>
+              <span className="text-[8px] bg-fuchsia-950 text-fuchsia-200 border border-fuchsia-500/40 px-1.5 py-0.5 rounded font-mono font-bold">
+                Quad Flow
+              </span>
+            </div>
+
+            <p className="text-[8.5px] text-zinc-300 leading-tight">
+              Reorganiza la malla de forma automática y uniforme en cuadriláteros limpios (quads) con bucles continuos para animación, rigging y renderizado sin perder volumen ni detalle.
+            </p>
+
+            {/* Selector de Modo de Topología */}
+            <div className="space-y-1">
+              <span className="text-[9px] font-semibold text-zinc-400">Modo de Flujo Poligonal:</span>
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  type="button"
+                  onClick={() => setRetopoMode('QUAD_DOMINANT')}
+                  className={`py-1 px-1 text-[8.5px] font-bold rounded border transition-all cursor-pointer ${
+                    retopoMode === 'QUAD_DOMINANT'
+                      ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow'
+                      : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white'
+                  }`}
+                  title="Cuadriláteros dominantes con bucles de bordes suaves (Estándar ZRemesher)"
+                >
+                  🔷 Quads Dom.
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetopoMode('PURE_QUADS')}
+                  className={`py-1 px-1 text-[8.5px] font-bold rounded border transition-all cursor-pointer ${
+                    retopoMode === 'PURE_QUADS'
+                      ? 'bg-indigo-600 border-indigo-400 text-white shadow'
+                      : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white'
+                  }`}
+                  title="100% Cuadriláteros puros (Catmull-Clark - Ideal para Rigging y Deformación)"
+                >
+                  ✨ 100% Quads
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetopoMode('ISOTROPIC_TRI')}
+                  className={`py-1 px-1 text-[8.5px] font-bold rounded border transition-all cursor-pointer ${
+                    retopoMode === 'ISOTROPIC_TRI'
+                      ? 'bg-emerald-600 border-emerald-400 text-white shadow'
+                      : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white'
+                  }`}
+                  title="Triángulos equiláteros homogéneos"
+                >
+                  📐 Isótropo
+                </button>
+              </div>
+            </div>
+
+            {/* Recuento de Polígonos Objetivo */}
+            <div className="space-y-1 pt-1 border-t border-zinc-800">
+              <div className="flex items-center justify-between text-[9.5px]">
+                <span className="text-zinc-300 font-bold">Polígonos Objetivo (Target Polys):</span>
+                <span className="font-mono text-fuchsia-300 font-bold">{retopoTargetPolys.toLocaleString()}</span>
+              </div>
+
+              <input
+                type="range"
+                min={300}
+                max={Math.max(25000, currentFaces)}
+                step={100}
+                value={retopoTargetPolys}
+                onChange={(e) => setRetopoTargetPolys(parseInt(e.target.value, 10))}
+                className="w-full h-1.5 accent-fuchsia-500 bg-zinc-800 rounded cursor-pointer"
+              />
+
+              {/* Botones de presets rápidos */}
+              <div className="grid grid-cols-6 gap-1 pt-0.5">
+                {[1000, 2500, 5000, 10000].map(cnt => (
+                  <button
+                    key={cnt}
+                    type="button"
+                    onClick={() => setRetopoTargetPolys(cnt)}
+                    className={`py-0.5 text-[8.5px] font-bold rounded border transition-colors cursor-pointer ${
+                      retopoTargetPolys === cnt
+                        ? 'bg-fuchsia-600 border-fuchsia-400 text-white'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {cnt >= 1000 ? `${cnt / 1000}K` : cnt}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setRetopoTargetPolys(Math.max(200, Math.round(currentFaces * 0.5)))}
+                  className="py-0.5 text-[8.5px] font-bold rounded border bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white cursor-pointer"
+                  title="50% del recuento actual"
+                >
+                  50%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRetopoTargetPolys(Math.max(100, Math.round(currentFaces * 0.25)))}
+                  className="py-0.5 text-[8.5px] font-bold rounded border bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white cursor-pointer"
+                  title="25% del recuento actual"
+                >
+                  25%
+                </button>
+              </div>
+            </div>
+
+            {/* Parámetros de precisión y curvatura */}
+            <div className="space-y-1.5 pt-1.5 border-t border-zinc-800">
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={retopoPreserveCreases}
+                  onChange={(e) => setRetopoPreserveCreases(e.target.checked)}
+                  className="accent-fuchsia-500 w-3 h-3 rounded"
+                />
+                <span className="font-semibold text-fuchsia-200">🛡️ Alinear bucles con aristas vivas (Creases)</span>
+              </label>
+
+              {retopoPreserveCreases && (
+                <div className="flex items-center justify-between pl-4 text-[8.5px] text-zinc-400">
+                  <span>Ángulo de arista viva:</span>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="range"
+                      min={15}
+                      max={75}
+                      step={5}
+                      value={retopoCreaseAngle}
+                      onChange={(e) => setRetopoCreaseAngle(parseInt(e.target.value, 10))}
+                      className="w-16 h-1 accent-fuchsia-500 bg-zinc-800 rounded cursor-pointer"
+                    />
+                    <span className="font-mono text-fuchsia-300 w-6 text-right">{retopoCreaseAngle}°</span>
+                  </div>
+                </div>
+              )}
+
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={retopoAdaptive}
+                  onChange={(e) => setRetopoAdaptive(e.target.checked)}
+                  className="accent-fuchsia-500 w-3 h-3 rounded"
+                />
+                <span className="font-semibold text-fuchsia-200">🎯 Densidad Adaptativa por Curvatura</span>
+              </label>
+
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={retopoProject}
+                  onChange={(e) => setRetopoProject(e.target.checked)}
+                  className="accent-fuchsia-500 w-3 h-3 rounded"
+                />
+                <span className="font-semibold text-fuchsia-200">🧲 Proyección BVH (Zero-Volume-Loss)</span>
+              </label>
+
+              <div className="flex items-center justify-between pt-0.5 text-[9px] text-zinc-300">
+                <span>Simetría Bilateral:</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setRetopoSymmetry('NONE')}
+                    className={`px-2 py-0.5 text-[8.5px] rounded border cursor-pointer ${
+                      retopoSymmetry === 'NONE'
+                        ? 'bg-fuchsia-950 border-fuchsia-500 text-fuchsia-200 font-bold'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400'
+                    }`}
+                  >
+                    Ninguna
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRetopoSymmetry('X')}
+                    className={`px-2 py-0.5 text-[8.5px] rounded border cursor-pointer ${
+                      retopoSymmetry === 'X'
+                        ? 'bg-fuchsia-950 border-fuchsia-500 text-fuchsia-200 font-bold'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-400'
+                    }`}
+                  >
+                    Eje X
+                  </button>
+                </div>
+              </div>
+
+              {/* Si es modelo GLB: Opción para convertir a Malla Nativa Editable */}
+              {obj.meshData?.type === 'gltf' && (
+                <div className="pt-1.5 border-t border-zinc-800 space-y-2">
+                  <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={retopoConvertToNative}
+                      onChange={(e) => setRetopoConvertToNative(e.target.checked)}
+                      className="accent-indigo-500 w-3 h-3 rounded"
+                    />
+                    <span className="font-semibold text-indigo-300">
+                      ⭐ Convertir a Malla Nativa Editable CSG (Quads)
+                    </span>
+                  </label>
+                  <p className="text-[8px] text-zinc-400 pl-4.5 leading-tight">
+                    Convierte el modelo en un objeto nativo editable con soporte de bisel, extrusión y edición directa de polígonos cuadriláteros.
+                  </p>
+
+                  {/* Toggle de Esqueleto / Huesos (Líneas cian y verdes) */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-950/70 border border-white/5">
+                    <div className="flex items-center gap-2">
+                      <Bone size={14} className={project.showSkeleton ? 'text-amber-400' : 'text-zinc-500'} />
+                      <div>
+                        <div className="text-[9px] font-bold text-zinc-200">Huesos / Rigging (Esqueleto)</div>
+                        <div className="text-[7.5px] text-zinc-400">Líneas de articulaciones internas</div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleShowSkeleton()}
+                      className={`text-[8.5px] font-mono px-2 py-1 rounded font-bold cursor-pointer transition-all ${
+                        project.showSkeleton
+                          ? 'bg-amber-500 text-black shadow-sm shadow-amber-500/30'
+                          : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                      }`}
+                      title="Activa o desactiva las líneas de huesos y rigging en el visor"
+                    >
+                      {project.showSkeleton ? 'MOSTRAR (ON)' : 'OCULTAR (OFF)'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : optTab === 'CURVED' ? (
           /* Modo Curvaturas: Esferas, Tubos, Cilindros */
           <div className="space-y-2 bg-zinc-900/80 p-2.5 rounded-lg border border-cyan-500/30">
             <div className="flex items-center justify-between text-[10px]">
-              <span className="text-cyan-300 font-bold">Ratio de Conservación Radial</span>
-              <span className="font-mono text-cyan-300 font-bold">{Math.round(curvedRatio * 100)}%</span>
+              <span className="text-cyan-300 font-bold">
+                {selectedGLTFMeshes.length > 0 ? `Ratio Curvas (${selectedGLTFMeshes.length} partes seleccionadas)` : 'Ratio de Conservación Radial (Todo)'}
+              </span>
+              <span className="font-mono text-cyan-300 font-bold">{Math.round(curvedRatio * 100)}% ({Math.round((1 - curvedRatio) * 100)}% menos)</span>
             </div>
             
             <p className="text-[8.5px] text-zinc-400 leading-tight">
-              Diseñado para esferas, cilindros, filetes y tubos de alta densidad poligonal: elimina los pasos angulares redundantes manteniendo la curvatura y redondez.
+              Diseñado para esferas, cilindros, cañones y tubos: decima pasos radiales redundantes preservando curvatura, tapas y silueta sin colapsar partes finas.
             </p>
 
             <input
@@ -2941,15 +3921,47 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               ))}
             </div>
 
-            <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800">
-              <input
-                type="checkbox"
-                checked={curvedPreserveCreases}
-                onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
-                className="accent-cyan-500 w-3 h-3 rounded"
-              />
-              <span>Proteger tapas planas y aristas vivas (&gt; 40°)</span>
-            </label>
+            <div className="space-y-1.5 pt-1 border-t border-zinc-800">
+              <div className="flex items-center justify-between text-[9px] text-zinc-300">
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={curvedPreserveCreases}
+                    onChange={(e) => setCurvedPreserveCreases(e.target.checked)}
+                    className="accent-cyan-500 w-3 h-3 rounded"
+                  />
+                  <span>Proteger tapas y aristas vivas</span>
+                </label>
+                {curvedPreserveCreases && (
+                  <span className="font-mono text-[8.5px] text-cyan-400 font-bold">{curvedCreaseAngle}°</span>
+                )}
+              </div>
+
+              {curvedPreserveCreases && (
+                <div className="flex items-center gap-2 pl-4">
+                  <input
+                    type="range"
+                    min={20}
+                    max={75}
+                    step={5}
+                    value={curvedCreaseAngle}
+                    onChange={(e) => setCurvedCreaseAngle(parseInt(e.target.value, 10))}
+                    className="flex-1 h-1 accent-cyan-500 bg-zinc-800 rounded cursor-pointer"
+                  />
+                  <span className="text-[7.5px] text-zinc-500">Umbral angular</span>
+                </div>
+              )}
+
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={curvedSmoothNormals}
+                  onChange={(e) => setCurvedSmoothNormals(e.target.checked)}
+                  className="accent-cyan-500 w-3 h-3 rounded"
+                />
+                <span>Normales ultra-suaves (anti-facetado sin roturas)</span>
+              </label>
+            </div>
           </div>
         ) : (
           /* Modo General */
@@ -3010,11 +4022,29 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                 50% Suave
               </button>
             </div>
+
+            {/* Protección de UVs y costuras */}
+            <div className="pt-2 border-t border-zinc-800/80">
+              <label className="flex items-center gap-1.5 text-[9px] text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={optimizePreserveCreases}
+                  onChange={(e) => setOptimizePreserveCreases(e.target.checked)}
+                  className="accent-violet-500 w-3 h-3 rounded"
+                />
+                <span className="font-semibold text-violet-300">
+                  🛡️ Proteger texturas UV, costuras y aristas
+                </span>
+              </label>
+              <p className="text-[8px] text-zinc-400 pl-4.5 pt-0.5 leading-tight">
+                Mantiene intacto el mapeado UV, las costuras de textura y normales PBR sin deformar proyecciones.
+              </p>
+            </div>
           </div>
         )}
 
-        {/* Selector de Partes si es GLTF */}
-        {optTab === 'ALL' && obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
+        {/* Selector de Partes si es GLTF (disponible en ALL, CURVED y ZREMESHER) */}
+        {obj.meshData?.type === 'gltf' && obj.meshData.meshes && obj.meshData.meshes.length > 0 && (
           <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-2 space-y-1.5">
             <div className="flex justify-between items-center gap-1">
               <span className="text-[10px] text-zinc-300 font-bold flex items-center gap-1">
@@ -3103,22 +4133,30 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
           className={`w-full py-2.5 px-3 rounded-lg text-[11px] font-bold flex items-center justify-center gap-2 transition-all shadow-md cursor-pointer ${
             isOptimizing
               ? 'bg-zinc-800 text-zinc-400 cursor-wait animate-pulse'
-              : optTab === 'CURVED'
-                ? 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-950/50 hover:shadow-cyan-900/60 active:scale-98'
-                : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-950/50 hover:shadow-violet-900/60 active:scale-98'
+              : optTab === 'ZREMESHER'
+                ? 'bg-gradient-to-r from-fuchsia-600 via-indigo-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white shadow-fuchsia-950/60 active:scale-98'
+                : optTab === 'CURVED'
+                  ? 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-950/50 hover:shadow-cyan-900/60 active:scale-98'
+                  : 'bg-violet-600 hover:bg-violet-500 text-white shadow-violet-950/50 hover:shadow-violet-900/60 active:scale-98'
           }`}
         >
-          {optTab === 'CURVED' ? (
-            <CircleDot size={14} className={isOptimizing ? 'animate-spin' : 'text-cyan-200'} />
+          {isOptimizing ? (
+            <RefreshCw size={14} className="animate-spin text-zinc-200" />
+          ) : optTab === 'ZREMESHER' ? (
+            <Layers size={14} className="text-fuchsia-200" />
+          ) : optTab === 'CURVED' ? (
+            <CircleDot size={14} className="text-cyan-200" />
           ) : (
-            <Zap size={14} className={isOptimizing ? 'animate-spin' : 'text-amber-300'} />
+            <Zap size={14} className="text-amber-300" />
           )}
           <span>
             {isOptimizing
-              ? 'Optimizando geometría...'
-              : optTab === 'CURVED'
-                ? `Optimizar Curvas y Redondeados (-${reductionPercent}%)`
-                : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}
+              ? 'Procesando retopología...'
+              : optTab === 'ZREMESHER'
+                ? `⚡ Ejecutar ZRemesher (${retopoMode === 'PURE_QUADS' ? '100% Quads' : retopoMode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'} ~${retopoTargetPolys.toLocaleString()}p)`
+                : optTab === 'CURVED'
+                  ? `Optimizar Curvas ${selectedGLTFMeshes.length > 0 ? `(${selectedGLTFMeshes.length} partes)` : 'y Redondeados'} (-${reductionPercent}%)`
+                  : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}
           </span>
         </button>
       </div>
@@ -4912,7 +5950,7 @@ const VolumetricSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               />
               <NumRow
                 label="Desvanecimiento por Altitud"
-                value={volConfig.altitudeFade ?? 0.15}
+                value={Array.isArray(volConfig.altitudeFade) ? volConfig.altitudeFade[0] : (volConfig.altitudeFade ?? 0.15)}
                 onChange={v => updateVol({ altitudeFade: v })}
                 min={0.0}
                 max={1.0}
@@ -5037,7 +6075,7 @@ export const PropertiesPanel: React.FC = () => {
     removeLight, removeCamera, selectLight, selectCamera, updateLight, editMode, setEditMode
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
+  const [activeTab, setActiveTab] = useState<'PROPERTIES' | 'HISTORIAL' | 'EDIT_MESH' | 'MATERIALS' | 'SCENE' | 'CONFIG'>('PROPERTIES');
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
   const [shortcutsFloating, setShortcutsFloating] = useState(false);
   const obj = project.objects.find(o => o.id === selectedObjectId);
@@ -5142,59 +6180,101 @@ export const PropertiesPanel: React.FC = () => {
   return (
     <div className="h-full bg-zinc-950 border-l border-zinc-800 flex flex-col overflow-hidden select-none">
       
-      {/* ── Tabs ─────────────────────────────────────────────────────────── */}
-      <div className="flex border-b border-zinc-800 bg-zinc-900/50">
-        <button 
-          onClick={() => setActiveTab('PROPERTIES')}
-          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
-            activeTab === 'PROPERTIES' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-          title="Propiedades del objeto seleccionado"
-        >
-          <Settings size={12} /> Propiedades
-        </button>
-        <button 
-          onClick={() => {
-            setActiveTab('EDIT_MESH');
-            setEditMode('OBJECT');
-          }}
-          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
-            activeTab === 'EDIT_MESH' ? 'text-emerald-400 border-b-2 border-emerald-500 bg-emerald-500/5' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-          title="Editar Malla: añadir líneas, segmentos, nuevos vértices y polígonos"
-        >
-          <Scissors size={12} /> Malla
-        </button>
-        <button 
-          onClick={() => setActiveTab('MATERIALS')}
-          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
-            activeTab === 'MATERIALS' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-          title="Biblioteca y edición de materiales PBR"
-        >
-          <Palette size={12} /> Materiales
-        </button>
-        <button 
-          onClick={() => setActiveTab('SCENE')}
-          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
-            activeTab === 'SCENE' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-          title="Iluminación, cámaras y entorno de la escena"
-        >
-          <Globe size={12} /> Escena
-        </button>
-        <button 
-          onClick={() => setActiveTab('CONFIG')}
-          className={`flex-1 flex items-center justify-center gap-1 py-3 text-[9px] font-bold uppercase tracking-wider transition-all ${
-            activeTab === 'CONFIG' ? 'text-indigo-400 border-b-2 border-indigo-500 bg-indigo-500/5' : 'text-zinc-500 hover:text-zinc-300'
-          }`}
-          title="Configuración, atajos de teclado y preferencias"
-        >
-          <SlidersHorizontal size={12} /> Config
-        </button>
+      {/* ── Tabs Superiores de Herramientas (Cuadrícula 3x2: Todos los nombres siempre visibles y accesibles) ─────────────────── */}
+      <div className="border-b border-zinc-800/90 bg-zinc-950/90 p-1.5 shrink-0">
+        <div className="grid grid-cols-3 gap-1">
+          <button 
+            id="tab-btn-properties"
+            onClick={() => setActiveTab('PROPERTIES')}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'PROPERTIES' 
+                ? 'text-indigo-300 bg-indigo-500/20 border border-indigo-500/50 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Propiedades y parámetros del objeto seleccionado"
+          >
+            <Settings size={12} className={activeTab === 'PROPERTIES' ? 'text-indigo-400' : 'text-zinc-400'} />
+            <span className="truncate">Propiedades</span>
+          </button>
+
+          <button 
+            id="tab-btn-historial"
+            onClick={() => setActiveTab('HISTORIAL')}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'HISTORIAL' 
+                ? 'text-amber-300 bg-amber-500/20 border border-amber-500/50 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Historial de herramientas y pasos para volver directamente a cualquier estado anterior"
+          >
+            <History size={12} className={activeTab === 'HISTORIAL' ? 'text-amber-400' : 'text-zinc-400'} />
+            <span className="truncate">Historial</span>
+          </button>
+
+          <button 
+            id="tab-btn-edit-mesh"
+            onClick={() => {
+              setActiveTab('EDIT_MESH');
+              setEditMode('OBJECT');
+            }}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'EDIT_MESH' 
+                ? 'text-emerald-300 bg-emerald-500/20 border border-emerald-500/50 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Editar Malla: añadir líneas, segmentos, nuevos vértices y polígonos"
+          >
+            <Scissors size={12} className={activeTab === 'EDIT_MESH' ? 'text-emerald-400' : 'text-zinc-400'} />
+            <span className="truncate">Malla</span>
+          </button>
+
+          <button 
+            id="tab-btn-materials"
+            onClick={() => setActiveTab('MATERIALS')}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'MATERIALS' 
+                ? 'text-purple-300 bg-purple-500/20 border border-purple-500/50 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Biblioteca y edición de materiales PBR"
+          >
+            <Palette size={12} className={activeTab === 'MATERIALS' ? 'text-purple-400' : 'text-zinc-400'} />
+            <span className="truncate">Materiales</span>
+          </button>
+
+          <button 
+            id="tab-btn-scene"
+            onClick={() => setActiveTab('SCENE')}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'SCENE' 
+                ? 'text-sky-300 bg-sky-500/20 border border-sky-500/50 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Iluminación, cámaras y entorno de la escena"
+          >
+            <Globe size={12} className={activeTab === 'SCENE' ? 'text-sky-400' : 'text-zinc-400'} />
+            <span className="truncate">Escena</span>
+          </button>
+
+          <button 
+            id="tab-btn-config"
+            onClick={() => setActiveTab('CONFIG')}
+            className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-semibold transition-all cursor-pointer select-none ${
+              activeTab === 'CONFIG' 
+                ? 'text-zinc-200 bg-zinc-800 border border-zinc-600/70 shadow-xs' 
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-zinc-800/50'
+            }`}
+            title="Configuración, atajos de teclado y preferencias"
+          >
+            <SlidersHorizontal size={12} className={activeTab === 'CONFIG' ? 'text-zinc-300' : 'text-zinc-400'} />
+            <span className="truncate">Config</span>
+          </button>
+        </div>
       </div>
 
-      {activeTab === 'EDIT_MESH' ? (
+      {activeTab === 'HISTORIAL' ? (
+        <HistoryPanel />
+      ) : activeTab === 'EDIT_MESH' ? (
         <EditMeshPanel />
       ) : activeTab === 'MATERIALS' ? (
         <MaterialPanel />
@@ -5321,20 +6401,32 @@ export const PropertiesPanel: React.FC = () => {
                 <ValidationSection obj={obj}/>
 
                 <Section title="Estadísticas" defaultOpen={false}>
-                  <div className="grid grid-cols-3 gap-1">
-                    <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
-                      <p className="text-[9px] text-zinc-300 uppercase">Vértices</p>
-                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.vertices ?? obj.vertices?.length ?? 0}</p>
-                    </div>
-                    <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
-                      <p className="text-[9px] text-emerald-400 uppercase font-semibold">Aristas</p>
-                      <p className="text-[13px] font-bold font-mono text-emerald-300">{extractUniqueEdges(obj).length}</p>
-                    </div>
-                    <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
-                      <p className="text-[9px] text-zinc-300 uppercase">Caras</p>
-                      <p className="text-[13px] font-bold font-mono text-white">{obj.stats?.faces ?? obj.faces?.length ?? 0}</p>
-                    </div>
-                  </div>
+                  {(() => {
+                    const quadsCount = obj.stats?.quads ?? obj.faces?.filter(f => f.indices?.length === 4).length ?? 0;
+                    const hasQuads = quadsCount > 0;
+                    return (
+                      <div className={`grid ${hasQuads ? 'grid-cols-4' : 'grid-cols-3'} gap-1`}>
+                        <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
+                          <p className="text-[9px] text-zinc-300 uppercase">Vértices</p>
+                          <p className="text-[13px] font-bold font-mono text-white">{(obj.stats?.vertices ?? obj.vertices?.length ?? 0).toLocaleString()}</p>
+                        </div>
+                        <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
+                          <p className="text-[9px] text-emerald-400 uppercase font-semibold">Aristas</p>
+                          <p className="text-[13px] font-bold font-mono text-emerald-300">{extractUniqueEdges(obj).length.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-zinc-800 p-2 rounded border border-zinc-700/50">
+                          <p className="text-[9px] text-zinc-300 uppercase">Caras</p>
+                          <p className="text-[13px] font-bold font-mono text-white">{(obj.stats?.faces ?? obj.faces?.length ?? 0).toLocaleString()}</p>
+                        </div>
+                        {hasQuads && (
+                          <div className="bg-violet-950/40 p-2 rounded border border-violet-500/40">
+                            <p className="text-[9px] text-violet-300 uppercase font-semibold">Quads</p>
+                            <p className="text-[13px] font-bold font-mono text-fuchsia-300">{quadsCount.toLocaleString()}</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </Section>
 
                 <Section title="Exportar" icon={<Download size={12}/>} defaultOpen={false}>

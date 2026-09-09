@@ -1,5 +1,6 @@
 import React, { useRef } from 'react';
 import { Viewport } from './Viewport';
+import { ViewportErrorBoundary } from './ViewportErrorBoundary';
 import { PrecisionDrawToolbar } from './PrecisionDrawToolbar';
 import { useStore } from '../store/useStore';
 import { ViewportType, ViewportLayoutPreset } from '../types';
@@ -175,7 +176,9 @@ export const MultiViewport: React.FC = () => {
               height: r.height,
             }}
           >
-            <Viewport type={type} title={title} />
+            <ViewportErrorBoundary viewportType={type} fallbackTitle={`Visor ${title}`}>
+              <Viewport type={type} title={title} />
+            </ViewportErrorBoundary>
           </div>
         );
       })}

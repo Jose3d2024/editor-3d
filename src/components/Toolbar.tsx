@@ -9,8 +9,9 @@ import {
   ChevronDown, Pencil, SquareDashed, Upload, Magnet, Grid, LayoutGrid, Check, SlidersHorizontal,
   GripVertical, Pin, PinOff, AlignStartVertical, Plus, X, Sparkles,
   Edit3, RefreshCw, RotateCcw, Trash2, Combine, Scissors, Target, Zap, FlipVertical, XCircle, ArrowUpFromLine, Split,
-  Keyboard, Cloud, Wind, Flame, Waves
+  Keyboard, Cloud, Wind, Flame, Waves, Bone, Camera
 } from 'lucide-react';
+import { downloadViewportSnapshot } from '../utils/viewportCapture';
 import { ConfirmModal } from './ConfirmModal';
 import { KeyboardShortcutsModal } from './KeyboardShortcutsModal';
 import { SaveProjectModal, saveSceneToStorage, getSavedScenes } from './SaveProjectModal';
@@ -38,6 +39,7 @@ import {
   chamfer3DEdges, arrayLinear, arrayPolar,
   capOpenHoles, capSelectedFaces, revolveMesh, shapeToProfile, simplifyMesh,
 } from '../utils/modifiers_advanced';
+import { createRetopoQuadPlane, createRetopoCage } from '../utils/shrinkwrap';
 import { SiluetaTab } from './SiluetaTab';
 import { safeFixed, safeNum, safeParseFixed, safeVec3Key } from '../utils/numberUtils';
 import { RenderModal } from './RenderModal';
@@ -471,8 +473,11 @@ export const Toolbar: React.FC = () => {
     maximizedViewport, setMaximizedViewport,
     viewportConfig, setViewportPreset, setViewportSplits,
     setCustomResizeMode, setSnapStep, resetViewportSplits,
+    faceSnapConfig, setFaceSnapConfig, toggleFaceSnap,
   } = useStore();
 
+  const [showFaceSnapMenu, setShowFaceSnapMenu] = useState(false);
+  const faceSnapRef = useRef<HTMLDivElement>(null);
   const [isFloating,       setIsFloating]       = useState(false);
   const [showMirror,       setShowMirror]        = useState(false);
   const [showRef,          setShowRef]           = useState(false);
@@ -545,6 +550,7 @@ export const Toolbar: React.FC = () => {
   const [sweepPickPath,    setSweepPickPath]    = useState<string|null>(null);
   const [loftPickA,        setLoftPickA]        = useState<string|null>(null);
   const [loftPickB,        setLoftPickB]        = useState<string|null>(null);
+  const [exportWithThumbnail, setExportWithThumbnail] = useState<boolean>(true);
 
   const setT = useContext(TooltipContext);
   const [tooltip, setTooltip] = useState<{label:string; shortcut?: string; rect:DOMRect}|null>(null);
@@ -724,7 +730,11 @@ export const Toolbar: React.FC = () => {
     if (visible.length === 0) { alert('No hay nada que exportar'); return; }
     setIsExporting(true);
     try {
-      await Exporter.exportSTL(visible, project.materials);
+      const baseName = project.name || 'export';
+      await Exporter.exportSTL(visible, project.materials, baseName);
+      if (exportWithThumbnail) {
+        downloadViewportSnapshot(`${baseName}_miniatura.png`);
+      }
     } catch (e) {
       console.error('Export STL failed', e);
     } finally {
@@ -738,7 +748,11 @@ export const Toolbar: React.FC = () => {
     if (visible.length === 0) { alert('No hay nada que exportar'); return; }
     setIsExporting(true);
     try {
-      await Exporter.exportOBJ(visible, project.materials);
+      const baseName = project.name || 'export';
+      await Exporter.exportOBJ(visible, project.materials, baseName);
+      if (exportWithThumbnail) {
+        downloadViewportSnapshot(`${baseName}_miniatura.png`);
+      }
     } catch (e) {
       console.error('Export OBJ failed', e);
     } finally {
@@ -779,7 +793,11 @@ export const Toolbar: React.FC = () => {
     if (visible.length === 0) { alert('No hay nada que exportar'); return; }
     setIsExporting(true);
     try {
-      await Exporter.exportGLTF(visible, project.materials, binary);
+      const baseName = project.name || 'export';
+      await Exporter.exportGLTF(visible, project.materials, binary, baseName);
+      if (exportWithThumbnail) {
+        downloadViewportSnapshot(`${baseName}_miniatura.png`);
+      }
     } catch (e) {
       console.error('Export GLTF failed', e);
     } finally {
@@ -1154,10 +1172,27 @@ export const Toolbar: React.FC = () => {
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{handleReset();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-rose-400 font-medium"><RotateCcw size={14}/> Reiniciar Proyecto</button>
             <div className="h-px bg-zinc-800 my-1"/>
-            <button onClick={()=>{handleExportSTL();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar STL</button>
-            <button onClick={()=>{handleExportOBJ();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar OBJ</button>
-            <button onClick={()=>{handleExportGLTF(false);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLTF</button>
-            <button onClick={()=>{handleExportGLTF(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLB</button>
+            <div className="px-2.5 py-1.5 bg-zinc-950/70 rounded-md border border-zinc-800/80 my-1">
+              <label className="flex items-center justify-between gap-2 text-[10.5px] text-zinc-300 cursor-pointer select-none">
+                <span className="flex items-center gap-1.5">
+                  <Camera size={13} className="text-cyan-400" />
+                  <span>Adjuntar miniatura (.png) al exportar</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={exportWithThumbnail}
+                  onChange={e => setExportWithThumbnail(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-cyan-500 rounded cursor-pointer"
+                />
+              </label>
+            </div>
+            <button onClick={()=>{downloadViewportSnapshot(`${project.name || 'escena'}_captura.png`);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-cyan-300 font-medium">
+              <Camera size={14} className="text-cyan-400"/> Capturar Imagen del Visor (PNG)
+            </button>
+            <button onClick={()=>{handleExportSTL();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar STL {exportWithThumbnail && <span className="text-[9px] text-cyan-400/80 font-mono ml-auto">+img</span>}</button>
+            <button onClick={()=>{handleExportOBJ();setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar OBJ {exportWithThumbnail && <span className="text-[9px] text-cyan-400/80 font-mono ml-auto">+img</span>}</button>
+            <button onClick={()=>{handleExportGLTF(false);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLTF {exportWithThumbnail && <span className="text-[9px] text-cyan-400/80 font-mono ml-auto">+img</span>}</button>
+            <button onClick={()=>{handleExportGLTF(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Download size={14}/> Exportar GLB {exportWithThumbnail && <span className="text-[9px] text-cyan-400/80 font-mono ml-auto">+img</span>}</button>
             <button onClick={()=>{setShowWireframeModal(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-emerald-300 font-semibold bg-emerald-950/40 border border-emerald-800/30"><Grid size={14} className="text-emerald-400"/> Exportar Estructura Alámbrica 3D...</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setShowCodeExporter(true);setShowFile(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors text-indigo-300 font-semibold bg-indigo-950/40"><Code size={14} className="text-indigo-400"/> Exportar Código Three.js</button>
@@ -1479,6 +1514,28 @@ export const Toolbar: React.FC = () => {
                             {label:'Cuña',       icon:'⬕', fn:()=>addObject('WEDGE')},
                             {label:'Hemisferio', icon:'🌓', fn:()=>addObject('HEMISPHERE')},
                             {label:'Plano',      icon:'▭', fn:()=>addObject('PLANE')},
+                            {label:'Plano Quads (100x100)', icon:'▦', fn:()=>{
+                              const selId = useStore.getState().selectedObjectId;
+                              const targetObj = selId ? project.objects.find(o => o.id === selId) : undefined;
+                              const plane = createRetopoQuadPlane({
+                                targetObj,
+                                subdivisions: 100,
+                                orientation: 'FRONT'
+                              });
+                              addObject(plane);
+                              useStore.getState().selectObject(plane.id);
+                            }},
+                            {label:'Cage Silueta (64x64)', icon:'🌐', fn:()=>{
+                              const selId = useStore.getState().selectedObjectId;
+                              const targetObj = selId ? project.objects.find(o => o.id === selId) : undefined;
+                              const cage = createRetopoCage({
+                                targetObj,
+                                subdivisions: 64,
+                                shape: 'ELLIPSOID'
+                              });
+                              addObject(cage);
+                              useStore.getState().selectObject(cage.id);
+                            }},
                             {label:'Anillo',     icon:'○', fn:()=>addObject('RING')},
                             {label:'Círculo',    icon:'⚪', fn:()=>addObject('CIRCLE')},
                           ].map(p=>(
@@ -2009,6 +2066,105 @@ export const Toolbar: React.FC = () => {
                     <QuickButton active={transformMode==='rotate'}    onClick={()=>setTransformMode('rotate')}    icon={<RotateCw size={14}/>} label="Rotar" shortcut="E" />
                     <QuickButton active={transformMode==='scale'}     onClick={()=>setTransformMode('scale')}     icon={<Maximize size={14}/>} label="Escalar" shortcut="R" />
                     <QuickButton active={transformMode==='universal'} onClick={()=>setTransformMode('universal')} icon={<Sparkles size={14}/>} label="Combinado" shortcut="U" />
+                    <div className="w-px h-4 bg-zinc-800 mx-1" />
+                    
+                    {/* Face Snapping Magnet (Retopology) */}
+                    <div className="relative flex items-center" ref={faceSnapRef}>
+                      <button
+                        type="button"
+                        onClick={() => toggleFaceSnap()}
+                        className={`flex items-center gap-1.5 px-2 py-1 rounded-l text-xs font-semibold transition-all border border-r-0 cursor-pointer ${
+                          faceSnapConfig?.enabled
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm'
+                            : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:text-zinc-200'
+                        }`}
+                        title={faceSnapConfig?.enabled ? 'Ajuste a Caras (Snapping): ACTIVO' : 'Activar Ajuste a Caras (Snapping de Retopología)'}
+                      >
+                        <Magnet size={13} className={faceSnapConfig?.enabled ? 'text-amber-400' : 'text-zinc-400'} />
+                        <span className="text-[11px] hidden sm:inline">Imán Caras</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowFaceSnapMenu(v => !v)}
+                        className={`px-1 py-1 rounded-r border border-l-0 transition-all cursor-pointer ${
+                          faceSnapConfig?.enabled
+                            ? 'bg-amber-500/30 text-amber-300 border-amber-500/50'
+                            : 'bg-zinc-800/80 text-zinc-400 border-white/5 hover:text-zinc-200'
+                        }`}
+                        title="Opciones de Snapping (Project Individual Elements, Offset)"
+                      >
+                        <ChevronDown size={10} className={`transition-transform ${showFaceSnapMenu ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      <AnimatePresence>
+                        {showFaceSnapMenu && (
+                          <motion.div
+                            initial={{ opacity: 0, y: -4, scale: 0.95 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: -4, scale: 0.95 }}
+                            transition={{ duration: 0.12 }}
+                            className="absolute z-[250] mt-1.5 top-full right-0 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-3 w-[260px] text-zinc-200 space-y-2.5 backdrop-blur-md"
+                          >
+                            <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <Magnet size={13} className="text-amber-400" />
+                                <span className="text-xs font-bold text-white">Ajuste a Caras (Snapping)</span>
+                              </div>
+                              <button onClick={() => setShowFaceSnapMenu(false)} className="text-zinc-500 hover:text-zinc-300 cursor-pointer">
+                                <X size={12} />
+                              </button>
+                            </div>
+
+                            <label className="flex items-center justify-between cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
+                              <span className="text-[11px] font-medium text-zinc-300">Activar Snapping</span>
+                              <input
+                                type="checkbox"
+                                checked={faceSnapConfig?.enabled ?? false}
+                                onChange={e => setFaceSnapConfig({ enabled: e.target.checked })}
+                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer"
+                              />
+                            </label>
+
+                            <label className="flex items-start justify-between gap-2 cursor-pointer p-1.5 rounded bg-zinc-950/60 border border-white/5 hover:border-amber-500/30">
+                              <div className="flex flex-col">
+                                <span className="text-[11px] font-medium text-zinc-200">Proyectar Elementos Individuales</span>
+                                <span className="text-[9px] text-zinc-400 leading-tight">Cada vértice se ajusta a la cara debajo independientemente en vez de como bloque</span>
+                              </div>
+                              <input
+                                type="checkbox"
+                                checked={faceSnapConfig?.projectIndividualElements ?? true}
+                                onChange={e => setFaceSnapConfig({ projectIndividualElements: e.target.checked })}
+                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
+                              />
+                            </label>
+
+                            <div className="space-y-1 bg-zinc-950/60 p-1.5 rounded border border-white/5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-medium text-zinc-300">Offset (Desplazamiento):</span>
+                                <span className="text-[10px] font-mono text-amber-300 font-bold">{faceSnapConfig?.offset ?? 0.002}</span>
+                              </div>
+                              <p className="text-[8.5px] text-zinc-400 leading-tight">Separa los vértices ligeramente de la cara para evitar parpadeo o que se hundan.</p>
+                              <div className="flex items-center gap-1 pt-1">
+                                {[0, 0.001, 0.002, 0.005, 0.01].map(off => (
+                                  <button
+                                    key={off}
+                                    type="button"
+                                    onClick={() => setFaceSnapConfig({ offset: off })}
+                                    className={`flex-1 py-0.5 text-[9px] font-mono font-bold rounded transition-colors cursor-pointer ${
+                                      (faceSnapConfig?.offset ?? 0.002) === off
+                                        ? 'bg-amber-500 text-black'
+                                        : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                                    }`}
+                                  >
+                                    {off === 0 ? '0' : off}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   </motion.div>
                 ) : showMainCreate ? (
                   <motion.div 
@@ -2249,6 +2405,25 @@ export const Toolbar: React.FC = () => {
                           {project.showGrid !== false ? 'ON' : 'OFF'}
                         </span>
                       </button>
+
+                      {/* Skeleton / Bones Rigging Toggle */}
+                      <button
+                        type="button"
+                        onClick={() => useStore.getState().toggleShowSkeleton()}
+                        className={`flex items-center justify-between p-2 rounded-lg border transition-all text-xs font-semibold cursor-pointer ${
+                          project.showSkeleton
+                            ? 'bg-amber-950/80 border-amber-500/50 text-amber-200 shadow'
+                            : 'bg-zinc-800/80 border-white/5 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <Bone size={14} className={project.showSkeleton ? 'text-amber-400' : 'text-zinc-500'} />
+                          <span>Huesos / Rigging</span>
+                        </div>
+                        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-bold ${project.showSkeleton ? 'bg-amber-500 text-black' : 'bg-zinc-700 text-zinc-400'}`}>
+                          {project.showSkeleton ? 'ON' : 'OFF'}
+                        </span>
+                      </button>
                     </div>
 
                     {/* Snap Step Selector */}
@@ -2269,6 +2444,58 @@ export const Toolbar: React.FC = () => {
                             {step}
                           </button>
                         ))}
+                      </div>
+                    </div>
+
+                    {/* Retopology Face Snapping Section */}
+                    <div className="bg-zinc-950/60 p-2.5 rounded-lg border border-amber-500/30 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <Magnet size={14} className="text-amber-400" />
+                          <span className="text-[10.5px] font-bold text-amber-300">Imán Ajuste a Caras (Retopología)</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleFaceSnap()}
+                          className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded cursor-pointer ${
+                            faceSnapConfig?.enabled ? 'bg-amber-500 text-black' : 'bg-zinc-800 text-zinc-400'
+                          }`}
+                        >
+                          {faceSnapConfig?.enabled ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+
+                      <label className="flex items-start justify-between gap-2 cursor-pointer pt-0.5">
+                        <div className="flex flex-col">
+                          <span className="text-[10px] font-medium text-zinc-200">Proyectar Elementos Individuales</span>
+                          <span className="text-[8.5px] text-zinc-400 leading-tight">Cada vértice se ajusta a la cara debajo en vez de mover el bloque</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={faceSnapConfig?.projectIndividualElements ?? true}
+                          onChange={e => setFaceSnapConfig({ projectIndividualElements: e.target.checked })}
+                          className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer mt-0.5"
+                        />
+                      </label>
+
+                      <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                        <span className="text-[9.5px] text-zinc-300">Offset (Desplazamiento):</span>
+                        <div className="flex items-center gap-1">
+                          {[0, 0.001, 0.002, 0.005, 0.01].map(off => (
+                            <button
+                              key={off}
+                              type="button"
+                              onClick={() => setFaceSnapConfig({ offset: off })}
+                              className={`px-1 py-0.5 text-[8.5px] font-mono font-bold rounded cursor-pointer ${
+                                (faceSnapConfig?.offset ?? 0.002) === off
+                                  ? 'bg-amber-500 text-black'
+                                  : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                              }`}
+                            >
+                              {off}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -2369,15 +2596,25 @@ export const Toolbar: React.FC = () => {
                           <div className="flex items-center gap-2"><span className="text-[9px] text-zinc-500 w-14">Opacidad</span><input type="range" min={0} max={1} step={0.05} value={ref.opacity??0.5} onChange={e=>setReference(view,{opacity:parseFloat(e.target.value)})} className="flex-1 h-1 accent-indigo-500"/><span className="text-[9px] text-zinc-400 w-7">{Math.round((ref.opacity??0.5)*100)}%</span></div>
                           <div className="flex items-center gap-2">
                             <span className="text-[9px] text-zinc-500 w-14">Tamaño</span>
-                            <input type="range" min={0.5} max={20} step={0.5} 
-                              value={ref.scale?.[1] ?? ref.scale?.[0] ?? 5} 
-                              onChange={e => {
-                                const v = parseFloat(e.target.value);
-                                setReference(view, { scale: [v, v, v] });
-                              }} 
-                              className="flex-1 h-1 accent-indigo-500"
-                            />
-                            <span className="text-[9px] text-zinc-400 w-7">{safeFixed(ref.scale?.[1] ?? ref.scale?.[0] ?? 5, 1)}</span>
+                            <div className="flex items-center gap-1.5 flex-1">
+                              <input type="range" min={0.5} max={25} step={0.5} 
+                                value={ref.scale?.[1] ?? ref.scale?.[0] ?? 5} 
+                                onChange={e => {
+                                  const v = parseFloat(e.target.value);
+                                  setReference(view, { scale: [v, v, v] });
+                                }} 
+                                className="flex-1 h-1 accent-indigo-500"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setReference(view, { scale: [5, 5, 5] })}
+                                className="px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 rounded text-[8px] text-zinc-300 border border-zinc-700"
+                                title="Restablecer tamaño a escala base de 5m"
+                              >
+                                5m
+                              </button>
+                            </div>
+                            <span className="text-[9px] text-zinc-400 w-7 font-mono">{safeFixed(ref.scale?.[1] ?? ref.scale?.[0] ?? 5, 1)}</span>
                           </div>
 
                           {/* ── Rotación y Espejo / Invertir ── */}
@@ -2507,8 +2744,9 @@ export const Toolbar: React.FC = () => {
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setViewMode('SOLID');setGlobalOpacity(1);setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='SOLID'&&globalOpacity===1?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Box size={14}/> Sólido</button>
             <button onClick={()=>{setViewMode('TEXTURED');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='TEXTURED'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><ImageIcon size={14}/> Texturas</button>
+            <button onClick={()=>{setViewMode('TEXTURED_WIREFRAME');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='TEXTURED_WIREFRAME'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-cyan-400"/> Texturas + Malla</button>
             <button onClick={()=>{setViewMode('WIREFRAME');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='WIREFRAME'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Grid size={14}/> Malla</button>
-            <button onClick={()=>{setViewMode('FACES_VERTICES');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='FACES_VERTICES'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-cyan-400"/> Caras + Vértices</button>
+            <button onClick={()=>{setViewMode('FACES_VERTICES');setShowView(false);}} className={`flex items-center gap-2 px-3 py-2 text-[11px] text-left rounded transition-colors ${viewMode==='FACES_VERTICES'?'bg-indigo-600 text-white':'hover:bg-zinc-800'}`}><Layers size={14} className="text-emerald-400"/> Caras + Vértices</button>
             <div className="h-px bg-zinc-800 my-1"/>
             <button onClick={()=>{setShowOpacity(true);setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Layers size={14}/> Transparencia</button>
             <button onClick={()=>{handleFullscreen();setShowView(false);}} className="flex items-center gap-2 px-3 py-2 text-[11px] text-left hover:bg-zinc-800 rounded transition-colors"><Maximize2 size={14}/> Pantalla Completa</button>

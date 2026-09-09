@@ -102,32 +102,32 @@ export const WEBGPU_GLASS_PRESETS: GlassPresetDefinition[] = [
     description: 'Película ultra-delgada con refracción física, dispersión de Cauchy, iridiscencia espectral y ondulación orgánica',
     defaultParams: {
       dispersion: 0.14,
-      chromaticAberration: 0.09,
-      distortion: 0.03,
-      distortionSpeed: 1.2,
-      distortionFrequency: 2.5,
+      chromaticAberration: 0.08,
+      distortion: 0.015,
+      distortionSpeed: 1.0,
+      distortionFrequency: 2.0,
       frostedBlur: 0.0,
-      rimGlow: 1.8,
-      rimColor: '#38bdf8',
+      rimGlow: 2.0,
+      rimColor: '#ff26aa',
       thinFilmIridescence: 1.0,
       internalBubbles: false,
-      causticIntensity: 1.5
+      causticIntensity: 1.2
     },
     pbrParams: {
-      color: '#e0f2fe',
-      roughness: 0.02,
-      metalness: 0.02,
-      transmission: 0.96,
+      color: '#ffffff',
+      roughness: 0.005,
+      metalness: 0.0,
+      transmission: 0.98,
       ior: 1.333,
-      thickness: 0.1,
+      thickness: 0.05,
       dispersion: 0.14,
-      attenuationColor: '#bae6fd',
-      attenuationDistance: 1.5,
+      attenuationColor: '#fdf4ff',
+      attenuationDistance: 4.0,
       clearcoat: 1.0,
-      clearcoatRoughness: 0.02,
+      clearcoatRoughness: 0.0,
       iridescence: 1.0,
       iridescenceIOR: 1.333,
-      iridescenceThicknessRange: [150, 750]
+      iridescenceThicknessRange: [200, 750]
     }
   },
   {

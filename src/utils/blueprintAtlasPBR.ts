@@ -96,6 +96,7 @@ export interface AtlasGenerationOptions {
   atlasResolution?: number;
   baseMetalness?: number; // 0.0 a 1.0
   baseRoughness?: number; // 0.0 a 1.0
+  baseMeshColor?: string; // Color base para disimular costuras y fondo del atlas
 }
 
 /**
@@ -103,14 +104,16 @@ export interface AtlasGenerationOptions {
  */
 export async function buildUnifiedMultiViewPBRAtlas(
   viewDataMap: Partial<Record<BlueprintViewKey, ViewPBRData>>,
-  options: number | AtlasGenerationOptions = 2048
+  options: number | AtlasGenerationOptions = 2048,
+  extraOptions?: AtlasGenerationOptions
 ): Promise<MultiViewAtlasResult | null> {
-  const activeKeys = (['front', 'side', 'top'] as BlueprintViewKey[]).filter(k => !!viewDataMap[k]);
+  const activeKeys = (['front', 'side', 'top', 'back'] as BlueprintViewKey[]).filter(k => !!viewDataMap[k]);
   if (activeKeys.length === 0) return null;
 
-  const atlasResolution = typeof options === 'number' ? options : (options.atlasResolution ?? 2048);
-  const baseMetalness = typeof options === 'object' ? (options.baseMetalness ?? 0.0) : 0.0;
-  const baseRoughness = typeof options === 'object' ? (options.baseRoughness ?? 0.5) : 0.5;
+  const atlasResolution = typeof options === 'number' ? (extraOptions?.atlasResolution ?? options) : (options.atlasResolution ?? 2048);
+  const baseMetalness = typeof options === 'object' ? (options.baseMetalness ?? 0.0) : (extraOptions?.baseMetalness ?? 0.0);
+  const baseRoughness = typeof options === 'object' ? (options.baseRoughness ?? 0.5) : (extraOptions?.baseRoughness ?? 0.5);
+  const baseMeshColor = typeof options === 'object' ? options.baseMeshColor : extraOptions?.baseMeshColor;
 
   const metalByte = Math.max(0, Math.min(255, Math.round(baseMetalness * 255))).toString(16).padStart(2, '0');
   const roughByte = Math.max(0, Math.min(255, Math.round(baseRoughness * 255))).toString(16).padStart(2, '0');
@@ -145,7 +148,7 @@ export async function buildUnifiedMultiViewPBRAtlas(
     aoAtlasUrl,
     metalnessAtlasUrl
   ] = await Promise.all([
-    compositeAtlasChannel(albedoList, atlasResolution, '#e2e8f0'),
+    compositeAtlasChannel(albedoList, atlasResolution, baseMeshColor || '#e2e8f0'),
     compositeAtlasChannel(normalList, atlasResolution, '#8080ff'), // Normal neutra tangente
     compositeAtlasChannel(bumpList, atlasResolution, '#808080'),   // Bump neutral 50% gris
     compositeAtlasChannel(roughList, atlasResolution, roughHexColor),  // Rugosidad dinámica
@@ -154,7 +157,7 @@ export async function buildUnifiedMultiViewPBRAtlas(
   ]);
 
   const materialId = 'mat_atlas_pbr_' + Math.random().toString(36).substring(2, 9);
-  const viewNames = activeKeys.map(k => k === 'front' ? 'Frontal' : k === 'top' ? 'Superior' : 'Lateral').join('+');
+  const viewNames = activeKeys.map(k => k === 'front' ? 'Frontal' : k === 'top' ? 'Superior' : k === 'side' ? 'Lateral' : 'Trasera').join('+');
 
   return {
     materialId,
@@ -201,6 +204,7 @@ export function generateMultiViewAtlasUVs(
   const hasSide = activeViews.includes('side');
   const hasTop = activeViews.includes('top');
   const hasFront = activeViews.includes('front');
+  const hasBack = activeViews.includes('back');
 
   const faces = obj.faces.map(face => {
     if (!face || !face.indices || face.indices.length < 3) return face;
@@ -236,16 +240,53 @@ export function generateMultiViewAtlasUVs(
 
     // Seleccionar cuadrante según la normal dominante y disponibilidad
     let dominantView: BlueprintViewKey = 'side';
-    if (absY >= absX && absY >= absZ && hasTop) {
+    let skipProjection = false;
+
+    // Vista Superior (cubre caras horizontales y cojines/asientos/tapizados abombados con normalY > 0.45)
+    const isTopDominant = (absY >= absX && absY >= absZ) || (normalY > 0.45 && normalY >= absX * 0.8 && normalY >= absZ * 0.75);
+    if (isTopDominant && hasTop) {
       dominantView = 'top';
-    } else if (absZ >= absX && absZ >= absY && hasFront) {
-      dominantView = 'front';
+      const cfgTop = viewsConfig?.top;
+      const projectBothSidesTop = (cfgTop?.texProjectBothSides ?? false) || (cfgTop?.texMirrorOpposite ?? false);
+      if (!projectBothSidesTop && normalY < -0.05) skipProjection = true;
+    } else if (absZ >= absX && absZ >= absY) {
+      // Normal Z dominante (Frontal en -Z vs Trasera en +Z)
+      if (normalZ < -0.05) {
+        if (hasFront) {
+          dominantView = 'front';
+        } else {
+          const cfgBack = viewsConfig?.back;
+          const projectBothSides = (cfgBack?.texProjectBothSides ?? false) || (cfgBack?.texMirrorOpposite ?? false);
+          if (hasBack && projectBothSides) {
+            dominantView = 'back';
+          } else {
+            skipProjection = true;
+          }
+        }
+      } else {
+        if (hasBack) {
+          dominantView = 'back';
+        } else {
+          const cfgFront = viewsConfig?.front;
+          const projectBothSides = (cfgFront?.texProjectBothSides ?? false) || (cfgFront?.texMirrorOpposite ?? false);
+          if (hasFront && projectBothSides) {
+            dominantView = 'front';
+          } else {
+            skipProjection = true;
+          }
+        }
+      }
     } else if (hasSide) {
       dominantView = 'side';
+      const cfgSide = viewsConfig?.side;
+      const projectBothSidesSide = (cfgSide?.texProjectBothSides ?? false) || (cfgSide?.texMirrorOpposite ?? false);
+      if (!projectBothSidesSide && normalX > 0.05) skipProjection = true;
     } else if (hasTop) {
       dominantView = 'top';
     } else if (hasFront) {
       dominantView = 'front';
+    } else if (hasBack) {
+      dominantView = 'back';
     }
 
     const quad = ATLAS_QUADRANTS[dominantView] || ATLAS_QUADRANTS.side;
@@ -263,38 +304,56 @@ export function generateMultiViewAtlasUVs(
     const mirrorOpposite = cfg?.texMirrorOpposite ?? false;
 
     const uvs: [number, number][] = face.indices.map(vIdx => {
+      if (skipProjection) {
+        return [quad.uMin + 0.001, quad.vMin + 0.001] as [number, number];
+      }
+
       const v = vertices[vIdx] || [0, 0, 0];
       const [x, y, z] = v;
       let rawU = 0.5;
       let rawV = 0.5;
 
-      // Proyección Isotrópica dividiendo por maxHalf con centrado analítico
+      // Proyección centrada directamente en las proporciones de la vista [halfX, halfY, halfZ]
       if (dominantView === 'side') {
-        let pzNorm = z / maxHalf;
-        let pyNorm = y / maxHalf;
+        let pzNorm = z / halfZ;
+        let pyNorm = y / halfY;
         if (mirrorOpposite && normalX < 0) pzNorm = -pzNorm;
-        rawU = (1.0 - pzNorm) / 2.0;
+        rawU = (pzNorm + 1.0) / 2.0;
         rawV = (pyNorm + 1.0) / 2.0;
-
-        rawU += (1.0 - (halfZ / maxHalf)) * 0.5;
-        rawV += (1.0 - (halfY / maxHalf)) * 0.5;
       } else if (dominantView === 'top') {
-        let pxNorm = x / maxHalf;
-        let pzNorm = z / maxHalf;
+        let pxNorm = x / halfX;
+        let pzNorm = z / halfZ;
         rawU = (pxNorm + 1.0) / 2.0;
-        rawV = normalY >= 0 ? (1.0 - pzNorm) / 2.0 : (pzNorm + 1.0) / 2.0;
-
-        rawU += (1.0 - (halfX / maxHalf)) * 0.5;
-        rawV += (1.0 - (halfZ / maxHalf)) * 0.5;
-      } else {
-        let pxNorm = x / maxHalf;
-        let pyNorm = y / maxHalf;
+        // Delantera (+Z) corresponde a la parte superior de la imagen (V = 1.0)
+        rawV = (pzNorm + 1.0) / 2.0;
+      } else if (dominantView === 'back') {
+        let pxNorm = x / halfX;
+        let pyNorm = y / halfY;
         if (mirrorOpposite && normalZ < 0) pxNorm = -pxNorm;
+        rawU = (1.0 - pxNorm) / 2.0;
+        rawV = (pyNorm + 1.0) / 2.0;
+      } else {
+        // Frontal
+        let pxNorm = x / halfX;
+        let pyNorm = y / halfY;
+        if (mirrorOpposite && normalZ > 0) pxNorm = -pxNorm;
         rawU = (pxNorm + 1.0) / 2.0;
         rawV = (pyNorm + 1.0) / 2.0;
+      }
 
-        rawU += (1.0 - (halfX / maxHalf)) * 0.5;
-        rawV += (1.0 - (halfY / maxHalf)) * 0.5;
+      // Soportar rotación de vista (90°, 180°, 270°)
+      const rot = ((cfg?.rotation ?? 0) % 360 + 360) % 360;
+      if (rot === 90) {
+        const temp = rawU;
+        rawU = rawV;
+        rawV = 1.0 - temp;
+      } else if (rot === 180) {
+        rawU = 1.0 - rawU;
+        rawV = 1.0 - rawV;
+      } else if (rot === 270) {
+        const temp = rawU;
+        rawU = 1.0 - rawV;
+        rawV = temp;
       }
 
       // Aplicar escala y offset

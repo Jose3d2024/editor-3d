@@ -12,8 +12,12 @@ import {
   Check,
   HardDrive,
   Copy,
-  AlertCircle
+  AlertCircle,
+  Camera,
+  Image as ImageIcon,
+  RotateCw
 } from 'lucide-react';
+import { captureViewportSnapshot, downloadViewportSnapshot } from '../utils/viewportCapture';
 
 export interface SavedSceneItem {
   id: string;
@@ -22,6 +26,7 @@ export interface SavedSceneItem {
   objectCount: number;
   lightCount: number;
   project: Project;
+  thumbnail?: string;
 }
 
 const LOCAL_STORAGE_KEY = 'csg_saved_scenes_library_v1';
@@ -73,10 +78,16 @@ export const filterUsedMaterials = (project: Project): Project => {
   };
 };
 
-export const saveSceneToStorage = (project: Project): SavedSceneItem[] => {
+export const saveSceneToStorage = (project: Project, customThumbnail?: string): SavedSceneItem[] => {
   const existing = getSavedScenes();
   const now = Date.now();
   const cleanProject = filterUsedMaterials(JSON.parse(JSON.stringify(project)));
+  
+  const thumbnail = customThumbnail || captureViewportSnapshot({ width: 320, height: 200, quality: 0.85 }) || undefined;
+  if (thumbnail) {
+    (cleanProject as any).thumbnail = thumbnail;
+  }
+
   const sceneItem: SavedSceneItem = {
     id: cleanProject.name || 'Nuevo Proyecto',
     name: cleanProject.name || 'Nuevo Proyecto',
@@ -84,6 +95,7 @@ export const saveSceneToStorage = (project: Project): SavedSceneItem[] => {
     objectCount: cleanProject.objects.length,
     lightCount: cleanProject.lights.length,
     project: cleanProject,
+    thumbnail,
   };
 
   const filtered = existing.filter(s => s.name !== sceneItem.name);
@@ -91,7 +103,15 @@ export const saveSceneToStorage = (project: Project): SavedSceneItem[] => {
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
   } catch (e) {
-    console.warn('LocalStorage save warning:', e);
+    console.warn('LocalStorage save warning (trying without thumb):', e);
+    try {
+      sceneItem.thumbnail = undefined;
+      (cleanProject as any).thumbnail = undefined;
+      const updatedNoThumb = [sceneItem, ...filtered];
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedNoThumb));
+    } catch (err2) {
+      console.error('LocalStorage critical save error:', err2);
+    }
   }
   return updated;
 };
@@ -123,7 +143,10 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
   const { project, setProject } = useStore();
   const [projectName, setProjectName] = useState(project.name || 'Nuevo Proyecto');
   const [downloadJsonToo, setDownloadJsonToo] = useState(false);
+  const [downloadImageToo, setDownloadImageToo] = useState(false);
+  const [thumbnailPreview, setThumbnailPreview] = useState<string | null>(null);
   const [savedScenes, setSavedScenes] = useState<SavedSceneItem[]>([]);
+  const [selectedScene, setSelectedScene] = useState<SavedSceneItem | null>(null);
   const [activeTab, setActiveTab] = useState<'save' | 'library'>(mode === 'open' ? 'library' : 'save');
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -152,9 +175,16 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setProjectName(project.name || 'Nuevo Proyecto');
-      setSavedScenes(getSavedScenes());
+      const scenes = getSavedScenes();
+      setSavedScenes(scenes);
+      if (scenes.length > 0) {
+        setSelectedScene(scenes[0]);
+      }
       setActiveTab(mode === 'open' ? 'library' : 'save');
       setFeedback(null);
+      // Capture live snapshot of the viewport
+      const snap = captureViewportSnapshot({ width: 320, height: 200, quality: 0.88 });
+      setThumbnailPreview(snap);
     }
   }, [isOpen, project.name, mode]);
 
@@ -170,12 +200,20 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
     };
     setProject(updatedProject);
 
-    // Save to persistent localStorage library
-    saveSceneToStorage(updatedProject);
+    // Save to persistent localStorage library with thumbnail
+    saveSceneToStorage(updatedProject, thumbnailPreview || undefined);
+
+    // If requested, download thumbnail image
+    if (downloadImageToo) {
+      downloadViewportSnapshot(`${finalName}_miniatura.png`);
+    }
 
     // If requested or as backup download JSON
     if (downloadJsonToo) {
       const cleanProject = filterUsedMaterials(updatedProject);
+      if (thumbnailPreview) {
+        (cleanProject as any).thumbnail = thumbnailPreview;
+      }
       const blob = new Blob([JSON.stringify(cleanProject, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -215,7 +253,7 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-fadeIn select-none">
-      <div className="bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden text-zinc-100 p-6 space-y-4">
+      <div className={`bg-zinc-900 border border-zinc-700/80 rounded-2xl shadow-2xl ${activeTab === 'library' ? 'max-w-3xl' : 'max-w-lg'} w-full overflow-hidden text-zinc-100 p-6 space-y-4 transition-all duration-200`}>
         
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
@@ -229,7 +267,7 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
               </h3>
               <p className="text-[11px] text-zinc-400">
                 {activeTab === 'save'
-                  ? 'Guarda y sobreescribe tu escena en la memoria local o descárgala como archivo.'
+                  ? 'Guarda y sobreescribe tu escena con miniatura del visor en la memoria local.'
                   : 'Carga proyectos guardados previamente en tu navegador.'}
               </p>
             </div>
@@ -298,6 +336,47 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
               </div>
             </div>
 
+            {/* Viewport Thumbnail Snapshot Preview */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs font-semibold text-zinc-300">
+                <span className="flex items-center gap-1.5">
+                  <Camera size={13} className="text-indigo-400" />
+                  <span>Miniatura del visor actual:</span>
+                </span>
+                <span className="text-[9.5px] text-zinc-500 font-mono font-normal">
+                  Se adjunta a la escena guardada
+                </span>
+              </div>
+              <div className="relative w-full h-28 rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 flex items-center justify-center group">
+                {thumbnailPreview ? (
+                  <>
+                    <img
+                      src={thumbnailPreview}
+                      alt="Miniatura de la escena"
+                      className="w-full h-full object-contain"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const fresh = captureViewportSnapshot({ width: 320, height: 200, quality: 0.88 });
+                        if (fresh) setThumbnailPreview(fresh);
+                      }}
+                      title="Recapturar visor ahora"
+                      className="absolute bottom-2 right-2 px-2 py-1 bg-black/75 hover:bg-black/95 text-[10px] text-zinc-200 rounded-lg backdrop-blur-xs border border-white/10 flex items-center gap-1 transition-all cursor-pointer shadow-md"
+                    >
+                      <RotateCw size={10} className="text-indigo-400" />
+                      <span>Recapturar</span>
+                    </button>
+                  </>
+                ) : (
+                  <div className="text-zinc-500 text-xs flex items-center gap-2">
+                    <Camera size={16} />
+                    <span>Visor listo para captura</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Scene details */}
             <div className="grid grid-cols-3 gap-2 p-2.5 bg-zinc-950/60 rounded-xl border border-zinc-800/80 text-[11px] text-zinc-400">
               <div>
@@ -318,7 +397,7 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
             </div>
 
             {/* Options */}
-            <div className="pt-1">
+            <div className="space-y-1.5 pt-1">
               <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -328,6 +407,16 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
                 />
                 <Download size={13} className="text-indigo-400" />
                 <span>Descargar también archivo .json al equipo</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={downloadImageToo}
+                  onChange={e => setDownloadImageToo(e.target.checked)}
+                  className="rounded border-zinc-700 text-indigo-500 focus:ring-0 bg-zinc-800 cursor-pointer"
+                />
+                <ImageIcon size={13} className="text-indigo-400" />
+                <span>Descargar también imagen de miniatura (.png) al equipo</span>
               </label>
             </div>
 
@@ -363,58 +452,185 @@ export const SaveProjectModal: React.FC<SaveProjectModalProps> = ({
             )}
 
             {savedScenes.length === 0 ? (
-              <div className="text-center py-8 text-zinc-500 text-xs space-y-2">
-                <HardDrive size={32} className="mx-auto text-zinc-600 opacity-50" />
-                <p>No tienes escenas guardadas localmente todavía.</p>
-                <p className="text-[11px] text-zinc-600">Usa la pestaña "Guardar" para guardar tu primera escena.</p>
+              <div className="text-center py-10 text-zinc-500 text-xs space-y-2">
+                <HardDrive size={36} className="mx-auto text-zinc-600 opacity-50" />
+                <p className="font-semibold text-zinc-400">No tienes escenas guardadas localmente todavía.</p>
+                <p className="text-[11px] text-zinc-500">Usa la pestaña "Guardar" para guardar tu primera escena con miniatura.</p>
               </div>
             ) : (
-              <div className="max-h-64 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-                {savedScenes.map(scene => (
-                  <div
-                    key={scene.name}
-                    onClick={() => handleLoadScene(scene)}
-                    className="p-3 bg-zinc-950 hover:bg-indigo-950/30 border border-zinc-800 hover:border-indigo-600/40 rounded-xl flex items-center justify-between cursor-pointer transition-all group"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <FileText size={14} className="text-indigo-400" />
-                        <span className="font-semibold text-xs text-white group-hover:text-indigo-200">
-                          {scene.name}
-                        </span>
-                        {scene.name === project.name && (
-                          <span className="text-[9.5px] px-1.5 py-0.2 rounded bg-indigo-900/60 text-indigo-300 border border-indigo-700/40 font-mono">
-                            Actual
-                          </span>
-                        )}
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                {/* File Explorer List (Left Column) */}
+                <div className="md:col-span-7 max-h-80 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                  <div className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider px-1 pb-1 flex items-center justify-between">
+                    <span>Archivos guardados ({savedScenes.length})</span>
+                    <span className="text-zinc-500 font-normal">Haz clic para vista previa</span>
+                  </div>
+                  {savedScenes.map(scene => {
+                    const isSelected = selectedScene?.name === scene.name;
+                    return (
+                      <div
+                        key={scene.name}
+                        onClick={() => setSelectedScene(scene)}
+                        onDoubleClick={() => handleLoadScene(scene)}
+                        className={`p-2 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
+                          isSelected
+                            ? 'bg-indigo-950/60 border-indigo-500 shadow-sm ring-1 ring-indigo-500/30'
+                            : 'bg-zinc-950/80 hover:bg-zinc-800/60 border-zinc-800/80 text-zinc-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {scene.thumbnail ? (
+                            <img
+                              src={scene.thumbnail}
+                              alt={scene.name}
+                              className="w-12 h-9 rounded-md object-cover border border-zinc-800 bg-zinc-900 shrink-0"
+                            />
+                          ) : (
+                            <div className="w-12 h-9 rounded-md border border-zinc-800 bg-zinc-900 flex items-center justify-center text-zinc-500 shrink-0">
+                              <FileText size={15} />
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`font-semibold text-xs truncate max-w-[150px] ${isSelected ? 'text-white' : 'text-zinc-200'}`}>
+                                {scene.name}
+                              </span>
+                              {scene.name === project.name && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-900/80 text-indigo-300 border border-indigo-700/50 font-mono shrink-0">
+                                  Actual
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] text-zinc-400">
+                              <span>{new Date(scene.savedAt).toLocaleDateString()}</span>
+                              <span>•</span>
+                              <span>{scene.objectCount} obj</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={(e) => handleDelete(scene.name, e)}
+                            title="Eliminar escena"
+                            className="p-1 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-rose-950/50 transition-colors cursor-pointer"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleLoadScene(scene);
+                            }}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-xs'
+                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                            }`}
+                          >
+                            Abrir
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-3 text-[10px] text-zinc-500">
-                        <span className="flex items-center gap-1">
-                          <Clock size={11} />
-                          {new Date(scene.savedAt).toLocaleString()}
-                        </span>
-                        <span>• {scene.objectCount} objetos</span>
-                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Windows Explorer Style Preview Pane (Right Column) */}
+                <div className="md:col-span-5 bg-zinc-950 rounded-xl border border-zinc-800/90 p-3 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80 mb-2.5">
+                      <span className="text-[10.5px] uppercase font-bold text-zinc-300 tracking-wider flex items-center gap-1.5">
+                        <ImageIcon size={12} className="text-cyan-400" />
+                        <span>Panel de Vista Previa</span>
+                      </span>
+                      <span className="text-[9.5px] px-1.5 py-0.5 rounded bg-zinc-800/80 text-zinc-400 border border-zinc-700/40">
+                        Windows style
+                      </span>
                     </div>
 
-                    <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100">
+                    {selectedScene ? (
+                      <div className="space-y-2.5">
+                        {/* Big preview snapshot */}
+                        <div className="w-full aspect-video bg-zinc-900 rounded-lg border border-zinc-800 overflow-hidden flex items-center justify-center relative shadow-inner">
+                          {selectedScene.thumbnail ? (
+                            <img
+                              src={selectedScene.thumbnail}
+                              alt={selectedScene.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <div className="text-center p-3 text-zinc-600 space-y-1">
+                              <Camera size={24} className="mx-auto opacity-50" />
+                              <p className="text-[10px]">Sin miniatura previa</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* File Details */}
+                        <div className="space-y-1">
+                          <h4 className="font-bold text-xs text-white truncate" title={selectedScene.name}>
+                            {selectedScene.name}
+                          </h4>
+                          <div className="text-[10.5px] space-y-0.5 text-zinc-400 bg-zinc-900/80 p-2 rounded-lg border border-zinc-800/60 font-mono">
+                            <div className="flex justify-between">
+                              <span className="text-zinc-500">Objetos:</span>
+                              <span className="text-zinc-200 font-bold">{selectedScene.objectCount}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-zinc-500">Luces:</span>
+                              <span className="text-zinc-200 font-bold">{selectedScene.lightCount}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-zinc-500">Guardado:</span>
+                              <span className="text-zinc-300">{new Date(selectedScene.savedAt).toLocaleString()}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-12 text-center text-zinc-600 text-xs">
+                        Selecciona un archivo para ver su vista previa
+                      </div>
+                    )}
+                  </div>
+
+                  {selectedScene && (
+                    <div className="pt-3 border-t border-zinc-800/80 flex items-center gap-2 mt-2">
                       <button
                         type="button"
-                        onClick={(e) => handleDelete(scene.name, e)}
-                        title="Eliminar escena"
-                        className="p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-rose-950/40 transition-colors"
+                        onClick={() => {
+                          const clean = filterUsedMaterials(selectedScene.project);
+                          if (selectedScene.thumbnail) {
+                            (clean as any).thumbnail = selectedScene.thumbnail;
+                          }
+                          const blob = new Blob([JSON.stringify(clean, null, 2)], { type: 'application/json' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `${selectedScene.name}.json`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        title="Descargar archivo .json"
+                        className="px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                       >
-                        <Trash2 size={13} />
+                        <Download size={12} />
+                        <span>.JSON</span>
                       </button>
                       <button
                         type="button"
-                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold transition-all shadow-xs"
+                        onClick={() => handleLoadScene(selectedScene)}
+                        className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
                       >
-                        Abrir
+                        <FolderOpen size={13} />
+                        <span>Cargar en Visor</span>
                       </button>
                     </div>
-                  </div>
-                ))}
+                  )}
+                </div>
               </div>
             )}
 

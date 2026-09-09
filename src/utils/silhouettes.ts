@@ -16,6 +16,22 @@
 
 import type { V3, MeshFace, CSGObject } from '../types';
 import { applyBooleanOperation } from './modifiers';
+import { simplifyClosedPolygon } from './blueprintCarver';
+import {
+  simplificarSiluetaAThreeShape,
+  fitBezierCurvesSchneider,
+  simplifyClosedContourRDP,
+  obtenerPuntosConRuido,
+  procesarImagenYRenderizarLinea
+} from './vectorContourProcessor';
+
+export {
+  simplificarSiluetaAThreeShape,
+  fitBezierCurvesSchneider,
+  simplifyClosedContourRDP,
+  obtenerPuntosConRuido,
+  procesarImagenYRenderizarLinea
+};
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -97,76 +113,100 @@ export async function extractSilhouetteFromImage(
         return invert ? !fg : fg;
       };
 
-      // ── 2. Encontrar bounding box de la silueta ─────────────────────────
-      let minX = W, maxX = 0, minY = H, maxY = 0;
+      // ── 2. Encontrar el punto de partida (primer píxel del contorno) ─────
+      let startX = -1;
+      let startY = -1;
       for (let y = 0; y < H; y++) {
         for (let x = 0; x < W; x++) {
           const i = (y * W + x) * 4;
           if (isFg(data[i], data[i+1], data[i+2], data[i+3])) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
+            startX = x;
+            startY = y;
+            break;
           }
         }
+        if (startX !== -1) break;
       }
 
-      if (maxX <= minX || maxY <= minY) {
+      if (startX === -1) {
         // Sin silueta detectada — devolver rectángulo por defecto
         resolve([[-1,-1],[1,-1],[1,1],[-1,1]]);
         return;
       }
 
-      // ── 3. Muestrear perfiles superior e inferior ───────────────────────
-      const COLS = Math.min(W, numPoints);
-      const topProfile:    [number, number][] = [];
-      const bottomProfile: [number, number][] = [];
+      // ── 3. Rastrear contorno exterior con algoritmo Moore-Neighbor ─────────
+      const rawContourPx: [number, number][] = [];
+      let cx = startX;
+      let cy = startY;
+      const dirOffsets: [number, number][] = [
+        [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]
+      ];
+      let backtrackDir = 6;
+      let secondX = -1;
+      let secondY = -1;
+      const maxIterations = W * H * 2;
+      let step = 0;
 
-      for (let ci = 0; ci < COLS; ci++) {
-        const x = Math.round(minX + (ci / (COLS - 1)) * (maxX - minX));
-        const xc = Math.max(0, Math.min(W - 1, x));
+      do {
+        rawContourPx.push([cx, cy]);
+        let foundNext = false;
+        let nextX = cx;
+        let nextY = cy;
+        let nextBacktrack = 0;
 
-        let topY    = -1;
-        let bottomY = -1;
+        for (let i = 0; i < 8; i++) {
+          const checkDir = (backtrackDir + i) % 8;
+          const nx = cx + dirOffsets[checkDir][0];
+          const ny = cy + dirOffsets[checkDir][1];
 
-        // Escanear la columna de arriba hacia abajo
-        for (let y = minY; y <= maxY; y++) {
-          const i = (y * W + xc) * 4;
-          if (isFg(data[i], data[i+1], data[i+2], data[i+3])) {
-            if (topY === -1) topY = y;
-            bottomY = y;
+          if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+            const idx = (ny * W + nx) * 4;
+            if (isFg(data[idx], data[idx+1], data[idx+2], data[idx+3])) {
+              nextX = nx;
+              nextY = ny;
+              nextBacktrack = (checkDir + 5) % 8;
+              foundNext = true;
+              break;
+            }
           }
         }
 
-        if (topY === -1) {
-          // Columna vacía — interpolar de vecinos o saltar
-          topY    = Math.round((minY + maxY) / 2);
-          bottomY = topY;
+        if (!foundNext) break;
+
+        step++;
+        if (step === 1) {
+          secondX = nextX;
+          secondY = nextY;
+        } else if (cx === startX && cy === startY && nextX === secondX && nextY === secondY) {
+          break;
         }
 
-        // Normalizar a [-1, 1]
-        const nx = (xc - (minX + maxX) / 2) / ((maxX - minX) / 2);
-        const nyTop = -((topY    - (minY + maxY) / 2) / ((maxY - minY) / 2)); // invertir Y
-        const nyBot = -((bottomY - (minY + maxY) / 2) / ((maxY - minY) / 2));
+        if (step > maxIterations) break;
 
-        topProfile.push([nx, nyTop]);
-        bottomProfile.push([nx, nyBot]);
+        cx = nextX;
+        cy = nextY;
+        backtrackDir = nextBacktrack;
+      } while (cx !== startX || cy !== startY);
+
+      if (rawContourPx.length < 3) {
+        resolve([[-1,-1],[1,-1],[1,1],[-1,1]]);
+        return;
       }
 
-      // ── 4. Construir polígono cerrado (sentido antihorario, CCW) ─────────
-      // El prisma CSG requiere winding CCW para normales hacia afuera.
-      // CCW en coords estándar: bottomLeft→bottomRight→topRight→topLeft
-      const rawPolygon: [number, number][] = [
-        ...bottomProfile,
-        ...[...topProfile].reverse(),
-      ];
+      // ── 4. Normalizar contorno al rango [-1, 1] de Three.js coherente con el lienzo 2D ──
+      const centerWorldX = W / 2;
+      const centerWorldY = H / 2;
+      const maxSpan = Math.max(W, H) / 2;
 
-      // ── 5. Asegurar winding CCW, suavizar y submuestrear ───────────────
-      const ccw       = ensureCCW(rawPolygon);
-      const smoothed  = smoothPolygon(ccw, 2);
-      const simplified = resamplePolygon(smoothed, numPoints);
+      const rawPolygon: [number, number][] = rawContourPx.map(([px, py]) => [
+        (px - centerWorldX) / (maxSpan || 1),
+        -((py - centerWorldY) / (maxSpan || 1)) // invertir eje Y
+      ]);
 
-      resolve(simplified);
+      // ── 5. Asegurar winding CCW y aplicar Vectorización Adaptativa de Alta Fidelidad ───────────────
+      const ccw = ensureCCW(rawPolygon);
+      const optimizedPolygon = simplifyClosedPolygon(ccw, 0.005);
+      resolve(ensureCCW(optimizedPolygon));
     };
 
     img.onerror = () => {

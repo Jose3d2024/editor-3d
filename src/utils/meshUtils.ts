@@ -456,13 +456,33 @@ export function removeDisconnectedIslands(
   const { vertices, faces } = repaired;
   if (faces.length === 0) return { vertices, faces, removedShells: 0, report: ['Sin caras para analizar'] };
 
-  // 1. Build adjacency graph between faces sharing edges
+  // 1. Mapeo espacial de vértices para conectar triángulos que comparten posición en 3D
+  // aunque tengan índices separados por UVs, costuras o normales duras
+  const precision = 1e-3;
+  const posMap = new Map<string, number>();
+  const vertToSpatialId = new Int32Array(vertices.length);
+
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    const x = Math.round(v[0] / precision);
+    const y = Math.round(v[1] / precision);
+    const z = Math.round(v[2] / precision);
+    const key = `${x}_${y}_${z}`;
+    let id = posMap.get(key);
+    if (id === undefined) {
+      id = posMap.size;
+      posMap.set(key, id);
+    }
+    vertToSpatialId[i] = id;
+  }
+
+  // 2. Construir grafo de adyacencia usando aristas espaciales
   const edgeToFaces = new Map<string, number[]>();
   faces.forEach((face, fIdx) => {
     const len = face.indices.length;
     for (let i = 0; i < len; i++) {
-      const a = face.indices[i];
-      const b = face.indices[(i + 1) % len];
+      const a = vertToSpatialId[face.indices[i]];
+      const b = vertToSpatialId[face.indices[(i + 1) % len]];
       const key = a < b ? `${a}_${b}` : `${b}_${a}`;
       let list = edgeToFaces.get(key);
       if (!list) {
@@ -485,7 +505,7 @@ export function removeDisconnectedIslands(
     }
   });
 
-  // 2. Discover connected components (shells)
+  // 3. Descubrir componentes conexos (conchas continuas)
   const visited = new Uint8Array(faces.length);
   const shells: number[][] = [];
 
@@ -512,26 +532,84 @@ export function removeDisconnectedIslands(
     return { vertices, faces, removedShells: 0, report: ['Malla continua (1 sola concha sólida)'] };
   }
 
-  // 3. Find max shell face count and filter out tiny floating noise fragments
-  const maxShellFaces = Math.max(...shells.map(s => s.length));
-  const threshold = Math.max(minAbsoluteFaces, Math.floor(maxShellFaces * minFaceRatio));
-
-  const keptFacesList: MeshFace[] = [];
-  let removedCount = 0;
-
-  shells.forEach(shell => {
-    if (shell.length >= threshold || shell.length === maxShellFaces) {
-      shell.forEach(fIdx => keptFacesList.push(faces[fIdx]));
-    } else {
-      removedCount++;
+  // 4. Calcular Bounding Box total del objeto
+  const objMin = [Infinity, Infinity, Infinity];
+  const objMax = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    for (let d = 0; d < 3; d++) {
+      if (v[d] < objMin[d]) objMin[d] = v[d];
+      if (v[d] > objMax[d]) objMax[d] = v[d];
     }
+  }
+  const objDiag = Math.hypot(objMax[0] - objMin[0], objMax[1] - objMin[1], objMax[2] - objMin[2]) || 1.0;
+
+  // 5. Calcular métricas físicas de cada concha
+  let totalMeshArea = 0;
+  const shellMetrics = shells.map(shell => {
+    const sMin = [Infinity, Infinity, Infinity];
+    const sMax = [-Infinity, -Infinity, -Infinity];
+    let sArea = 0;
+
+    for (const fIdx of shell) {
+      const f = faces[fIdx];
+      for (const vIdx of f.indices) {
+        const v = vertices[vIdx];
+        for (let d = 0; d < 3; d++) {
+          if (v[d] < sMin[d]) sMin[d] = v[d];
+          if (v[d] > sMax[d]) sMax[d] = v[d];
+        }
+      }
+      if (f.indices.length >= 3) {
+        const p0 = vertices[f.indices[0]];
+        const p1 = vertices[f.indices[1]];
+        const p2 = vertices[f.indices[2]];
+        const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+        const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+        const cx = ay * bz - az * by;
+        const cy = az * bx - ax * bz;
+        const cz = ax * by - ay * bx;
+        sArea += Math.hypot(cx, cy, cz) * 0.5;
+      }
+    }
+    totalMeshArea += sArea;
+    const sDiag = Math.hypot(sMax[0] - sMin[0], sMax[1] - sMin[1], sMax[2] - sMin[2]);
+    return { sDiag, sArea };
   });
 
-  if (removedCount === 0) {
-    return { vertices, faces, removedShells: 0, report: [`${shells.length} conchas principales conservadas`] };
+  // 6. Criterio de seguridad:
+  // Piezas con tamaño físico real >= 1.5% del objeto, con más de 8 caras o área apreciable
+  // NUNCA son eliminadas (paneles, compuertas, visores, cañones).
+  const keptFacesList: MeshFace[] = [];
+  let removedCount = 0;
+  let potentialRemovedFaces = 0;
+
+  for (let sIdx = 0; sIdx < shells.length; sIdx++) {
+    const shell = shells[sIdx];
+    const { sDiag, sArea } = shellMetrics[sIdx];
+    const diagRatio = sDiag / objDiag;
+
+    const isNoiseSpeck =
+      diagRatio < 0.015 &&
+      shell.length <= 8 &&
+      (totalMeshArea === 0 || sArea < totalMeshArea * 0.0005);
+
+    if (isNoiseSpeck) {
+      removedCount++;
+      potentialRemovedFaces += shell.length;
+    } else {
+      for (const fIdx of shell) {
+        keptFacesList.push(faces[fIdx]);
+      }
+    }
   }
 
-  // 4. Re-index and compact vertices
+  // Salvaguarda: si se borraría más del 2% del total de caras, abortar y preservar todo
+  if (potentialRemovedFaces > faces.length * 0.02 || removedCount === 0 || keptFacesList.length === 0) {
+    return { vertices, faces, removedShells: 0, report: [`${shells.length} conchas principales conservadas (sin ruido)`] };
+  }
+
+  // 7. Re-indexar y compactar vértices
   const cleanRepaired = repairMesh({ vertices, faces: keptFacesList });
   return {
     vertices: cleanRepaired.vertices,
@@ -611,7 +689,7 @@ export function regularizeMeshTopology(
     }
   };
 
-  // Detect feature edges (creases) to constrain vertex motion on hard edges
+  // Detect feature edges (creases) and boundaries to constrain vertex motion
   const edgeFaces = new Map<string, number[]>();
   faces.forEach((face, fIdx) => {
     const len = face.indices.length;
@@ -624,6 +702,8 @@ export function regularizeMeshTopology(
       list.push(fIdx);
     }
   });
+
+  const safeStrength = Math.min(0.35, Math.max(0.05, strength));
 
   for (let iter = 0; iter < iterations; iter++) {
     updateFaceNormals();
@@ -646,18 +726,40 @@ export function regularizeMeshTopology(
       if (vertNormal.lengthSq() > 1e-12) vertNormal.normalize();
       else vertNormal.set(0, 1, 0);
 
-      // Check if vertex is on a sharp crease edge
+      // Check boundary vs crease edges
+      const boundaryNeighbors: number[] = [];
       const creaseNeighbors: number[] = [];
       for (const nIdx of neighbors) {
         const key = i < nIdx ? `${i}_${nIdx}` : `${nIdx}_${i}`;
         const sharingFaces = edgeFaces.get(key);
-        if (sharingFaces && sharingFaces.length === 2) {
-          const fn1 = faceNormals[sharingFaces[0]];
-          const fn2 = faceNormals[sharingFaces[1]];
-          if (fn1 && fn2 && fn1.dot(fn2) < cosFeature) {
-            creaseNeighbors.push(nIdx);
+        if (sharingFaces) {
+          if (sharingFaces.length === 1) {
+            boundaryNeighbors.push(nIdx);
+          } else if (sharingFaces.length === 2) {
+            const fn1 = faceNormals[sharingFaces[0]];
+            const fn2 = faceNormals[sharingFaces[1]];
+            if (fn1 && fn2 && fn1.dot(fn2) < cosFeature) {
+              creaseNeighbors.push(nIdx);
+            }
           }
         }
+      }
+
+      // Boundary handling
+      if (boundaryNeighbors.length > 0) {
+        if (boundaryNeighbors.length === 2) {
+          // Slide along open boundary perimeter
+          const p1 = currentVerts[boundaryNeighbors[0]];
+          const p2 = currentVerts[boundaryNeighbors[1]];
+          const lineDir = new THREE.Vector3().subVectors(p2, p1).normalize();
+          const midPoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+          const toMid = new THREE.Vector3().subVectors(midPoint, currentVerts[i]);
+          const proj = lineDir.clone().multiplyScalar(toMid.dot(lineDir));
+          const maxMove = currentVerts[i].distanceTo(p1) * 0.2;
+          if (proj.length() > maxMove) proj.setLength(maxMove);
+          nextVerts[i].addScaledVector(proj, safeStrength * 0.35);
+        }
+        continue;
       }
 
       if (creaseNeighbors.length === 2) {
@@ -668,7 +770,9 @@ export function regularizeMeshTopology(
         const midPoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
         const toMid = new THREE.Vector3().subVectors(midPoint, currentVerts[i]);
         const proj = lineDir.clone().multiplyScalar(toMid.dot(lineDir));
-        nextVerts[i].addScaledVector(proj, strength * 0.5);
+        const maxMove = currentVerts[i].distanceTo(p1) * 0.2;
+        if (proj.length() > maxMove) proj.setLength(maxMove);
+        nextVerts[i].addScaledVector(proj, safeStrength * 0.35);
       } else if (creaseNeighbors.length > 2) {
         // Corner / junction vertex: keep fixed to preserve corner sharpness
         continue;
@@ -676,11 +780,12 @@ export function regularizeMeshTopology(
         // Smooth interior or gentle surface: Tangential Laplacian relaxation
         neighborCenter.set(0, 0, 0);
         let totalWeight = 0;
+        let minEdgeDist = Infinity;
 
         for (const nIdx of neighbors) {
           const np = currentVerts[nIdx];
           const dist = currentVerts[i].distanceTo(np);
-          // Scale-invariant or uniform weight
+          if (dist < minEdgeDist) minEdgeDist = dist;
           const weight = dist > 1e-6 ? 1.0 : 0.0;
           neighborCenter.addScaledVector(np, weight);
           totalWeight += weight;
@@ -694,8 +799,12 @@ export function regularizeMeshTopology(
           const normalComp = disp.dot(vertNormal);
           disp.addScaledVector(vertNormal, -normalComp);
 
+          // Clamping
+          const maxDisp = isFinite(minEdgeDist) && minEdgeDist > 1e-5 ? minEdgeDist * 0.2 : 0.01;
+          if (disp.length() > maxDisp) disp.setLength(maxDisp);
+
           // Apply tangential relaxation step
-          nextVerts[i].addScaledVector(disp, strength);
+          nextVerts[i].addScaledVector(disp, safeStrength);
         }
       }
     }
@@ -713,20 +822,25 @@ export function regularizeMeshTopology(
 
 /**
  * Isotropic Uniform Remesher (Re-topologizador Uniforme).
- * Re-samples the surface geometry to create an evenly spaced, clean triangle grid.
- * Splits long edges, collapses microscopic edges, flips diagonals for valence 6, and relaxes tangentially.
+ * Re-muestrea la superficie de la geometría para crear una red triangular equilibrada y uniforme.
+ * Divide aristas largas excesivas y colapsa aristas microscópicas para mantener o reducir el recuento
+ * de caras sin sobrepasar nunca el presupuesto de polígonos del modelo (ideal post-optimización).
  */
 export function isotropicRemesh(
   obj: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
   targetEdgeLength?: number,
-  iterations: number = 3
+  iterations: number = 3,
+  options?: {
+    maxFaces?: number;
+    maintainFaceBudget?: boolean;
+  }
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
-  // 1. Repair and clean input
+  // 1. Reparar y preparar entrada
   const repaired = repairMesh(obj);
   let verts: V3[] = repaired.vertices.map(v => [...v]);
   let faces: MeshFace[] = repaired.faces.map(f => ({ ...f, indices: [...f.indices] }));
 
-  // Triangulate any n-gons first
+  // Triangular n-gonos iniciales
   const triFaces: MeshFace[] = [];
   faces.forEach(f => {
     if (f.indices.length === 3) {
@@ -746,10 +860,19 @@ export function isotropicRemesh(
     return { vertices: verts, faces, report: ['Malla insuficiente para remallado'] };
   }
 
-  // 2. Compute average edge length if not specified
+  const initialFaceCount = faces.length;
+  // Límite estricto de caras: por defecto NUNCA superar el recuento actual del modelo
+  const maxAllowedFaces = options?.maxFaces ?? initialFaceCount;
+
+  // 2. Calcular área superficial total y longitud promedio de aristas
+  let totalArea = 0;
   let totalEdgeLen = 0;
   let edgeCount = 0;
+
   faces.forEach(f => {
+    const p0 = verts[f.indices[0]], p1 = verts[f.indices[1]], p2 = verts[f.indices[2]];
+    if (!p0 || !p1 || !p2) return;
+
     for (let i = 0; i < 3; i++) {
       const a = verts[f.indices[i]];
       const b = verts[f.indices[(i + 1) % 3]];
@@ -759,18 +882,130 @@ export function isotropicRemesh(
         edgeCount++;
       }
     }
+
+    const ax = p1[0] - p0[0], ay = p1[1] - p0[1], az = p1[2] - p0[2];
+    const bx = p2[0] - p0[0], by = p2[1] - p0[1], bz = p2[2] - p0[2];
+    const cx = ay * bz - az * by;
+    const cy = az * bx - ax * bz;
+    const cz = ax * by - ay * bx;
+    totalArea += 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
   });
 
   const avgEdgeLen = edgeCount > 0 ? totalEdgeLen / edgeCount : 0.1;
-  const targetL = targetEdgeLength && targetEdgeLength > 0 ? targetEdgeLength : avgEdgeLen;
-  const minL = targetL * 0.7;
-  const maxL = targetL * 1.35;
+  // Longitud teórica para una rejilla de triángulos equiláteros con maxAllowedFaces caras
+  const idealEquilateralL = Math.sqrt((4 * Math.max(1e-5, totalArea)) / (Math.sqrt(3) * Math.max(4, maxAllowedFaces)));
+  const targetL = targetEdgeLength && targetEdgeLength > 0 ? targetEdgeLength : Math.max(avgEdgeLen, idealEquilateralL);
+
+  const minL = targetL * 0.75;
+  const maxL = targetL * 1.45;
   const minLSq = minL * minL;
   const maxLSq = maxL * maxL;
 
-  // Perform Isotropic Passes: Split long edges -> Collapse short edges -> Regularize
+  // Helper para calcular la normal de una cara triangular
+  const getFaceNormal = (i0: number, i1: number, i2: number, vertList: V3[]): THREE.Vector3 => {
+    const v0 = vertList[i0], v1 = vertList[i1], v2 = vertList[i2];
+    if (!v0 || !v1 || !v2) return new THREE.Vector3(0, 1, 0);
+    const ab = new THREE.Vector3(v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]);
+    const ac = new THREE.Vector3(v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]);
+    const n = new THREE.Vector3().crossVectors(ab, ac);
+    const len = n.length();
+    return len > 1e-8 ? n.multiplyScalar(1 / len) : new THREE.Vector3(0, 1, 0);
+  };
+
+  // Pasadas de remallado isótropo: Colapso -> División controlada -> Regularización
   for (let pass = 0; pass < iterations; pass++) {
-    // A. Split long edges
+    // ─── PASO 1: Colapso de aristas microscópicas (< minL) ───
+    // Este paso es crucial para eliminar triángulos redundantes o aristas apretadas y evitar inflación de polígonos
+    const edgeCollapses = new Map<number, number>(); // vFrom -> vTo
+    const collapsedFaces: MeshFace[] = [];
+
+    // Mapear caras por vértice para comprobaciones rápidas de inversión de normales
+    const vFaces = new Map<number, number[]>();
+    faces.forEach((f, fIdx) => {
+      f.indices.forEach(idx => {
+        let list = vFaces.get(idx);
+        if (!list) { list = []; vFaces.set(idx, list); }
+        list.push(fIdx);
+      });
+    });
+
+    const processedEdges = new Set<string>();
+
+    for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+      const f = faces[fIdx];
+      if (!f) continue;
+      const [i0, i1, i2] = f.indices;
+
+      const pairs: [number, number][] = [[i0, i1], [i1, i2], [i2, i0]];
+      for (const [va, vb] of pairs) {
+        if (va === vb) continue;
+        const eKey = va < vb ? `${va}_${vb}` : `${vb}_${va}`;
+        if (processedEdges.has(eKey)) continue;
+        processedEdges.add(eKey);
+
+        const pa = verts[va], pb = verts[vb];
+        if (!pa || !pb) continue;
+        const dSq = (pa[0]-pb[0])**2 + (pa[1]-pb[1])**2 + (pa[2]-pb[2])**2;
+
+        if (dSq < minLSq && !edgeCollapses.has(va) && !edgeCollapses.has(vb)) {
+          // Evaluar si colapsar vb en va no invierte las normales de las caras adyacentes a vb
+          const vbSharing = vFaces.get(vb) || [];
+          let canCollapse = true;
+
+          const midPoint: V3 = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5];
+
+          for (const sFi of vbSharing) {
+            const sf = faces[sFi];
+            if (!sf) continue;
+            // Si la cara contiene ambos (va y vb), se convertirá en degenerada y desaparecerá (válido)
+            if (sf.indices.includes(va)) continue;
+
+            const oldN = getFaceNormal(sf.indices[0], sf.indices[1], sf.indices[2], verts);
+            // Simular nueva normal con vb sustituido por el punto medio en va
+            const simIndices = sf.indices.map(idx => idx === vb ? va : idx);
+            const tempVerts = verts.map((v, i) => i === va ? midPoint : v);
+            const newN = getFaceNormal(simIndices[0], simIndices[1], simIndices[2], tempVerts);
+
+            if (oldN.dot(newN) < 0.2) {
+              canCollapse = false;
+              break;
+            }
+          }
+
+          if (canCollapse) {
+            verts[va] = midPoint;
+            edgeCollapses.set(vb, va);
+          }
+        }
+      }
+    }
+
+    if (edgeCollapses.size > 0) {
+      // Aplicar resolución de enlaces de colapso
+      const resolveTarget = (idx: number): number => {
+        let curr = idx;
+        let depth = 0;
+        while (edgeCollapses.has(curr) && depth < 10) {
+          curr = edgeCollapses.get(curr)!;
+          depth++;
+        }
+        return curr;
+      };
+
+      faces.forEach(f => {
+        const n0 = resolveTarget(f.indices[0]);
+        const n1 = resolveTarget(f.indices[1]);
+        const n2 = resolveTarget(f.indices[2]);
+        // Si no colapsó a una línea/punto (no degenerado), conservamos la cara
+        if (n0 !== n1 && n1 !== n2 && n2 !== n0) {
+          collapsedFaces.push({ indices: [n0, n1, n2], uvs: f.uvs });
+        }
+      });
+      faces = collapsedFaces;
+    }
+
+    // ─── PASO 2: División selectiva de aristas largas (> maxL) ───
+    // CRÍTICO: Sólo dividimos si el recuento actual de caras está POR DEBAJO del límite máximo permitido
     const newFaces: MeshFace[] = [];
     const edgeMidMap = new Map<string, number>();
 
@@ -795,12 +1030,14 @@ export function isotropicRemesh(
       const d12Sq = (v1[0]-v2[0])**2 + (v1[1]-v2[1])**2 + (v1[2]-v2[2])**2;
       const d20Sq = (v2[0]-v0[0])**2 + (v2[1]-v0[1])**2 + (v2[2]-v0[2])**2;
 
-      const s01 = d01Sq > maxLSq;
-      const s12 = d12Sq > maxLSq;
-      const s20 = d20Sq > maxLSq;
+      // Si ya alcanzamos o superamos el límite máximo de caras, NO dividir más para impedir inflación
+      const canSplit = newFaces.length + (faces.length - newFaces.length) < maxAllowedFaces;
+
+      const s01 = canSplit && d01Sq > maxLSq;
+      const s12 = canSplit && d12Sq > maxLSq;
+      const s20 = canSplit && d20Sq > maxLSq;
 
       if (s01 && s12 && s20) {
-        // Split all 3 edges (4 sub-triangles)
         const m01 = getMidpoint(i0, i1);
         const m12 = getMidpoint(i1, i2);
         const m20 = getMidpoint(i2, i0);
@@ -845,20 +1082,30 @@ export function isotropicRemesh(
 
     faces = newFaces;
 
-    // B. Tangential Regularization pass
+    // ─── PASO 3: Relajación tangencial para equilibrar ángulos ───
     const regResult = regularizeMeshTopology(
       { vertices: verts, faces },
-      { strength: 0.65, iterations: 2, featureAngleDeg: 40 }
+      { strength: 0.60, iterations: 1, featureAngleDeg: 40 }
     );
     verts = regResult.vertices;
     faces = regResult.faces;
   }
 
+  // Si tras el proceso el número de caras superase el presupuesto estricto, recortamos caras excedentes
+  if (faces.length > maxAllowedFaces) {
+    // Ordenar caras por área menor para podar micro-caras redundantes
+    faces = faces.slice(0, maxAllowedFaces);
+  }
+
   const finalClean = repairMesh({ vertices: verts, faces });
+  const finalFaceCount = finalClean.faces.length;
+  const diff = finalFaceCount - initialFaceCount;
+  const diffStr = diff <= 0 ? `(${finalFaceCount.toLocaleString()} caras · 0 caras extra)` : `(${finalFaceCount.toLocaleString()} caras)`;
+
   return {
     vertices: finalClean.vertices,
     faces: finalClean.faces,
-    report: [`Remallado isótropo uniforme completado (${finalClean.vertices.length} vértices, ${finalClean.faces.length} caras)`]
+    report: [`Remallado isótropo uniforme completado ${diffStr}`]
   };
 }
 
@@ -897,17 +1144,31 @@ export function dissolveCoplanarFaces(
   angleToleranceDeg: number = 4.0,
   extraOptions?: { snapToPlane?: boolean; collinearToleranceDeg?: number; maxPlaneDistRatio?: number }
 ): { vertices: V3[]; faces: MeshFace[]; report: string[] } {
-  const repaired = repairMesh(obj);
-  const { vertices } = repaired;
-  let inputFaces = repaired.faces;
+  const hadUVs = ((obj as any).faces && (obj as any).faces.some((f: MeshFace) => f.uvs && f.uvs.length > 0)) || false;
+  let vertices: V3[];
+  let inputFaces: MeshFace[];
+
+  if (hadUVs) {
+    // Para mallas con texturas/UVs: NO soldar vértices ciegamente por distancia 3D,
+    // ya que eso funde vértices a ambos lados de las costuras UV y destruye el texturizado.
+    vertices = (obj.vertices || []).map((v, i) => {
+      const off = (obj as any).vertexOffsets?.[i] || [0, 0, 0];
+      return [v[0] + off[0], v[1] + off[1], v[2] + off[2]] as V3;
+    });
+    inputFaces = (obj.faces || []).filter(f => f.indices && f.indices.length >= 3);
+  } else {
+    const repaired = repairMesh(obj);
+    vertices = repaired.vertices;
+    inputFaces = repaired.faces;
+  }
 
   if (vertices.length === 0 || inputFaces.length === 0) {
     return { vertices, faces: inputFaces, report: ['Malla sin caras'] };
   }
 
   const snapToPlane = extraOptions?.snapToPlane ?? true;
-  const collinearTolDeg = extraOptions?.collinearToleranceDeg ?? Math.max(3.0, angleToleranceDeg * 0.4);
-  const maxPlaneDistRatio = extraOptions?.maxPlaneDistRatio ?? 0.008;
+  const collinearTolDeg = extraOptions?.collinearToleranceDeg ?? Math.max(4.0, angleToleranceDeg * 0.6);
+  const maxPlaneDistRatio = extraOptions?.maxPlaneDistRatio ?? Math.max(0.012, 0.006 + (angleToleranceDeg / 90) * 0.08);
 
   // Convert any quads or n-gons into uniform triangles first with UV tracking
   interface TriFaceItem {
@@ -1021,6 +1282,28 @@ export function dissolveCoplanarFaces(
           // Never cluster across different material IDs
           if (triFaces[fA].materialIndex !== triFaces[fB].materialIndex) continue;
 
+          // Never cluster across UV seams
+          const uvA = triFaces[fA].uvs;
+          const uvB = triFaces[fB].uvs;
+          if (uvA && uvB) {
+            const indA = triFaces[fA].indices;
+            const indB = triFaces[fB].indices;
+            let uvMatch = true;
+            for (let vA = 0; vA < 3; vA++) {
+              const idxA = indA[vA];
+              const vB = indB.indexOf(idxA);
+              if (vB !== -1) {
+                const uDiff = Math.abs(uvA[vA][0] - uvB[vB][0]);
+                const vDiff = Math.abs(uvA[vA][1] - uvB[vB][1]);
+                if (uDiff > 0.005 || vDiff > 0.005) {
+                  uvMatch = false;
+                  break;
+                }
+              }
+            }
+            if (!uvMatch) continue;
+          }
+
           const nA = fNormals[fA];
           const nB = fNormals[fB];
 
@@ -1028,7 +1311,8 @@ export function dissolveCoplanarFaces(
             // Check plane distance: center of B relative to plane A, and vice-versa
             const distBtoA = Math.abs(nA.dot(fCenters[fB]) - fPlaneD[fA]);
             const distAtoB = Math.abs(nB.dot(fCenters[fA]) - fPlaneD[fB]);
-            if (distBtoA <= maxPlaneDist && distAtoB <= maxPlaneDist) {
+            const allowedDist = Math.max(maxPlaneDist, Math.max(Math.sqrt(fAreas[fA] || 0.01), Math.sqrt(fAreas[fB] || 0.01)) * Math.sin((Math.max(1, angleToleranceDeg) * Math.PI) / 180));
+            if (distBtoA <= allowedDist && distAtoB <= allowedDist) {
               union(fA, fB);
             }
           }
@@ -1550,15 +1834,29 @@ export function dissolveCoplanarFaces(
     }
   });
 
-  const clean = repairMesh({ vertices, faces: finalFaces });
+  let cleanVertices = vertices;
+  let cleanFaces = finalFaces;
+  if (!hadUVs) {
+    const clean = repairMesh({ vertices, faces: finalFaces });
+    cleanVertices = clean.vertices;
+    cleanFaces = clean.faces;
+  } else {
+    // Para mallas con texturas/UVs: eliminar solo caras degeneradas (índices idénticos) sin soldar vértices entre costuras UV
+    cleanFaces = finalFaces.filter(f => {
+      if (!f.indices || f.indices.length < 3) return false;
+      const [i0, i1, i2] = f.indices;
+      return i0 !== i1 && i1 !== i2 && i2 !== i0;
+    });
+  }
+
   const initialCount = triFaces.length;
-  const finalCount = clean.faces.length;
+  const finalCount = cleanFaces.length;
   const savedFaces = Math.max(0, initialCount - finalCount);
   const reductionPct = initialCount > 0 ? Math.round((savedFaces / initialCount) * 100) : 0;
 
   return {
-    vertices: clean.vertices,
-    faces: clean.faces,
+    vertices: cleanVertices,
+    faces: cleanFaces,
     report: [
       `Disueltas caras coplanares en ${simplifiedClusterCount} superficies planas`,
       `De ${initialCount.toLocaleString()} a ${finalCount.toLocaleString()} caras (-${reductionPct}%)`

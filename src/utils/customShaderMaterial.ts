@@ -458,49 +458,80 @@ export const CSM_PRESETS: CSMPresetDefinition[] = [
     name: 'Pompa de Jabón (Interferencia de Película Delgada)',
     category: 'Vidrio & Transmisión',
     icon: '🫧',
-    description: 'Física óptica de interferencia por película delgada con espesor dinámico (250-800nm), reflejos irisados Airy, torbellinos de tensión superficial y refracción especular.',
+    description: 'Física óptica de interferencia por película delgada con espesor dinámico (250-800nm), halo fucsia/magenta/cian en bordes rasantes y transparencia cristalina.',
     defaultBaseMaterial: 'MeshPhysicalMaterial',
     defaultParams: {
-      timeSpeed: 0.8,
-      displacementScale: 0.015,
-      noiseFrequency: 2.8,
-      colorAccent: '#38bdf8',
-      glowIntensity: 1.6,
-      roughnessMod: 0.02,
-      metalnessMod: 0.05
+      timeSpeed: 0.7,
+      displacementScale: 0.008,
+      noiseFrequency: 1.8,
+      colorAccent: '#ff26aa',
+      glowIntensity: 1.8,
+      roughnessMod: 0.005,
+      metalnessMod: 0.0
     },
     vertexCode: `
-      // Micro-ondulación y deformación orgánica por tensión superficial
+      // Micro-ondulación orgánica sutil por tensión superficial
       if (uDisplacementScale > 0.0001) {
-        float bubbleWobble = sin(uTime * uTimeSpeed * 2.2 + position.y * 3.5) * cos(position.x * 3.5 + uTime * uTimeSpeed * 1.8);
-        transformed += normal * (bubbleWobble * uDisplacementScale);
+        float bubbleWobble = sin(uTime * uTimeSpeed * 1.5 + position.y * 2.2) * cos(position.x * 2.2 + position.z * 2.2 + uTime * uTimeSpeed * 1.1);
+        transformed += normal * (bubbleWobble * uDisplacementScale * 0.05);
       }
     `,
     fragmentCode: `
-      vec3 nDir = length(vCSMNormal) > 0.001 ? normalize(vCSMNormal) : vec3(0.0, 1.0, 0.0);
-      vec3 vDir = normalize(cameraPosition - vWorldPosition);
-      float NdotV = clamp(abs(dot(nDir, vDir)), 0.001, 1.0);
+      // View direction towards camera and surface normal in View Space (100% 360° invariant)
+      vec3 vDir = length(vViewPosition) > 0.0001 ? normalize(vViewPosition) : vec3(0.0, 0.0, 1.0);
+      vec3 nDir = length(vCSMNormal) > 0.0001 ? normalize(vCSMNormal) : vec3(0.0, 0.0, 1.0);
+      float NdotV = clamp(abs(dot(nDir, vDir)), 0.0001, 1.0);
 
-      // Torbellinos dinámicos de espesor de película de agua/jabón (200-800 nm)
-      float swirl1 = csm_snoise(vWorldPosition * (uNoiseFreq * 0.5) + vec3(uTime * uTimeSpeed * 0.15, uTime * uTimeSpeed * 0.1, 0.0));
-      float swirl2 = csm_snoise(vWorldPosition * (uNoiseFreq * 1.2) - vec3(uTime * uTimeSpeed * 0.2, uTime * uTimeSpeed * 0.12, uTime * uTimeSpeed * 0.08));
-      float thickness = clamp(0.5 + 0.35 * swirl1 + 0.15 * swirl2, 0.08, 0.95);
+      // Exponentes Fresnel: borde rasante brillante y centro ultra-transparente
+      float fresnel = pow(1.0 - NdotV, 2.0);
+      float rimThin = pow(1.0 - NdotV, 4.0);
+      float rimUltra = pow(1.0 - NdotV, 7.5);
 
-      // Ecuación de camino óptico (OPD) con índice de refracción de agua jabonosa n = 1.333
+      // Torbellinos fluidos y suaves de espesor (Marangoni flow / drenaje gravitacional)
+      vec3 posCoord = vWorldPosition * (uNoiseFreq * 0.4);
+      float flowTime = uTime * uTimeSpeed * 0.12;
+
+      vec3 swirl = vec3(
+        csm_snoise(posCoord + vec3(0.0, -flowTime * 0.45, 0.0)),
+        csm_snoise(posCoord + vec3(4.3, 1.7, flowTime * 0.3)),
+        csm_snoise(posCoord + vec3(flowTime * 0.25, 3.1, 1.2))
+      );
+
+      float flowNoise = csm_snoise(posCoord + swirl * 0.6 + vec3(0.0, -flowTime * 0.65, 0.0));
+
+      // Espesor de película jabonosa en nanómetros (280nm a 660nm)
+      float filmThicknessNm = mix(300.0, 640.0, flowNoise * 0.5 + 0.5) + (1.0 - NdotV) * 90.0;
+
+      // Camino óptico (OPD) con índice de refracción del agua jabonosa n = 1.333
       float cosThetaT = sqrt(max(0.0, 1.0 - (1.0 - NdotV * NdotV) / (1.333 * 1.333)));
-      float opd = 2.0 * 1.333 * thickness * cosThetaT;
+      float opd = 2.0 * 1.333 * filmThicknessNm * cosThetaT;
 
-      // Espectro de interferencia constructiva Airy para longitudes de onda RGB
-      vec3 phase = opd * vec3(5.6, 6.9, 8.4) + vec3(0.0, 0.33, 0.67);
-      vec3 iridColor = 0.5 + 0.5 * cos(6.28318 * phase);
+      // Espectro de interferencia constructiva Airy para RGB (640nm, 530nm, 460nm)
+      vec3 lambda = vec3(640.0, 530.0, 460.0);
+      vec3 phase = (opd / lambda) * 6.2831853 - 3.14159265;
+      vec3 airyInterference = 0.5 + 0.5 * cos(phase);
 
-      // Realce Fresnel en los bordes y reflejo especular tipo pompa
-      float fresnel = pow(1.0 - NdotV, 2.8);
-      vec3 specularRim = vec3(1.0) * pow(1.0 - NdotV, 4.5) * (uGlowIntensity * 1.4);
+      // Paleta cromática exacta de la referencia real (Getty reference):
+      // - Halo exterior periférico 360°: Magenta/fucsia brillante y violeta profundo
+      // - Sub-halo interior: Azul cielo / cian eléctrico y sutiles destellos esmeralda/dorado
+      vec3 magentaPink = vec3(1.0, 0.12, 0.76);  // #ff1ec2
+      vec3 electricCyan = vec3(0.0, 0.92, 1.0);   // #00ebff
+      vec3 royalViolet = vec3(0.68, 0.20, 1.0);   // #ad33ff
+      vec3 goldenSun = vec3(1.0, 0.88, 0.35);    // #ffe059
 
-      vec3 baseFilm = mix(iridColor, uColorAccent, 0.25);
-      diffuseColor.rgb = mix(baseFilm * (0.35 + fresnel * 0.85), specularRim + iridColor * 1.3, fresnel * 0.75);
-      diffuseColor.a = clamp(0.28 + fresnel * 0.68 + length(specularRim) * 0.25, 0.18, 0.98);
+      vec3 filmColor = mix(airyInterference, mix(electricCyan, magentaPink, airyInterference.r), 0.45);
+
+      // Resplandor en el borde rasante 360° (Fresnel rim continuo)
+      vec3 rimSpectral = mix(electricCyan, magentaPink, smoothstep(0.2, 0.7, fresnel));
+      rimSpectral = mix(rimSpectral, royalViolet, smoothstep(0.7, 0.98, fresnel));
+      vec3 rimRadiance = rimSpectral * (fresnel * 2.2 + rimThin * 3.4 + rimUltra * 2.5) * (uGlowIntensity * 1.3);
+
+      // Reflejo especular espejo de la superficie brillante de la pompa
+      vec3 specularReflection = vec3(1.0) * pow(1.0 - NdotV, 4.5) * 1.6;
+
+      // Mezcla: centro ultra-diáfano (baja opacidad base) con halo perimetral esférico permanente
+      diffuseColor.rgb = filmColor * (0.12 + fresnel * 0.65) + rimRadiance + specularReflection;
+      diffuseColor.a = clamp(0.10 + fresnel * 0.85 + rimThin * 0.4, 0.06, 0.98);
     `
   }
 ];
@@ -549,15 +580,31 @@ export function createCustomShaderMaterial(
   // Apply standard material parameters
   const m = material as any;
   m.name = baseData.name || 'CustomShaderMaterial';
-  m.color.set(baseData.color || '#ffffff');
-  if ('roughness' in m) m.roughness = baseData.roughness ?? (csmConfig.roughnessMod ?? 0.5);
-  if ('metalness' in m) m.metalness = baseData.metalness ?? (csmConfig.metalnessMod ?? 0.0);
+  m.color.set(baseData.color || (isSoapBubble ? '#ffffff' : '#ffffff'));
+  if ('roughness' in m) m.roughness = isSoapBubble ? 0.005 : (baseData.roughness ?? (csmConfig.roughnessMod ?? 0.5));
+  if ('metalness' in m) m.metalness = isSoapBubble ? 0.0 : (baseData.metalness ?? (csmConfig.metalnessMod ?? 0.0));
   if ('emissive' in m) m.emissive.set(baseData.emissive || '#000000');
   if ('emissiveIntensity' in m) m.emissiveIntensity = baseData.emissiveIntensity ?? 1;
-  m.opacity = baseData.opacity ?? (isSoapBubble ? 0.85 : 1);
+  m.opacity = isSoapBubble ? 0.35 : (baseData.opacity ?? 1);
   m.transparent = isSoapBubble || isHolo || (baseData.transparent ?? (m.opacity < 1));
   m.depthWrite = isSoapBubble ? false : true;
   m.side = THREE.DoubleSide;
+
+  // Physical Transmission, Clearcoat, Iridescence & IOR support
+  if ('transmission' in m) {
+    m.transmission = isSoapBubble ? 0.98 : (baseData.transmission ?? 0);
+    m.ior = isSoapBubble ? 1.333 : (baseData.ior ?? 1.5);
+    m.thickness = isSoapBubble ? 0.05 : (baseData.thickness ?? 0);
+    m.specularIntensity = isSoapBubble ? 1.0 : (baseData.specularIntensity ?? 1);
+    if (baseData.specularColor) m.specularColor.set(baseData.specularColor);
+    m.clearcoat = isSoapBubble ? 1.0 : (baseData.clearcoat ?? 0);
+    m.clearcoatRoughness = isSoapBubble ? 0.0 : (baseData.clearcoatRoughness ?? 0);
+    m.iridescence = isSoapBubble ? 1.0 : (baseData.iridescence ?? 0);
+    m.iridescenceIOR = isSoapBubble ? 1.333 : (baseData.iridescenceIOR ?? 1.3);
+    m.iridescenceThicknessRange = isSoapBubble ? [200, 750] : (baseData.iridescenceThicknessRange || [100, 400]);
+    if (baseData.attenuationColor) m.attenuationColor.set(baseData.attenuationColor);
+    if (baseData.attenuationDistance !== undefined) m.attenuationDistance = baseData.attenuationDistance;
+  }
 
   if (baseTextures.map) m.map = baseTextures.map;
   if (baseTextures.normalMap && 'normalMap' in m) m.normalMap = baseTextures.normalMap;
@@ -589,7 +636,9 @@ export function createCustomShaderMaterial(
       uniform float uNoiseFreq;
       uniform vec3 uColorAccent;
       uniform float uGlowIntensity;
+      #ifndef USE_TRANSMISSION
       varying vec3 vWorldPosition;
+      #endif
       varying vec3 vCSMNormal;
       ${CSM_COMMON_GLSL}
       ${shader.vertexShader}
@@ -613,7 +662,9 @@ export function createCustomShaderMaterial(
       uniform float uNoiseFreq;
       uniform vec3 uColorAccent;
       uniform float uGlowIntensity;
+      #ifndef USE_TRANSMISSION
       varying vec3 vWorldPosition;
+      #endif
       varying vec3 vCSMNormal;
       ${CSM_COMMON_GLSL}
       ${shader.fragmentShader}

@@ -260,6 +260,7 @@ export function generateFullPBRMapsFromSource(
           const dY = (bl + 2 * b + br) - (tl + 2 * t + tr);
 
           // Vector normal calculation (OpenGL vs DirectX toggle)
+          // Three.js utiliza formato OpenGL donde +Y es hacia arriba. En canvas Y crece hacia abajo, por lo que dY = b - t.
           let nx = -dX * normalStrength;
           let ny = (invertNormalY ? dY : -dY) * normalStrength;
           let nz = 1.0;
@@ -392,4 +393,46 @@ export function generateFullPBRMapsFromSource(
 
     img.src = sourceUrl;
   });
+}
+
+/**
+ * Extrae intuitivamente el color dominante del objeto a partir de una imagen o ImageData,
+ * filtrando el color de fondo y transparencias para teñir la malla o disimular costuras.
+ */
+export function extractDominantObjectColor(
+  imgData: ImageData,
+  bgColor?: [number, number, number] | null
+): string {
+  const { data, width, height } = imgData;
+  const bgR = bgColor ? bgColor[0] : 255;
+  const bgG = bgColor ? bgColor[1] : 255;
+  const bgB = bgColor ? bgColor[2] : 255;
+
+  let totalR = 0, totalG = 0, totalB = 0, count = 0;
+  const step = Math.max(1, Math.floor((width * height) / 4000));
+
+  for (let i = 0; i < data.length; i += step * 4) {
+    const a = data[i + 3];
+    if (a < 80) continue; // Transparente
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    // Ignorar píxeles casi idénticos al color de fondo
+    const distBg = Math.hypot(r - bgR, g - bgG, b - bgB);
+    if (distBg < 35) continue;
+
+    totalR += r;
+    totalG += g;
+    totalB += b;
+    count++;
+  }
+
+  if (count === 0) return '#6b7280'; // Gris neutro por defecto
+
+  const avgR = Math.round(totalR / count);
+  const avgG = Math.round(totalG / count);
+  const avgB = Math.round(totalB / count);
+
+  return `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
 }

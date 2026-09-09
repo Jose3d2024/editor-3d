@@ -1,0 +1,870 @@
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import { MeshoptSimplifier as Meshopt, MeshoptDecoder } from 'meshoptimizer';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { CSGObject, MeshFace, V3 } from '../types';
+
+export type RetopologyMode = 'QUAD_DOMINANT' | 'PURE_QUADS' | 'ISOTROPIC_TRI';
+
+export interface RetopologyOptions {
+  targetCount?: number;             // Recuento deseado de polígonos (ej: 2025)
+  targetRatio?: number;             // O ratio directo respecto al original (ej: 0.25 = 25%)
+  mode?: RetopologyMode;            // 'QUAD_DOMINANT' (ZRemesher estándar), 'PURE_QUADS', 'ISOTROPIC_TRI'
+  adaptiveCurvature?: boolean;      // Distribuir densidad según curvatura y detalles
+  curvatureSensitivity?: number;    // Sensibilidad (0.0 a 1.0)
+  preserveCreases?: boolean;        // Alinear bucles con aristas vivas y costuras
+  creaseAngleDeg?: number;          // Umbral de aristas vivas (default 35°)
+  symmetryAxis?: 'NONE' | 'X' | 'Y' | 'Z';
+  smoothIterations?: number;
+  projectToSurface?: boolean;       // Proyección a superficie original
+  convertToNative?: boolean;        // Convertir modelo importado a malla nativa CSG con quads editables
+  selectedMeshes?: string[];
+  onProgress?: (progress: number, stepText: string) => void;
+}
+
+export interface RetopologyResult {
+  vertices: V3[];
+  faces: MeshFace[];
+  report: string[];
+  stats: {
+    initialFaces: number;
+    finalFaces: number;
+    quads: number;
+    triangles: number;
+    vertices: number;
+    reductionPct: number;
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utilidades vectoriales auxiliares
+// ─────────────────────────────────────────────────────────────────────────────
+function vSub(a: V3, b: V3): V3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+}
+
+function vDot(a: V3, b: V3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function vCross(a: V3, b: V3): V3 {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function vLen(a: V3): number {
+  return Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+}
+
+function vNorm(a: V3): V3 {
+  const l = vLen(a);
+  return l > 1e-9 ? [a[0] / l, a[1] / l, a[2] / l] : [0, 1, 0];
+}
+
+function vDist(a: V3, b: V3): number {
+  const dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Algoritmo Quad Flow: Emparejamiento Óptimo de Triángulos en Cuadriláteros
+// ─────────────────────────────────────────────────────────────────────────────
+interface TriangleFace {
+  indices: [number, number, number];
+  materialIndex?: number;
+}
+
+export interface QuadCandidate {
+  fA: number;
+  fB: number;
+  quadIndices: [number, number, number, number];
+  score: number;
+  materialIndex?: number;
+}
+
+export function pairTrianglesIntoQuads(
+  tris: TriangleFace[],
+  positions: Float32Array | number[][],
+  options: {
+    preserveCreases?: boolean;
+    creaseAngleDeg?: number;
+    uvs?: Float32Array | null;
+  } = {}
+): {
+  quads: [number, number, number, number][];
+  remainingTris: [number, number, number][];
+  orderedIndices: number[];
+} {
+  const { preserveCreases = true, creaseAngleDeg = 35, uvs = null } = options;
+  const creaseCos = Math.cos((creaseAngleDeg * Math.PI) / 180);
+
+  const getPos = (idx: number): V3 => {
+    if (positions instanceof Float32Array) {
+      return [positions[idx * 3], positions[idx * 3 + 1], positions[idx * 3 + 2]];
+    }
+    const p = positions[idx];
+    return [p[0], p[1], p[2]];
+  };
+
+  // 1. Calcular normales por triángulo
+  const triNormals: V3[] = new Array(tris.length);
+  for (let i = 0; i < tris.length; i++) {
+    const [i0, i1, i2] = tris[i].indices;
+    const p0 = getPos(i0), p1 = getPos(i1), p2 = getPos(i2);
+    triNormals[i] = vNorm(vCross(vSub(p1, p0), vSub(p2, p0)));
+  }
+
+  // 2. Indexar aristas compartidas entre triángulos
+  const edgeMap = new Map<string, { fA: number; fB?: number; v0: number; v1: number }>();
+  for (let fIdx = 0; fIdx < tris.length; fIdx++) {
+    const tri = tris[fIdx];
+    for (let e = 0; e < 3; e++) {
+      const v0 = tri.indices[e];
+      const v1 = tri.indices[(e + 1) % 3];
+      const minV = Math.min(v0, v1);
+      const maxV = Math.max(v0, v1);
+      const key = `${minV}_${maxV}`;
+      const entry = edgeMap.get(key);
+      if (!entry) {
+        edgeMap.set(key, { fA: fIdx, v0: minV, v1: maxV });
+      } else {
+        entry.fB = fIdx;
+      }
+    }
+  }
+
+  // 3. Evaluar y puntuar candidatos de cuadriláteros
+  const candidates: QuadCandidate[] = [];
+
+  edgeMap.forEach(entry => {
+    if (entry.fB === undefined) return;
+    const fA = entry.fA;
+    const fB = entry.fB;
+    const triA = tris[fA];
+    const triB = tris[fB];
+
+    if (triA.materialIndex !== triB.materialIndex) return;
+
+    const nA = triNormals[fA];
+    const nB = triNormals[fB];
+    const dotN = vDot(nA, nB);
+
+    // Si el ángulo entre triángulos es muy pronunciado o supera la arista viva, no fusionar
+    if (dotN < 0.60) return;
+    if (preserveCreases && dotN < creaseCos) return;
+
+    const shared0 = entry.v0;
+    const shared1 = entry.v1;
+    const oppA = triA.indices.find(v => v !== shared0 && v !== shared1);
+    const oppB = triB.indices.find(v => v !== shared0 && v !== shared1);
+    if (oppA === undefined || oppB === undefined) return;
+
+    // Identificar orientación exacta de la arista compartida según triA
+    const idxA = triA.indices.indexOf(oppA);
+    const vStart = triA.indices[(idxA + 1) % 3];
+    const vEnd = triA.indices[(idxA + 2) % 3];
+
+    // Verificar si hay costura UV en los vértices compartidos
+    if (uvs) {
+      const uA0 = uvs[vStart * 2], vA0 = uvs[vStart * 2 + 1];
+      const uA1 = uvs[vEnd * 2], vA1 = uvs[vEnd * 2 + 1];
+      if (isNaN(uA0) || isNaN(vA0) || isNaN(uA1) || isNaN(vA1)) return;
+    }
+
+    // Vértices del cuadrilátero en orden antihorario canónico garantizado
+    const q0 = oppA;
+    const q1 = vStart;
+    const q2 = oppB;
+    const q3 = vEnd;
+
+    const p0 = getPos(q0);
+    const p1 = getPos(q1);
+    const p2 = getPos(q2);
+    const p3 = getPos(q3);
+
+    // Vectores de las aristas del cuadrilátero
+    const e0 = vSub(p1, p0);
+    const e1 = vSub(p2, p1);
+    const e2 = vSub(p3, p2);
+    const e3 = vSub(p0, p3);
+
+    const c0 = vCross(e0, e1);
+    const c1 = vCross(e1, e2);
+    const c2 = vCross(e2, e3);
+    const c3 = vCross(e3, e0);
+
+    // Verificar que el cuadrilátero sea convexo Y que su orientación coincida estrictamente con la normal de triA (anti-inversión)
+    if (vDot(c0, nA) <= 0.05 || vDot(c1, nA) <= 0.05 || vDot(c2, nA) <= 0.05 || vDot(c3, nA) <= 0.05) return;
+
+    // Puntuación de calidad inspirada en el solver de campos de Instant Meshes:
+    // 1. Ortogonalidad de las 4 esquinas (los quads ideales de Instant Meshes tienen ángulos cercanos a 90°)
+    const len0 = Math.max(1e-6, Math.sqrt(vDot(e0, e0)));
+    const len1 = Math.max(1e-6, Math.sqrt(vDot(e1, e1)));
+    const len2 = Math.max(1e-6, Math.sqrt(vDot(e2, e2)));
+    const len3 = Math.max(1e-6, Math.sqrt(vDot(e3, e3)));
+
+    const u0: V3 = [e0[0] / len0, e0[1] / len0, e0[2] / len0];
+    const u1: V3 = [e1[0] / len1, e1[1] / len1, e1[2] / len1];
+    const u2: V3 = [e2[0] / len2, e2[1] / len2, e2[2] / len2];
+    const u3: V3 = [e3[0] / len3, e3[1] / len3, e3[2] / len3];
+
+    const orthoDev = (Math.abs(vDot(u0, u1)) + Math.abs(vDot(u1, u2)) + Math.abs(vDot(u2, u3)) + Math.abs(vDot(u3, u0))) / 4;
+    const orthoScore = 1.0 - Math.min(1.0, orthoDev);
+
+    // 2. Ratio de aspecto entre diagonales y aristas
+    const diag1 = vDist(p0, p2);
+    const diag2 = vDist(p1, p3);
+    const diagAspect = Math.min(diag1 / (diag2 + 1e-6), diag2 / (diag1 + 1e-6));
+    const minEdge = Math.min(len0, len1, len2, len3);
+    const maxEdge = Math.max(len0, len1, len2, len3);
+    const edgeAspect = minEdge / (maxEdge + 1e-6);
+
+    // 3. Planaridad del cuadrilátero
+    const planarity = Math.max(0, 1.0 - Math.abs(vDot(vSub(p3, p0), c0)) / ((diag1 * diag2) + 1e-6));
+
+    // Score global ponderado
+    const score = dotN * 3.0 + orthoScore * 2.5 + diagAspect * 1.5 + edgeAspect * 1.0 + planarity * 2.0;
+
+    candidates.push({
+      fA,
+      fB,
+      quadIndices: [q0, q1, q2, q3],
+      score,
+      materialIndex: triA.materialIndex
+    });
+  });
+
+  // 4. Ordenar candidatos por calidad geométrica (mejor score primero)
+  candidates.sort((a, b) => b.score - a.score);
+
+  const used = new Uint8Array(tris.length);
+  const quads: [number, number, number, number][] = [];
+  const remainingTris: [number, number, number][] = [];
+  const orderedIndices: number[] = [];
+
+  for (const cand of candidates) {
+    if (used[cand.fA] || used[cand.fB]) continue;
+    used[cand.fA] = 1;
+    used[cand.fB] = 1;
+
+    const [q0, q1, q2, q3] = cand.quadIndices;
+    const p0 = getPos(q0);
+    const p1 = getPos(q1);
+    const p2 = getPos(q2);
+    const p3 = getPos(q3);
+    const nA = triNormals[cand.fA];
+
+    // Verificar si la diagonal opuesta (q0 - q2) es coplanar y segura sin invertir normales
+    const normDiag1A = vCross(vSub(p1, p0), vSub(p2, p0));
+    const normDiag1B = vCross(vSub(p2, p0), vSub(p3, p0));
+    const canFlipDiag = vDot(normDiag1A, nA) > 0.6 && vDot(normDiag1B, nA) > 0.6;
+
+    if (canFlipDiag && vDist(p0, p2) <= vDist(p1, p3) * 1.15) {
+      // Triangulación por diagonal q0-q2
+      orderedIndices.push(q0, q1, q2, q0, q2, q3);
+      quads.push([q0, q1, q2, q3]);
+    } else {
+      // Preservar la diagonal original q1-q3 rotando el quad para alineación canónica
+      orderedIndices.push(q0, q1, q3, q2, q3, q1);
+      quads.push([q1, q2, q3, q0]);
+    }
+  }
+
+  for (let i = 0; i < tris.length; i++) {
+    if (!used[i]) {
+      const t = tris[i].indices;
+      remainingTris.push(t);
+      orderedIndices.push(t[0], t[1], t[2]);
+    }
+  }
+
+  return { quads, remainingTris, orderedIndices };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compactación de Geometría (Elimina vértices huérfanos sin perder atributos UV/Normal)
+// ─────────────────────────────────────────────────────────────────────────────
+function compactGeometry(
+  sourceGeo: THREE.BufferGeometry,
+  newIndices: Uint32Array | number[]
+): THREE.BufferGeometry {
+  const indexArr = newIndices instanceof Uint32Array ? newIndices : new Uint32Array(newIndices);
+  const totalIndices = indexArr.length;
+
+  // 1. Identificar vértices únicos utilizados
+  const oldToNew = new Int32Array(sourceGeo.attributes.position.count).fill(-1);
+  const uniqueOldIndices: number[] = [];
+
+  for (let i = 0; i < totalIndices; i++) {
+    const oldIdx = indexArr[i];
+    if (oldToNew[oldIdx] === -1) {
+      oldToNew[oldIdx] = uniqueOldIndices.length;
+      uniqueOldIndices.push(oldIdx);
+    }
+  }
+
+  const compactedGeo = new THREE.BufferGeometry();
+  const newVertexCount = uniqueOldIndices.length;
+
+  // 2. Recompactar cada atributo presente (position, normal, uv, etc.)
+  for (const name in sourceGeo.attributes) {
+    const attr = sourceGeo.attributes[name] as THREE.BufferAttribute;
+    const itemSize = attr.itemSize;
+    const srcArray = attr.array;
+    
+    // Crear el mismo tipo de TypedArray
+    let dstArray: any;
+    if (srcArray instanceof Float32Array) dstArray = new Float32Array(newVertexCount * itemSize);
+    else if (srcArray instanceof Uint16Array) dstArray = new Uint16Array(newVertexCount * itemSize);
+    else if (srcArray instanceof Uint8Array) dstArray = new Uint8Array(newVertexCount * itemSize);
+    else dstArray = new Float32Array(newVertexCount * itemSize);
+
+    for (let newIdx = 0; newIdx < newVertexCount; newIdx++) {
+      const oldIdx = uniqueOldIndices[newIdx];
+      for (let k = 0; k < itemSize; k++) {
+        dstArray[newIdx * itemSize + k] = srcArray[oldIdx * itemSize + k];
+      }
+    }
+
+    compactedGeo.setAttribute(name, new THREE.BufferAttribute(dstArray, itemSize, attr.normalized));
+  }
+
+  // 3. Crear nuevo índice remapeado
+  const remappedIndices = new Uint32Array(totalIndices);
+  for (let i = 0; i < totalIndices; i++) {
+    remappedIndices[i] = oldToNew[indexArr[i]];
+  }
+  compactedGeo.setIndex(new THREE.BufferAttribute(remappedIndices, 1));
+
+  // Recalcular normales suaves de la nueva topología para evitar caras sombreadas oscuras o invertidas
+  compactedGeo.computeVertexNormals();
+
+  return compactedGeo;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retopología para Mallas Nativas CSG
+// ─────────────────────────────────────────────────────────────────────────────
+export async function retopologizeMesh(
+  input: CSGObject | { vertices: V3[]; faces: MeshFace[]; vertexOffsets?: Record<number, V3> },
+  options: RetopologyOptions = {}
+): Promise<RetopologyResult> {
+  const {
+    targetCount,
+    targetRatio,
+    mode = 'QUAD_DOMINANT',
+    preserveCreases = true,
+    creaseAngleDeg = 35,
+    onProgress
+  } = options;
+
+  if ((Meshopt as any).ready) {
+    await (Meshopt as any).ready;
+  }
+
+  if (onProgress) onProgress(10, 'Analizando malla para ZRemesher...');
+
+  // 1. Extraer vértices con offsets
+  const rawVerts: V3[] = (input.vertices || []).map((v, i) => {
+    const off = input.vertexOffsets?.[i] || [0, 0, 0];
+    return [v[0] + off[0], v[1] + off[1], v[2] + off[2]];
+  });
+
+  const rawFaces: MeshFace[] = input.faces || [];
+  const initialFaceCount = rawFaces.length;
+
+  if (rawVerts.length < 4 || rawFaces.length === 0) {
+    return {
+      vertices: rawVerts,
+      faces: rawFaces,
+      report: ['Geometría insuficiente para retopología'],
+      stats: {
+        initialFaces: initialFaceCount,
+        finalFaces: initialFaceCount,
+        quads: 0,
+        triangles: initialFaceCount,
+        vertices: rawVerts.length,
+        reductionPct: 0
+      }
+    };
+  }
+
+  // 2. Triangulación limpia
+  const flatPositions = new Float32Array(rawVerts.length * 3);
+  for (let i = 0; i < rawVerts.length; i++) {
+    flatPositions[i * 3] = rawVerts[i][0];
+    flatPositions[i * 3 + 1] = rawVerts[i][1];
+    flatPositions[i * 3 + 2] = rawVerts[i][2];
+  }
+
+  const initialIndices: number[] = [];
+  const triFaces: TriangleFace[] = [];
+
+  rawFaces.forEach(f => {
+    if (!f.indices || f.indices.length < 3) return;
+    if (f.indices.length === 3) {
+      initialIndices.push(f.indices[0], f.indices[1], f.indices[2]);
+      triFaces.push({ indices: [f.indices[0], f.indices[1], f.indices[2]], materialIndex: f.materialIndex });
+    } else {
+      for (let i = 1; i < f.indices.length - 1; i++) {
+        initialIndices.push(f.indices[0], f.indices[i], f.indices[i + 1]);
+        triFaces.push({ indices: [f.indices[0], f.indices[i], f.indices[i + 1]], materialIndex: f.materialIndex });
+      }
+    }
+  });
+
+  const initialTrisCount = triFaces.length;
+
+  // Calcular número objetivo de triángulos
+  let targetPolys = targetCount;
+  if (!targetPolys || targetPolys <= 0) {
+    if (targetRatio && targetRatio > 0 && targetRatio < 1) {
+      targetPolys = Math.max(12, Math.round(initialTrisCount * targetRatio));
+    } else {
+      targetPolys = Math.max(12, Math.round(initialTrisCount * 0.25));
+    }
+  }
+
+  if (onProgress) onProgress(35, `Reduciendo topología a ~${targetPolys.toLocaleString()} polígonos...`);
+
+  let workingIndices = new Uint32Array(initialIndices);
+
+  // 3. Si el objetivo es menor que el número actual, aplicar reducción controlada con Meshopt
+  if (targetPolys < initialTrisCount) {
+    const targetIndexCount = targetPolys * 3;
+    const flags = preserveCreases ? ['LockBorder'] : [];
+    const attempts = [
+      { err: 0.02, flags: flags as any },
+      { err: 0.05, flags: flags as any },
+      { err: 0.15, flags: flags as any },
+      { err: 0.35, flags: flags as any },
+      { err: 0.60, flags: flags as any },
+    ];
+    if (preserveCreases) {
+      attempts.push({ err: 0.40, flags: [] as any });
+    }
+
+    for (const att of attempts) {
+      try {
+        const res = Meshopt.simplify(
+          workingIndices,
+          flatPositions,
+          3,
+          targetIndexCount,
+          att.err,
+          att.flags
+        );
+        if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
+          workingIndices = res[0];
+          if (workingIndices.length <= targetIndexCount * 1.15) break;
+        }
+      } catch (e) {}
+    }
+  }
+
+  if (onProgress) onProgress(70, 'Construyendo flujo continuo de cuadriláteros (Quad Flow)...');
+
+  // 4. Reconstruir lista de triángulos simplificados
+  const simplifiedTris: TriangleFace[] = [];
+  for (let i = 0; i < workingIndices.length; i += 3) {
+    simplifiedTris.push({
+      indices: [workingIndices[i], workingIndices[i + 1], workingIndices[i + 2]]
+    });
+  }
+
+  // 5. Aplicar ZRemesher Quad Flow
+  const quadResult = pairTrianglesIntoQuads(simplifiedTris, flatPositions, {
+    preserveCreases,
+    creaseAngleDeg
+  });
+
+  const finalFaces: MeshFace[] = [];
+  let quadCount = 0;
+  let triCount = 0;
+
+  if (mode === 'ISOTROPIC_TRI') {
+    simplifiedTris.forEach(t => {
+      finalFaces.push({ indices: t.indices });
+      triCount++;
+    });
+  } else {
+    // Añadir Quads
+    quadResult.quads.forEach(q => {
+      finalFaces.push({ indices: [q[0], q[1], q[2], q[3]] });
+      quadCount++;
+    });
+
+    // Añadir Triángulos no emparejados
+    if (mode === 'PURE_QUADS' && quadResult.remainingTris.length > 0) {
+      // Subdivisión canónica de triángulos en quads puros sin dejar ningún triángulo
+      const edgeMidMap = new Map<string, number>();
+      const currentVerts = [...rawVerts];
+      
+      const getMid = (a: number, b: number): number => {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        if (edgeMidMap.has(key)) return edgeMidMap.get(key)!;
+        const pA = currentVerts[a];
+        const pB = currentVerts[b];
+        const m: V3 = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5, (pA[2] + pB[2]) * 0.5];
+        const idx = currentVerts.length;
+        currentVerts.push(m);
+        edgeMidMap.set(key, idx);
+        return idx;
+      };
+
+      quadResult.remainingTris.forEach(t => {
+        const [v0, v1, v2] = t;
+        const p0 = currentVerts[v0];
+        const p1 = currentVerts[v1];
+        const p2 = currentVerts[v2];
+        const c: V3 = [(p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3, (p0[2] + p1[2] + p2[2]) / 3];
+        const cIdx = currentVerts.length;
+        currentVerts.push(c);
+
+        const m01 = getMid(v0, v1);
+        const m12 = getMid(v1, v2);
+        const m20 = getMid(v2, v0);
+
+        finalFaces.push({ indices: [v0, m01, cIdx, m20] });
+        finalFaces.push({ indices: [v1, m12, cIdx, m01] });
+        finalFaces.push({ indices: [v2, m20, cIdx, m12] });
+        quadCount += 3;
+      });
+
+      rawVerts.length = 0;
+      rawVerts.push(...currentVerts);
+    } else {
+      quadResult.remainingTris.forEach(t => {
+        finalFaces.push({ indices: [t[0], t[1], t[2]] });
+        triCount++;
+      });
+    }
+  }
+
+  // 6. Compactar vértices utilizados
+  const usedVerts = new Set<number>();
+  finalFaces.forEach(f => f.indices.forEach(idx => usedVerts.add(idx)));
+
+  const oldToNew = new Map<number, number>();
+  const compactedVerts: V3[] = [];
+  usedVerts.forEach(oldIdx => {
+    oldToNew.set(oldIdx, compactedVerts.length);
+    compactedVerts.push(rawVerts[oldIdx]);
+  });
+
+  const compactedFaces: MeshFace[] = finalFaces.map(f => ({
+    ...f,
+    indices: f.indices.map(idx => oldToNew.get(idx)!)
+  }));
+
+  const finalFacesCount = compactedFaces.length;
+  const reductionPct = initialFaceCount > 0
+    ? Math.round(((initialFaceCount - finalFacesCount) / initialFaceCount) * 100)
+    : 0;
+
+  if (onProgress) onProgress(100, '¡Retopología completada con éxito!');
+
+  return {
+    vertices: compactedVerts,
+    faces: compactedFaces,
+    report: [
+      `ZRemesher: ${mode === 'PURE_QUADS' ? '100% Quads' : mode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'}`,
+      `De ${initialFaceCount.toLocaleString()} caras a ${finalFacesCount.toLocaleString()} (${quadCount.toLocaleString()} quads, ${triCount.toLocaleString()} tris)`,
+      `Reducción: ${reductionPct > 0 ? `-${reductionPct}%` : `+${Math.abs(reductionPct)}%`}`,
+      `Vértices: ${compactedVerts.length.toLocaleString()}`
+    ],
+    stats: {
+      initialFaces: initialFaceCount,
+      finalFaces: finalFacesCount,
+      quads: quadCount,
+      triangles: triCount,
+      vertices: compactedVerts.length,
+      reductionPct
+    }
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Retopologizador ZRemesher de Modelos GLB / GLTF (Zero-Loss UVs y Materiales)
+// ─────────────────────────────────────────────────────────────────────────────
+export async function retopologizeGLBModel(
+  obj: CSGObject,
+  options: RetopologyOptions = {},
+  onProgress?: (progress: number, stepText: string) => Promise<void> | void,
+  targetMeshIds?: string[]
+): Promise<CSGObject> {
+  if (!obj.meshData || obj.meshData.type !== 'gltf') return obj;
+
+  if (onProgress) await onProgress(10, 'Cargando modelo GLB, texturas y materiales...');
+
+  if ((Meshopt as any).ready) {
+    await (Meshopt as any).ready;
+  }
+
+  const loader = new GLTFLoader();
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+  loader.setDRACOLoader(dracoLoader);
+  loader.setMeshoptDecoder(MeshoptDecoder);
+
+  const gltf = await new Promise<any>((resolve, reject) =>
+    loader.load(obj.meshData!.data, resolve, undefined, reject)
+  );
+
+  const scene = gltf.scene;
+
+  // 1. Identificar todas las submallas a procesar
+  let meshIdxCounter = 0;
+  const meshesToProcess: { mesh: THREE.Mesh; meshId: string }[] = [];
+  let totalOriginalFaces = 0;
+  let totalOriginalVerts = 0;
+
+  scene.traverse((child: THREE.Object3D) => {
+    if ((child as THREE.Mesh).isMesh || (child as THREE.SkinnedMesh).isSkinnedMesh) {
+      const meshId = `mesh-${meshIdxCounter++}`;
+      if (!targetMeshIds || targetMeshIds.length === 0 || targetMeshIds.includes(meshId)) {
+        const mesh = child as THREE.Mesh;
+        const geo = mesh.geometry;
+        if (geo && geo.attributes.position) {
+          const v = geo.attributes.position.count;
+          const f = geo.index ? geo.index.count / 3 : v / 3;
+          totalOriginalFaces += Math.floor(f);
+          totalOriginalVerts += v;
+          meshesToProcess.push({ mesh, meshId });
+        }
+      }
+    }
+  });
+
+  if (meshesToProcess.length === 0 || totalOriginalFaces === 0) {
+    return obj;
+  }
+
+  // 2. Calcular el ratio global de reducción objetivo
+  // IMPORTANTE: Distribuir el targetCount total proporcionalmente entre las partes
+  const requestedTargetCount = options.targetCount && options.targetCount > 0 ? options.targetCount : undefined;
+  
+  let globalRatio = 0.25;
+  if (options.targetRatio !== undefined) {
+    globalRatio = Math.min(0.99, Math.max(0.01, options.targetRatio));
+  } else if (requestedTargetCount) {
+    // Si el usuario pidió 2025 polígonos sobre un modelo de 8100 caras:
+    // globalRatio = 2025 / 8100 = 0.25 (-75% de reducción)
+    globalRatio = Math.min(0.99, Math.max(0.01, requestedTargetCount / totalOriginalFaces));
+  }
+
+  const preserveCreases = options.preserveCreases !== false;
+  const creaseAngleDeg = options.creaseAngleDeg ?? 35;
+  const mode = options.mode ?? 'QUAD_DOMINANT';
+
+  if (onProgress) {
+    const targetEst = Math.round(totalOriginalFaces * globalRatio);
+    await onProgress(20, `ZRemesher: reduciendo de ${totalOriginalFaces.toLocaleString()} a ~${targetEst.toLocaleString()} caras (-${Math.round((1 - globalRatio) * 100)}%)...`);
+  }
+
+  let modified = false;
+  let totalResultVerts = 0;
+  let totalResultFaces = 0;
+  let totalResultQuads = 0;
+
+  // 3. Procesar cada sub-malla con simplificación de atributos preservando UVs y costuras
+  for (let m = 0; m < meshesToProcess.length; m++) {
+    const { mesh } = meshesToProcess[m];
+    let geometry = mesh.geometry;
+    if (!geometry || !geometry.attributes.position) continue;
+
+    // Asegurar que la geometría esté indexada
+    if (!geometry.index) {
+      try {
+        geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
+        mesh.geometry = geometry;
+      } catch (e) {}
+      if (!geometry.index) {
+        const count = geometry.attributes.position.count;
+        const indices = new Uint32Array(count);
+        for (let i = 0; i < count; i++) indices[i] = i;
+        geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+      }
+    }
+
+    const posAttr = geometry.attributes.position;
+    const indexAttr = geometry.index!;
+    const uvAttr = geometry.attributes.uv;
+    const hasUV = !!uvAttr && uvAttr.count === posAttr.count;
+
+    const posArray = posAttr.array instanceof Float32Array ? posAttr.array : new Float32Array(posAttr.array);
+    const indexArray = indexAttr.array instanceof Uint32Array ? indexAttr.array : new Uint32Array(indexAttr.array);
+
+    const initialSubTris = indexArray.length / 3;
+    if (initialSubTris <= 4) {
+      totalResultFaces += initialSubTris;
+      totalResultVerts += posAttr.count;
+      continue;
+    }
+
+    // Objetivo proporcional para esta sub-malla
+    const targetSubTris = Math.max(4, Math.floor(initialSubTris * globalRatio));
+    const targetIndicesCount = targetSubTris * 3;
+
+    if (onProgress) {
+      const pct = Math.round(25 + (m / meshesToProcess.length) * 50);
+      await onProgress(pct, `ZRemesher en ${mesh.name || `Parte ${m + 1}`}: preservando texturas y geometría...`);
+    }
+
+    let simplifiedIndices: Uint32Array | null = null;
+
+    if (hasUV) {
+      // Simplificación con protección multi-atributo de textura UV
+      const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
+      const uvWeights = [2.0, 2.0];
+
+      const attempts = [
+        { err: 0.02, flags: ['LockBorder'] as any },
+        { err: 0.05, flags: ['LockBorder'] as any },
+        { err: 0.15, flags: ['LockBorder'] as any },
+        { err: 0.35, flags: ['LockBorder'] as any },
+        { err: 0.60, flags: ['LockBorder'] as any },
+      ];
+      if (!preserveCreases || globalRatio < 0.35) {
+        attempts.push({ err: 0.35, flags: [] as any }, { err: 0.60, flags: [] as any });
+      }
+
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplifyWithAttributes(
+            indexArray,
+            posArray,
+            3,
+            uvArray,
+            2,
+            uvWeights,
+            null,
+            targetIndicesCount,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
+            simplifiedIndices = res[0];
+            if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+          }
+        } catch (eSimp) {}
+      }
+    } else {
+      // Sin UVs: Simplificación posicional estándar con LockBorder
+      const flags = preserveCreases ? ['LockBorder'] : [];
+      const attempts = [
+        { err: 0.05, flags: flags as any },
+        { err: 0.15, flags: flags as any },
+        { err: 0.35, flags: flags as any },
+        { err: 0.60, flags: flags as any },
+      ];
+      if (!preserveCreases || globalRatio < 0.35) {
+        attempts.push({ err: 0.45, flags: [] as any });
+      }
+
+      for (const att of attempts) {
+        try {
+          const res = Meshopt.simplify(
+            indexArray,
+            posArray,
+            3,
+            targetIndicesCount,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
+            simplifiedIndices = res[0];
+            if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+          }
+        } catch (eSimp) {}
+      }
+    }
+
+    const finalSubIndices = simplifiedIndices && simplifiedIndices.length >= 12 ? simplifiedIndices : indexArray;
+
+    // 4. Estructuración ZRemesher Quad Flow (reordenamiento en cuadriláteros continuos)
+    const subTris: TriangleFace[] = [];
+    for (let i = 0; i < finalSubIndices.length; i += 3) {
+      subTris.push({
+        indices: [finalSubIndices[i], finalSubIndices[i + 1], finalSubIndices[i + 2]]
+      });
+    }
+
+    const quadPairResult = pairTrianglesIntoQuads(subTris, posArray, {
+      preserveCreases,
+      creaseAngleDeg,
+      uvs: hasUV ? (uvAttr.array as Float32Array) : null
+    });
+
+    totalResultQuads += quadPairResult.quads.length;
+
+    // 5. Recompactación de la geometría (Zero-Loss de Atributos)
+    const newGeometry = compactGeometry(geometry, quadPairResult.orderedIndices);
+    mesh.geometry = newGeometry;
+    modified = true;
+
+    totalResultFaces += newGeometry.index ? newGeometry.index.count / 3 : 0;
+    totalResultVerts += newGeometry.attributes.position.count;
+  }
+
+  if (!modified) return obj;
+
+  if (onProgress) await onProgress(88, 'Exportando modelo retopologizado con texturas y jerarquía intactas...');
+
+  // 6. Exportar GLB preservando animaciones, texturas y materiales
+  const exporter = new GLTFExporter();
+  const glbBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+    exporter.parse(
+      scene,
+      (gltfData) => resolve(gltfData as ArrayBuffer),
+      (error) => reject(error),
+      { binary: true, animations: gltf.animations }
+    );
+  });
+
+  const blob = new Blob([glbBuffer], { type: 'model/gltf-binary' });
+  const url = URL.createObjectURL(blob);
+
+  // 7. Reconstruir lista de sub-mallas y estadísticas
+  const meshesList: { id: string; name: string; vertices: number; faces: number }[] = [];
+  let idx = 0;
+  let accurateTotalVerts = 0;
+  let accurateTotalFaces = 0;
+
+  scene.traverse((child: any) => {
+    if (child.isMesh && child.geometry) {
+      const v = child.geometry.attributes.position ? child.geometry.attributes.position.count : 0;
+      const f = child.geometry.index ? child.geometry.index.count / 3 : v / 3;
+      accurateTotalVerts += v;
+      accurateTotalFaces += f;
+      meshesList.push({
+        id: `mesh-${idx++}`,
+        name: child.name || 'Unnamed Mesh',
+        vertices: Math.floor(v),
+        faces: Math.floor(f)
+      });
+    }
+  });
+
+  if (onProgress) await onProgress(100, '¡ZRemesher finalizado con éxito!');
+
+  return {
+    ...obj,
+    meshData: {
+      ...obj.meshData,
+      data: url,
+      animations: gltf.animations?.map((a: any) => a.toJSON()) || [],
+      meshes: meshesList
+    },
+    stats: {
+      vertices: Math.floor(accurateTotalVerts),
+      faces: Math.floor(accurateTotalFaces),
+      quads: totalResultQuads
+    }
+  };
+}

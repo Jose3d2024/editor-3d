@@ -9,7 +9,7 @@
  */
 
 import React, { useState } from 'react';
-import { Sparkles, Layers, Sliders } from 'lucide-react';
+import { Sparkles, Layers, Sliders, Wand2, Palette, Box } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import {
   extractSilhouetteFromImage,
@@ -17,6 +17,12 @@ import {
   fileToDataURL,
   ensureCCW,
 } from '../utils/silhouettes';
+import {
+  generarMallaConComplejidadVariable,
+  simplificarSiluetaAThreeShape,
+  bufferGeometryToVerticesAndFaces,
+  type PolygonComplexityMode
+} from '../utils/vectorContourProcessor';
 import type { V3, MeshFace } from '../types';
 import { safeFixed } from '../utils/numberUtils';
 
@@ -49,6 +55,7 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
   const [threshold,   setThreshold]   = useState(128);
   const [numPoints,   setNumPoints]   = useState(48);
   const [boxSize,     setBoxSize]     = useState(2);
+  const [polyMode,    setPolyMode]    = useState<PolygonComplexityMode>('medium');
   const [processing,  setProcessing]  = useState(false);
 
   // ── Subir imagen y extraer contorno ──────────────────────────────────────
@@ -61,13 +68,44 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
     });
   };
 
-  // ── Generar malla 3D ──────────────────────────────────────────────────────
+  // ── Generar malla 3D con Three-BVH-CSG y nivel de detalle ──────────────
   const allReady = PLANE_ORDER.some(k => silueta[k] && silueta[k]!.length >= 3);
 
   const handleGenerate = async () => {
     if (!allReady) return;
     setProcessing(true);
     try {
+      // Si tenemos Front, Left/Right y Top, usamos el motor algorítmico CSG de alta fidelidad con acople matemático
+      const fContour = silueta.front || silueta.back;
+      const lContour = silueta.left || silueta.right;
+      const sContour = silueta.top || silueta.bottom;
+
+      if (fContour && fContour.length >= 3 && lContour && lContour.length >= 3 && sContour && sContour.length >= 3) {
+        try {
+          const shapeF = simplificarSiluetaAThreeShape(fContour as [number, number][], { rdpEpsilon: 0.02, maxFittingError: 0.05, closedLoop: true });
+          const shapeL = simplificarSiluetaAThreeShape(lContour as [number, number][], { rdpEpsilon: 0.02, maxFittingError: 0.05, closedLoop: true });
+          const shapeS = simplificarSiluetaAThreeShape(sContour as [number, number][], { rdpEpsilon: 0.02, maxFittingError: 0.05, closedLoop: true });
+
+          const threeMesh = generarMallaConComplejidadVariable(shapeF, shapeL, shapeS, {
+            modoDetalle: polyMode,
+            tamanoReferencia: boxSize
+          });
+
+          if (threeMesh && threeMesh.geometry) {
+            const { vertices, faces } = bufferGeometryToVerticesAndFaces(threeMesh.geometry);
+            if (vertices.length > 0 && faces.length > 0) {
+              const labelName = polyMode === 'low' ? 'Boceto Low Poly' : polyMode === 'high' ? 'Boceto Ultra Suave' : 'Boceto 3D';
+              onGenerate(vertices, faces, labelName);
+              setSilueta({ activePlane: null });
+              return;
+            }
+          }
+        } catch (csgErr) {
+          console.warn('Fallo motor CSG avanzado, recurriendo a CSG estándar:', csgErr);
+        }
+      }
+
+      // Método alternativo estándar
       const result = silhouettesToMesh(
         {
           front: silueta.front,
@@ -84,22 +122,7 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
         return;
       }
       onGenerate(result.vertices, result.faces, 'Plano a la Realidad');
-      // Reset tool
-      setSilueta({ 
-        activePlane: null,
-        front: null,
-        back: null,
-        left: null,
-        right: null,
-        top: null,
-        bottom: null,
-        frontImage: null,
-        backImage: null,
-        leftImage: null,
-        rightImage: null,
-        topImage: null,
-        bottomImage: null
-      });
+      setSilueta({ activePlane: null });
     } finally {
       setProcessing(false);
     }
@@ -166,7 +189,7 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
         })}
       </div>
 
-      {/* ── Panel del plano activo ──────────────────────────────────────────── */}
+      {/* ── Panel del plano activo ──────────────────────────────────── */}
       {silueta.activePlane && (
         <div className={`rounded-lg border p-3 space-y-3 ${cfg.border} ${cfg.bg}`}>
           <div className="flex items-center justify-between">
@@ -208,6 +231,55 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
         </div>
       )}
 
+      {/* ── Controles de Poligonización & Estilo ─────────────────────── */}
+      <div className="bg-zinc-900/80 rounded-lg p-2.5 space-y-2 border border-zinc-800">
+        <div className="flex items-center justify-between">
+          <p className="text-[9px] font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-1">
+            <Box size={11} className="text-indigo-400"/> Nivel de Detalle Poligonal
+          </p>
+          <span className="text-[8px] font-mono text-indigo-400 uppercase font-semibold">{polyMode}</span>
+        </div>
+        
+        <div className="grid grid-cols-3 gap-1">
+          <button
+            type="button"
+            onClick={() => setPolyMode('low')}
+            className={`py-1.5 px-1 rounded text-[9px] font-bold border transition-colors flex flex-col items-center ${
+              polyMode === 'low'
+                ? 'bg-amber-600/30 border-amber-500 text-amber-300'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+            }`}
+          >
+            <span>Low Poly</span>
+            <span className="text-[7px] font-normal opacity-80">Facetado Retro</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPolyMode('medium')}
+            className={`py-1.5 px-1 rounded text-[9px] font-bold border transition-colors flex flex-col items-center ${
+              polyMode === 'medium'
+                ? 'bg-indigo-600/30 border-indigo-500 text-indigo-300'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+            }`}
+          >
+            <span>Medio</span>
+            <span className="text-[7px] font-normal opacity-80">Equilibrado</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPolyMode('high')}
+            className={`py-1.5 px-1 rounded text-[9px] font-bold border transition-colors flex flex-col items-center ${
+              polyMode === 'high'
+                ? 'bg-emerald-600/30 border-emerald-500 text-emerald-300'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:bg-zinc-700'
+            }`}
+          >
+            <span>Alto Poly</span>
+            <span className="text-[7px] font-normal opacity-80">Ultra Suave</span>
+          </button>
+        </div>
+      </div>
+
       {/* ── Controles de extracción ────────────────────────────────────────── */}
       <div className="bg-zinc-800/50 rounded-lg p-2 space-y-1.5 border border-white/5">
         <p className="text-[9px] font-bold text-zinc-400 uppercase tracking-wider">Ajustes de extracción</p>
@@ -247,20 +319,20 @@ export const SiluetaTab: React.FC<SiluetaTabProps> = ({ onGenerate }) => {
         onClick={handleGenerate}
         className={`w-full py-3 rounded-lg text-[11px] font-bold transition-all ${
           allReady && !processing
-            ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/20'
+            ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/20 cursor-pointer active:scale-98'
             : 'bg-zinc-800 text-zinc-600 cursor-not-allowed border border-white/5'
         }`}
       >
-        {processing ? '⏳ Generando malla 3D…' : allReady ? '✨ Crear Malla' : 'Faltan contornos'}
+        {processing ? '⏳ Generando malla 3D…' : allReady ? `✨ Crear Malla (${polyMode.toUpperCase()})` : 'Faltan contornos'}
       </button>
 
       {/* Ayuda */}
       <div className="bg-zinc-900/50 rounded p-2 text-[8px] text-zinc-500 border border-white/5">
         <p className="font-bold text-zinc-400 mb-1 uppercase tracking-widest">Instrucciones</p>
         <p>1. Selecciona un plano (Frontal, Trasero, etc.).</p>
-        <p>2. Dibuja en el visor: Clic (añadir), Arrastrar (mover), Alt+Clic (borrar).</p>
-        <p>3. O sube una imagen para extraer la silueta automáticamente.</p>
-        <p>4. Pulsa "Crear Malla" cuando tengas al menos un contorno listo.</p>
+        <p>2. Dibuja en el visor o sube una imagen para extraer la silueta.</p>
+        <p>3. Elige el modo de poligonización: Low Poly (facetado), Medio o Alto (suave orgánico).</p>
+        <p>4. Pulsa "Crear Malla" para generar el volumen 3D con corte booleano CSG.</p>
       </div>
     </div>
   );

@@ -11,12 +11,19 @@ import { marchingCubes } from './marchingCubes';
 import { CSG } from 'three-csg-ts';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import {
+  simplifyClosedContourRDP,
+  fitBezierCurvesSchneider,
+  simplificarSiluetaAThreeShape,
+  smoothPolygon,
+  snapToOrthogonalOrDiagonal
+} from './vectorContourProcessor';
 
 export type BlueprintViewKey = 'front' | 'top' | 'side' | 'back' | 'bottom';
 
-export type CarverEngineMode = 'VISUAL_HULL' | 'HARD_SURFACE_CSG' | 'SMOOTH_SCULPT';
+export type CarverEngineMode = 'VISUAL_HULL' | 'HARD_SURFACE_CSG' | 'SMOOTH_SCULPT' | 'CUSHION_INFLATION';
 
-export type CarverTopologyMode = 'PLANAR_POLISHED' | 'UNIFORM_ISOTROPIC' | 'LOW_POLY' | 'RAW';
+export type CarverTopologyMode = 'PLANAR_POLISHED' | 'UNIFORM_ISOTROPIC' | 'CUSHION_UPHOLSTERY' | 'ROUNDED_ORGANIC' | 'CURVED_FILLET' | 'LOW_POLY' | 'RAW';
 
 export type BlueprintDetectionMode = 'LINE_ART' | 'SOLID_COLOR' | 'TRANSPARENT_ALPHA';
 
@@ -53,6 +60,14 @@ export interface BlueprintImageConfig {
   invert: boolean;            // Invertir máscara
   dilation: number;           // -10 a +10 px (inflar/desinflar silueta)
   blurRadius: number;         // 0 a 5 px de suavizado de bordes
+
+  // Controles de Vectorización y Perfilado Estilo ImagR & Hard-Surface
+  contourMode?: 'BEZIER_SMOOTH' | 'HARD_SURFACE_RDP' | 'ORTHO_POLY' | 'ROUNDED_ADAPTIVE'; // Modo de contorno: Silueta Redondeada Adaptativa, Bézier Suave, Hard Surface RDP o Polígono Ortogonal
+  blur?: number;              // 0 a 10 px (Desenfoque previo para fusionar dientes de sierra del píxel, def: 1)
+  simplify?: number;          // 0.5 a 20.0 (Tolerancia Douglas-Peucker / Schneider, def: 4.5)
+  cornerAngle?: number;       // 25 a 120 grados (Protección de esquinas vivas/almenas vs curvas, def: 65)
+  curveFidelity?: number;     // 1 a 15 (Fidelidad / densidad de puntos en siluetas redondeadas y arcos, def: 8)
+  roundnessSmooth?: number;   // 0 a 5 (Pasadas de suavizado de contorno Chaikin / Laplaciano, def: 2)
   
   // Filtro de ruido & zonas finas
   denoiseIslandSize?: number; // 0 a 150 px: elimina pequeñas motas o manchas de escaneo que no son parte del objeto
@@ -72,8 +87,33 @@ export interface BlueprintImageConfig {
   texScaleY?: number;           // Escala V de la textura (0.2 a 3.0, default 1.0)
   texFlipH?: boolean;           // Invertir textura horizontalmente
   texFlipV?: boolean;           // Invertir textura verticalmente
-  texMirrorOpposite?: boolean;  // Reflejar simétricamente en caras opuestas (default true)
+  texMirrorOpposite?: boolean;  // Reflejar simétricamente en caras opuestas (default false)
+  texProjectBothSides?: boolean;// Proyectar en ambas caras opuestas (default false, evita proyectar en cara trasera)
   invertNormalY?: boolean;      // Invertir canal Y del mapa de normales (OpenGL vs DirectX)
+
+  // Control de Modelado de Vista Trasera
+  depthLimit?: number;          // 0.1 a 1.0 (Profundidad de influencia del tallado en la parte trasera, def: 0.5 o 1.0)
+  carveEnabled?: boolean;        // true si talla la silueta 3D, false si solo se usa para texturizar con PBR
+
+  // Zonas de Altura / Cavidad (ej. Asiento de sofá más bajo que los brazos)
+  depthZones?: BlueprintDepthZone[];
+  heightmapEnabled?: boolean;     // Activar relieve continuo por luminancia / sombras
+  heightmapStrength?: number;    // Intensidad del relieve (0 a 100%, def: 50%)
+  heightmapInvert?: boolean;      // Invertir mapa de alturas
+}
+
+export interface BlueprintDepthZone {
+  id: string;
+  name: string;
+  x1: number; // Coordenada X normalizada [-1, 1]
+  y1: number; // Coordenada Y normalizada [-1, 1]
+  x2: number;
+  y2: number;
+  heightMax: number; // 0.0 a 1.0 (ej. 0.40 para el asiento del sofá: la masa sólida llega hasta el 40%, vaciando el 60% superior)
+  heightMin?: number; // 0.0 a 1.0 (def: 0.0, suelo o base)
+  bevelRadius?: number; // 0.01 a 0.3 (def: 0.08, suavizado / transición a los brazos)
+  mode?: 'DEPRESSION' | 'ELEVATION';
+  enabled: boolean;
 }
 
 export interface BlueprintCarverOptions {
@@ -89,11 +129,17 @@ export interface BlueprintCarverOptions {
     back?: BlueprintImageConfig;
     bottom?: BlueprintImageConfig;
   };
-  topologyMode?: CarverTopologyMode; // 'PLANAR_POLISHED' | 'UNIFORM_ISOTROPIC' | 'LOW_POLY' | 'RAW'
+  preprocessedViews?: { [K in BlueprintViewKey]?: ProcessedSilhouette | null };
+  topologyMode?: CarverTopologyMode; // 'PLANAR_POLISHED' | 'UNIFORM_ISOTROPIC' | 'CUSHION_UPHOLSTERY' | 'ROUNDED_ORGANIC' | 'CURVED_FILLET' | 'LOW_POLY' | 'RAW'
   snapToPlanes?: boolean;
   planarAngleToleranceDeg?: number;
   decimationRatio?: number;
   featureAngleDeg?: number;
+  roundness?: number;         // 0.0 a 1.0 (factor de redondeo de cantos y aristas)
+  cushionInflation?: number;  // 0.0 a 1.0 (abombado / inflado de silueta para tapicería/cojines)
+  edgeFilletRadius?: number;  // radio de biselado curvo
+  subdivisionLevel?: number;  // 0 o 1 (subdivisión curva para mallas súper lisas)
+  backDepthLimit?: number;    // 0.1 a 1.0 (profundidad de influencia del tallado de la vista trasera)
 }
 
 export interface ProcessedSilhouette {
@@ -105,6 +151,9 @@ export interface ProcessedSilhouette {
   aspect: number;
   cleanedPixelsCount: number;
   boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number };
+  depthZones?: BlueprintDepthZone[];
+  heightmap?: Float32Array;
+  heightmapStrength?: number;
 }
 
 /**
@@ -189,12 +238,13 @@ export function calculateAutoCalibration(sil: ProcessedSilhouette): {
     // ESCALA ISOTRÓPICA: Usamos la dimensión máxima para mantener la relación de aspecto 1:1 sin distorsiones
     const maxBoundingDim = Math.max(boundingWidth, boundingHeight);
     const targetSize = 0.82;
-    unifiedScale = maxBoundingDim > 0 ? Math.round((targetSize / maxBoundingDim) * 100) / 100 : 1.0;
+    const rawScale = maxBoundingDim > 0 ? (targetSize / maxBoundingDim) : 1.0;
+    unifiedScale = Math.max(0.2, Math.min(3.5, Math.round(rawScale * 100) / 100));
 
     const centerU = (minU + maxU) / 2;
     const centerV = (minV + maxV) / 2;
-    offX = Math.round((0.5 - centerU) * 1000) / 1000;
-    offY = Math.round((0.5 - centerV) * 1000) / 1000;
+    offX = Math.max(-0.5, Math.min(0.5, Math.round((0.5 - centerU) * 1000) / 1000));
+    offY = Math.max(-0.5, Math.min(0.5, Math.round((0.5 - centerV) * 1000) / 1000));
   }
 
   return {
@@ -215,6 +265,8 @@ export interface MultiViewAutoAlignmentResult {
     front?: Partial<BlueprintImageConfig>;
     side?: Partial<BlueprintImageConfig>;
     top?: Partial<BlueprintImageConfig>;
+    back?: Partial<BlueprintImageConfig>;
+    bottom?: Partial<BlueprintImageConfig>;
   };
   dimensions: V3;
   report: string;
@@ -223,7 +275,7 @@ export interface MultiViewAutoAlignmentResult {
 /**
  * ALINEADOR MULTI-VISTA INTELIGENTE 3D:
  * Resuelve y sincroniza automáticamente las restricciones de escala, altura, suelo y proporciones
- * entre las vistas Frontal, Lateral y Superior para que la intersección volumétrica (Visual Hull / CSG)
+ * entre las vistas Frontal, Lateral, Superior y Trasera para que la intersección volumétrica (Visual Hull / CSG)
  * encaje al 100% sin cortes en el techo, capó o ruedas.
  */
 export function calculateMultiViewAutoAlignment(
@@ -231,220 +283,79 @@ export function calculateMultiViewAutoAlignment(
     front?: ProcessedSilhouette | null;
     side?: ProcessedSilhouette | null;
     top?: ProcessedSilhouette | null;
+    back?: ProcessedSilhouette | null;
+    bottom?: ProcessedSilhouette | null;
   },
   currentConfigs: {
     front: BlueprintImageConfig;
     side: BlueprintImageConfig;
     top: BlueprintImageConfig;
-  }
+    back?: BlueprintImageConfig;
+    bottom?: BlueprintImageConfig;
+  },
+  currentDimensions: [number, number, number] = [2.0, 1.8, 4.0]
 ): MultiViewAutoAlignmentResult {
   const bFront = silhouettes.front?.boundsNormalized;
   const bSide = silhouettes.side?.boundsNormalized;
   const bTop = silhouettes.top?.boundsNormalized;
+  const bBack = silhouettes.back?.boundsNormalized;
 
   const hasFront = !!bFront && silhouettes.front?.contours && silhouettes.front.contours.length > 0;
   const hasSide = !!bSide && silhouettes.side?.contours && silhouettes.side.contours.length > 0;
   const hasTop = !!bTop && silhouettes.top?.contours && silhouettes.top.contours.length > 0;
+  const hasBack = !!bBack && silhouettes.back?.contours && silhouettes.back.contours.length > 0;
 
-  const round3 = (n: number) => Math.round(n * 1000) / 1000;
   const round2 = (n: number) => Math.round(n * 100) / 100;
-
-  // Altura objetivo normalizada en el lienzo 3D
-  const TARGET_NORM_HEIGHT = 0.76;
-
-  let dimX = 2.0;
-  let dimY = 2.0;
-  let dimZ = 2.0;
 
   const updatedConfigs: MultiViewAutoAlignmentResult['updatedConfigs'] = {};
   const reports: string[] = [];
 
   // Alturas y anchuras de las siluetas detectadas en coordenadas normalizadas [0, 1]
-  const hFront = hasFront ? Math.max(0.02, bFront!.maxV - bFront!.minV) : 0.5;
-  const wFront = hasFront ? Math.max(0.02, bFront!.maxU - bFront!.minU) : 0.5;
+  const hFront = hasFront ? Math.max(0.04, bFront!.maxV - bFront!.minV) : 0.5;
+  const wFront = hasFront ? Math.max(0.04, bFront!.maxU - bFront!.minU) : 0.5;
 
-  const hSide = hasSide ? Math.max(0.02, bSide!.maxV - bSide!.minV) : 0.5;
-  const lenSide = hasSide ? Math.max(0.02, bSide!.maxU - bSide!.minU) : 0.5;
+  const hSide = hasSide ? Math.max(0.04, bSide!.maxV - bSide!.minV) : 0.5;
+  const lenSide = hasSide ? Math.max(0.04, bSide!.maxU - bSide!.minU) : 0.5;
 
-  // En la vista superior, detectar si la orientación es vertical (longitud en Y/V) u horizontal (longitud en X/U)
-  const spanXTop = hasTop ? Math.max(0.02, bTop!.maxU - bTop!.minU) : 0.5;
-  const spanYTop = hasTop ? Math.max(0.02, bTop!.maxV - bTop!.minV) : 0.5;
+  const spanXTop = hasTop ? Math.max(0.04, bTop!.maxU - bTop!.minU) : 0.5;
+  const spanYTop = hasTop ? Math.max(0.04, bTop!.maxV - bTop!.minV) : 0.5;
   const isTopVertical = spanYTop >= spanXTop;
   const lenTop = isTopVertical ? spanYTop : spanXTop;
   const wTop = isTopVertical ? spanXTop : spanYTop;
 
-  // 1. Escalas unificadas para que las dimensiones físicas coincidan:
-  // Altura: Frontal vs Lateral
-  const curScaleFront = currentConfigs.front.scaleUniform ?? 1.0;
-  const curScaleSide = currentConfigs.side.scaleUniform ?? 1.0;
-  const curScaleTop = currentConfigs.top.scaleUniform ?? 1.0;
+  // Tomamos la altura actual del usuario como ancla estable
+  const baseDimY = currentDimensions[1] > 0.2 ? currentDimensions[1] : 1.8;
+  let dimY = baseDimY;
+  let dimX = currentDimensions[0] > 0.2 ? currentDimensions[0] : 1.8;
+  let dimZ = currentDimensions[2] > 0.2 ? currentDimensions[2] : 4.0;
 
-  let scaleFront = curScaleFront;
-  let scaleSide = curScaleSide;
-  let scaleTop = curScaleTop;
-
-  if (hasFront && hasSide) {
-    scaleFront = round3(curScaleFront * (TARGET_NORM_HEIGHT / hFront));
-    scaleSide = round3(curScaleSide * (TARGET_NORM_HEIGHT / hSide));
-  } else if (hasFront) {
-    scaleFront = round3(curScaleFront * (TARGET_NORM_HEIGHT / hFront));
-  } else if (hasSide) {
-    scaleSide = round3(curScaleSide * (TARGET_NORM_HEIGHT / hSide));
-  }
-
-  // Longitud y Ancho: Sincronizar Vista Superior
-  if (hasSide && hasTop) {
-    const physicalLen = lenSide * (scaleSide / curScaleSide);
-    scaleTop = round3(curScaleTop * (physicalLen / lenTop));
-  } else if (hasFront && hasTop) {
-    const physicalW = wFront * (scaleFront / curScaleFront);
-    scaleTop = round3(curScaleTop * (physicalW / wTop));
-  } else if (hasTop) {
-    const maxTopSpan = Math.max(spanXTop, spanYTop);
-    scaleTop = round3(curScaleTop * (TARGET_NORM_HEIGHT / maxTopSpan));
-  }
-
-  // 2. Offsets y centrado exacto en cada vista
+  // 1. Ancho (X) calibrado proporcionalmente al frente
   if (hasFront) {
-    const cU = (bFront!.minU + bFront!.maxU) / 2;
-    const cV = (bFront!.minV + bFront!.maxV) / 2;
-    const curOffX = currentConfigs.front.offsetX ?? 0;
-    const curOffY = currentConfigs.front.offsetY ?? 0;
-    const offX = round3(curOffX + (0.5 - cU) * 2);
-    const offY = round3(curOffY - (0.5 - cV) * 2);
-    const s = scaleFront;
-
-    updatedConfigs.front = {
-      scaleUniform: s,
-      scaleX: 1.0,
-      scaleY: 1.0,
-      offsetX: offX,
-      offsetY: offY,
-      texScaleX: s,
-      texScaleY: s,
-      texOffsetX: offX,
-      texOffsetY: offY,
-      lockAspectRatio: true,
-      preserveAspectRatio: true,
-      manualControlPoints: null
-    };
-    reports.push('Frontal: centrada y escalada');
-  }
-
-  if (hasSide) {
-    const cU = (bSide!.minU + bSide!.maxU) / 2;
-    const cV = (bSide!.minV + bSide!.maxV) / 2;
-    const curOffX = currentConfigs.side.offsetX ?? 0;
-    const curOffY = currentConfigs.side.offsetY ?? 0;
-    const offX = round3(curOffX + (0.5 - cU) * 2);
-    const offY = round3(curOffY - (0.5 - cV) * 2);
-    const s = scaleSide;
-
-    updatedConfigs.side = {
-      scaleUniform: s,
-      scaleX: 1.0,
-      scaleY: 1.0,
-      offsetX: offX,
-      offsetY: offY,
-      texScaleX: s,
-      texScaleY: s,
-      texOffsetX: offX,
-      texOffsetY: offY,
-      lockAspectRatio: true,
-      preserveAspectRatio: true,
-      manualControlPoints: null
-    };
-    reports.push('Lateral: igualada en altura con Frontal');
-  }
-
-  if (hasTop) {
-    const cU = (bTop!.minU + bTop!.maxU) / 2;
-    const cV = (bTop!.minV + bTop!.maxV) / 2;
-    const curOffX = currentConfigs.top.offsetX ?? 0;
-    const curOffY = currentConfigs.top.offsetY ?? 0;
-    const offX = round3(curOffX + (0.5 - cU) * 2);
-    const offY = round3(curOffY - (0.5 - cV) * 2);
-    const s = scaleTop;
-
-    // Analizador de orientación automática
-    let autoFlipH = currentConfigs.top.flipH ?? false;
-    if (hasSide && silhouettes.side?.mask && silhouettes.top?.mask) {
-      const sideSil = silhouettes.side;
-      const topSil = silhouettes.top;
-      let sideMassLeft = 0;
-      let topMassLeft = 0;
-
-      const sideMidX = Math.floor(sideSil.width / 2);
-      for (let y = 0; y < sideSil.height; y++) {
-        const row = y * sideSil.width;
-        for (let x = 0; x < sideMidX; x++) {
-          if (sideSil.mask[row + x] === 1) sideMassLeft++;
-        }
-      }
-
-      const topMidX = Math.floor(topSil.width / 2);
-      for (let y = 0; y < topSil.height; y++) {
-        const row = y * topSil.width;
-        for (let x = 0; x < topMidX; x++) {
-          if (topSil.mask[row + x] === 1) topMassLeft++;
-        }
-      }
-
-      const sideTotal = sideSil.cleanedPixelsCount || 1;
-      const topTotal = topSil.cleanedPixelsCount || 1;
-      const sideLooksLeft = sideMassLeft < (sideTotal * 0.45);
-      const topLooksLeft = topMassLeft < (topTotal * 0.45);
-      autoFlipH = sideLooksLeft !== topLooksLeft;
-    }
-
-    updatedConfigs.top = {
-      scaleUniform: s,
-      scaleX: 1.0,
-      scaleY: 1.0,
-      offsetX: offX,
-      offsetY: offY,
-      texScaleX: s,
-      texScaleY: s,
-      texOffsetX: offX,
-      texOffsetY: offY,
-      flipH: autoFlipH,
-      lockAspectRatio: true,
-      preserveAspectRatio: true,
-      manualControlPoints: null
-    };
-    reports.push(autoFlipH ? 'Superior: sincronizada e invertida en espejo para alinear cabina' : 'Superior: sincronizada en longitud y ancho');
-  }
-
-  // 3. Calcular dimensiones 3D reales proporcionales [dimX, dimY, dimZ]
-  const baseDimY = 1.8; // Altura estándar 1.8 metros
-  dimY = baseDimY;
-
-  // Ancho (X)
-  if (hasFront) {
-    const normW = wFront * (scaleFront / curScaleFront);
-    dimX = round2(Math.max(0.5, Math.min(8.0, (normW / TARGET_NORM_HEIGHT) * baseDimY)));
+    const ratioX = wFront / hFront;
+    dimX = round2(Math.max(0.3, Math.min(8.0, baseDimY * ratioX)));
+    reports.push(`Ancho X: ${dimX}m`);
   } else if (hasTop) {
-    const normW = wTop * (scaleTop / curScaleTop);
-    dimX = round2(Math.max(0.5, Math.min(8.0, (normW / TARGET_NORM_HEIGHT) * baseDimY)));
-  } else {
-    dimX = 1.8;
+    const ratioX = wTop / lenTop;
+    dimX = round2(Math.max(0.3, Math.min(8.0, dimZ * ratioX)));
   }
 
-  // Profundidad / Longitud (Z)
+  // 2. Longitud / Profundidad (Z) calibrada proporcionalmente al lateral o superior
   if (hasSide) {
-    const normD = lenSide * (scaleSide / curScaleSide);
-    dimZ = round2(Math.max(0.5, Math.min(12.0, (normD / TARGET_NORM_HEIGHT) * baseDimY)));
+    const ratioZ = lenSide / hSide;
+    dimZ = round2(Math.max(0.4, Math.min(14.0, baseDimY * ratioZ)));
+    reports.push(`Largo Z: ${dimZ}m`);
   } else if (hasTop) {
-    const normD = lenTop * (scaleTop / curScaleTop);
-    dimZ = round2(Math.max(0.5, Math.min(12.0, (normD / TARGET_NORM_HEIGHT) * baseDimY)));
-  } else {
-    dimZ = 4.2;
+    const ratioZ = lenTop / wTop;
+    dimZ = round2(Math.max(0.4, Math.min(14.0, dimX * ratioZ)));
+    reports.push(`Largo Z: ${dimZ}m (desde Top)`);
   }
 
+  // IMPORTANTE: NO sobreescribimos los offsets ni la escala del lienzo 2D.
+  // Esto previene que las siluetas salgan del encuadre y la malla colapse a 0 vértices.
   return {
     updatedConfigs,
     dimensions: [dimX, dimY, dimZ],
-    report: `✓ Sincronización 3D perfecta: Dimensiones [${dimX}m x ${dimY}m x ${dimZ}m] (${reports.join(', ') || 'Proporciones sincronizadas'})`
+    report: `✓ Dimensiones proporcionales sincronizadas: [${dimX}m x ${dimY}m x ${dimZ}m] (${reports.join(', ') || 'OK'})`
   };
 }
 
@@ -474,7 +385,7 @@ export function applySymmetryToMask(
 }
 
 export interface GhostOverlayData {
-  viewKey: 'front' | 'side' | 'top';
+  viewKey: BlueprintViewKey;
   label: string;
   imgData: ImageData | null;
   processed: ProcessedSilhouette | null;
@@ -588,7 +499,12 @@ export async function loadCanvasImageData(
       const imgDrawW = is90or270 ? drawH : drawW;
       const imgDrawH = is90or270 ? drawW : drawH;
 
+      if (config.blur && config.blur > 0) {
+        ctx.filter = `blur(${config.blur}px)`;
+      }
+
       ctx.drawImage(img, -imgDrawW / 2, -imgDrawH / 2, imgDrawW, imgDrawH);
+      ctx.filter = 'none';
       ctx.restore();
 
       const imgData = ctx.getImageData(0, 0, CANVAS_SIZE, CANVAS_SIZE);
@@ -1127,7 +1043,12 @@ export function processSilhouette(
   } : { minU: 0, minV: 0, maxU: 1, maxV: 1 };
 
   // 7. Si hay puntos de control manuales suministrados por el usuario, usarlos como contornos
-  let finalContours = extractMultiContoursFromMask(mask, W, H);
+  const contourMode = config.contourMode ?? 'ROUNDED_ADAPTIVE';
+  const simplifyEps = (config.simplify ?? 4.5) * 0.003;
+  const cornerAng = config.cornerAngle ?? (contourMode === 'HARD_SURFACE_RDP' || contourMode === 'ORTHO_POLY' ? 35 : 65);
+  const curveFid = config.curveFidelity ?? 8;
+  const roundSmooth = config.roundnessSmooth ?? 2;
+  let finalContours = extractMultiContoursFromMask(mask, W, H, simplifyEps, cornerAng, contourMode, curveFid, roundSmooth);
   let finalMask = mask;
   let finalSdf = computeSDF(mask, W, H, blurRadius);
 
@@ -1159,6 +1080,11 @@ export function processSilhouette(
     finalSdf = computeSDF(finalMask, W, H, blurRadius);
   }
 
+  let heightmap: Float32Array | undefined = undefined;
+  if (config.heightmapEnabled) {
+    heightmap = computeHeightmapFromImage(imageData, finalMask, config.heightmapInvert, config.heightmapStrength);
+  }
+
   return {
     width: W,
     height: H,
@@ -1167,8 +1093,183 @@ export function processSilhouette(
     contours: finalContours,
     aspect: W / H,
     cleanedPixelsCount: cleanedCount,
-    boundsNormalized
+    boundsNormalized,
+    depthZones: config.depthZones,
+    heightmap,
+    heightmapStrength: config.heightmapStrength ?? 50
   };
+}
+
+/**
+ * Calcula un mapa de alturas normalizado [0, 1] a partir de la luminancia de la imagen original
+ */
+export function computeHeightmapFromImage(
+  imageData: ImageData,
+  mask: Uint8Array,
+  invert: boolean = false,
+  strength: number = 50
+): Float32Array {
+  const W = imageData.width;
+  const H = imageData.height;
+  const data = imageData.data;
+  const heightmap = new Float32Array(W * H);
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const idx = y * W + x;
+      if (mask[idx] === 1) {
+        const pIdx = idx * 4;
+        const r = data[pIdx];
+        const g = data[pIdx + 1];
+        const b = data[pIdx + 2];
+        let lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        if (invert) lum = 1.0 - lum;
+        heightmap[idx] = Math.max(0, Math.min(1, lum));
+      } else {
+        heightmap[idx] = 1.0;
+      }
+    }
+  }
+
+  return heightmap;
+}
+
+/**
+ * Detecta automáticamente zonas de altura interior / cavidades (por ejemplo, el asiento de un sofá entre los dos brazos y el respaldo)
+ * basándose en el análisis de sombras, costuras y contraste dentro de la silueta sólida.
+ */
+export function autoDetectDepthZones(
+  imageData: ImageData,
+  mask: Uint8Array,
+  W: number,
+  H: number,
+  viewKey: BlueprintViewKey = 'top'
+): BlueprintDepthZone[] {
+  const data = imageData.data;
+  
+  // 1. Encontrar el Bounding Box del objeto en la máscara sólida
+  let minX = W, maxX = 0, minY = H, maxY = 0;
+  let solidCount = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (mask[y * W + x] === 1) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        solidCount++;
+      }
+    }
+  }
+
+  if (solidCount < 80 || maxX <= minX || maxY <= minY) return [];
+
+  const boxW = maxX - minX;
+  const boxH = maxY - minY;
+
+  // 2. Extraer mapa de luminancia dentro del objeto
+  const lum = new Float32Array(W * H);
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      const idx = y * W + x;
+      if (mask[idx] === 1) {
+        const pIdx = idx * 4;
+        lum[idx] = (0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2]) / 255;
+      }
+    }
+  }
+
+  // 3. Buscar costuras y gradientes verticales (brazos izquierdo y derecho)
+  const yStart = Math.floor(minY + boxH * 0.25);
+  const yEnd = Math.floor(minY + boxH * 0.75);
+
+  const gradX = new Float32Array(W);
+  for (let x = minX + 2; x <= maxX - 2; x++) {
+    let sumGrad = 0;
+    let count = 0;
+    for (let y = yStart; y <= yEnd; y++) {
+      if (mask[y * W + x] === 1 && mask[y * W + (x + 2)] === 1 && mask[y * W + (x - 2)] === 1) {
+        const d = Math.abs(lum[y * W + (x + 2)] - lum[y * W + (x - 2)]);
+        sumGrad += d;
+        count++;
+      }
+    }
+    if (count > 0) gradX[x] = sumGrad / count;
+  }
+
+  // Buscar costura del brazo izquierdo: entre 12% y 38% del ancho del objeto
+  let bestLeftX = Math.floor(minX + boxW * 0.22);
+  let maxLeftGrad = 0;
+  const leftSearchMin = Math.floor(minX + boxW * 0.12);
+  const leftSearchMax = Math.floor(minX + boxW * 0.38);
+  for (let x = leftSearchMin; x <= leftSearchMax; x++) {
+    if (gradX[x] > maxLeftGrad) {
+      maxLeftGrad = gradX[x];
+      bestLeftX = x;
+    }
+  }
+
+  // Buscar costura del brazo derecho: entre 62% y 88% del ancho del objeto
+  let bestRightX = Math.floor(maxX - boxW * 0.22);
+  let maxRightGrad = 0;
+  const rightSearchMin = Math.floor(minX + boxW * 0.62);
+  const rightSearchMax = Math.floor(minX + boxW * 0.88);
+  for (let x = rightSearchMin; x <= rightSearchMax; x++) {
+    if (gradX[x] > maxRightGrad) {
+      maxRightGrad = gradX[x];
+      bestRightX = x;
+    }
+  }
+
+  // 4. Buscar costura horizontal (respaldo en la parte superior)
+  const gradY = new Float32Array(H);
+  for (let y = minY + 2; y <= maxY - 2; y++) {
+    let sumGrad = 0;
+    let count = 0;
+    for (let x = bestLeftX; x <= bestRightX; x++) {
+      if (mask[y * W + x] === 1 && mask[(y + 2) * W + x] === 1 && mask[(y - 2) * W + x] === 1) {
+        const d = Math.abs(lum[(y + 2) * W + x] - lum[(y - 2) * W + x]);
+        sumGrad += d;
+        count++;
+      }
+    }
+    if (count > 0) gradY[y] = sumGrad / count;
+  }
+
+  let bestTopY = Math.floor(minY + boxH * 0.26);
+  let maxTopGrad = 0;
+  const topSearchMin = Math.floor(minY + boxH * 0.14);
+  const topSearchMax = Math.floor(minY + boxH * 0.44);
+  for (let y = topSearchMin; y <= topSearchMax; y++) {
+    if (gradY[y] > maxTopGrad) {
+      maxTopGrad = gradY[y];
+      bestTopY = y;
+    }
+  }
+
+  // El borde delantero del asiento suele llegar al 90%-95% de la profundidad
+  const bestBottomY = Math.floor(minY + boxH * 0.92);
+
+  // Convertir coordenadas de píxeles a espacio normalizado [-1, 1]
+  const normX1 = (bestLeftX / (W - 1)) * 2 - 1;
+  const normY1 = 1 - (bestTopY / (H - 1)) * 2;
+  const normX2 = (bestRightX / (W - 1)) * 2 - 1;
+  const normY2 = 1 - (bestBottomY / (H - 1)) * 2;
+
+  // Altura por defecto del asiento: 40% de la altura total
+  return [{
+    id: `depth_zone_${Date.now()}`,
+    name: 'Asiento / Cavidad Central',
+    x1: Math.min(normX1, normX2),
+    y1: Math.max(normY1, normY2),
+    x2: Math.max(normX1, normX2),
+    y2: Math.min(normY1, normY2),
+    heightMax: 0.40, // Asiento a 40% de altura (hueco vacío en el 60% superior)
+    heightMin: 0.0,
+    bevelRadius: 0.08,
+    mode: 'DEPRESSION',
+    enabled: true
+  }];
 }
 
 /**
@@ -1372,7 +1473,12 @@ function computeSDF(
 function extractMultiContoursFromMask(
   mask: Uint8Array,
   W: number,
-  H: number
+  H: number,
+  simplifyEpsilon: number = 0.0195,
+  cornerAngle: number = 65,
+  contourMode: 'BEZIER_SMOOTH' | 'HARD_SURFACE_RDP' | 'ORTHO_POLY' | 'ROUNDED_ADAPTIVE' = 'ROUNDED_ADAPTIVE',
+  curveFidelity: number = 8,
+  roundnessSmooth: number = 2
 ): [number, number][][] {
   const allContours: [number, number][][] = [];
   const processedIsland = new Uint8Array(W * H);
@@ -1437,7 +1543,7 @@ function extractMultiContoursFromMask(
         }
 
         if (loopPts.length >= 8) {
-          const simplified = simplifyClosedPolygon(loopPts, 0.012);
+          const simplified = simplifyClosedPolygon(loopPts, simplifyEpsilon, cornerAngle, contourMode, curveFidelity, roundnessSmooth);
           if (simplified.length >= 4) {
             allContours.push(simplified);
           }
@@ -1454,35 +1560,411 @@ function extractMultiContoursFromMask(
 }
 
 /**
- * Simplificación Ramer-Douglas-Peucker adaptada específicamente para bucles poligonales cerrados 2D
+ * Pipeline de Vectorización Profesional:
+ * 1. Limpieza de Ruido Inicial (Ramer-Douglas-Peucker):
+ *    Elimina micro-variaciones y ruido de digitalización en el píxel, extrayendo
+ *    únicamente los puntos de inflexión clave (esquinas y cambios de dirección reales).
+ * 2. Ajuste de Curvas Bézier (Algoritmo de Schneider):
+ *    Ajusta curvas Bézier cúbicas fluidas sobre los puntos clave mediante mínimos cuadrados
+ *    y refinamiento Newton-Raphson. Devuelve únicamente los puntos de anclaje (anchor points)
+ *    esenciales, evitando saturar la silueta con puntos densos o inservibles.
  */
-export function simplifyClosedPolygon(pts: [number, number][], epsilon: number): [number, number][] {
-  if (pts.length <= 4) return pts;
+/**
+ * Detector y generador de círculos/elipses armónicos perfectos.
+ * Si los puntos corresponden a una forma circular o elíptica (baja variación radial),
+ * genera un polígono suave y uniforme sin protuberancias ni distorsiones.
+ */
+function tryFitHarmonicCircleOrEllipse(pts: [number, number][]): [number, number][] | null {
+  if (pts.length < 12) return null;
 
-  // 1. Encontrar el punto más alejado del punto inicial para partir el polígono cerrado en dos arcos
-  const p0 = pts[0];
-  let maxD = 0;
-  let farIdx = Math.floor(pts.length / 2);
+  // 1. Centroide geométrico
+  let cx = 0, cy = 0;
+  for (const [x, y] of pts) {
+    cx += x;
+    cy += y;
+  }
+  cx /= pts.length;
+  cy /= pts.length;
 
-  for (let i = 1; i < pts.length; i++) {
-    const d = Math.hypot(pts[i][0] - p0[0], pts[i][1] - p0[1]);
-    if (d > maxD) {
-      maxD = d;
-      farIdx = i;
+  // 2. Radio medio y desviación estándar radial
+  let meanR = 0;
+  const radii: number[] = new Array(pts.length);
+  for (let i = 0; i < pts.length; i++) {
+    const r = Math.hypot(pts[i][0] - cx, pts[i][1] - cy);
+    radii[i] = r;
+    meanR += r;
+  }
+  meanR /= pts.length;
+  if (meanR < 0.02) return null;
+
+  let variance = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const diff = radii[i] - meanR;
+    variance += diff * diff;
+  }
+  const stdDev = Math.sqrt(variance / pts.length);
+  const coeffVar = stdDev / meanR;
+
+  // Si la variación radial es menor al 0.8% (círculo casi perfecto de laboratorio),
+  // y NO tiene salientes, dientes ni almenas
+  if (coeffVar < 0.008) {
+    const sampleCount = 36;
+    const circlePts: [number, number][] = [];
+    for (let i = 0; i < sampleCount; i++) {
+      const angle = (i / sampleCount) * Math.PI * 2;
+      circlePts.push([
+        Math.round((cx + meanR * Math.cos(angle)) * 10000) / 10000,
+        Math.round((cy + meanR * Math.sin(angle)) * 10000) / 10000
+      ]);
+    }
+    return circlePts;
+  }
+
+  // 3. Comprobar si es una elipse matemáticamente pura
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [x, y] of pts) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const a = (maxX - minX) / 2;
+  const b = (maxY - minY) / 2;
+
+  if (a > 0.02 && b > 0.02) {
+    let ellipseErr = 0;
+    for (const [x, y] of pts) {
+      const dx = (x - cx) / a;
+      const dy = (y - cy) / b;
+      const distToEllipse = Math.abs(Math.hypot(dx, dy) - 1.0);
+      ellipseErr += distToEllipse;
+    }
+    ellipseErr /= pts.length;
+
+    if (ellipseErr < 0.008) {
+      const sampleCount = 36;
+      const ellipsePts: [number, number][] = [];
+      for (let i = 0; i < sampleCount; i++) {
+        const angle = (i / sampleCount) * Math.PI * 2;
+        ellipsePts.push([
+          Math.round((cx + a * Math.cos(angle)) * 10000) / 10000,
+          Math.round((cy + b * Math.sin(angle)) * 10000) / 10000
+        ]);
+      }
+      return ellipsePts;
     }
   }
 
-  // 2. Simplificar ambas mitades de forma independiente
-  const half1 = rdpSimplify(pts.slice(0, farIdx + 1), epsilon);
-  const half2 = rdpSimplify([...pts.slice(farIdx), pts[0]], epsilon);
+  return null;
+}
 
-  // 3. Fusionar evitando duplicar los extremos comunes
-  const merged: [number, number][] = [
-    ...half1.slice(0, -1),
-    ...half2.slice(0, -1)
-  ];
+/**
+ * Subdivisión recursiva adaptativa para tramos curvos:
+ * Garantiza que las secciones redondeadas (arcos, cúpulas, bordes circulares) mantengan
+ * vértices suaves y distribuidos según la tolerancia y el espaciado máximo.
+ */
+function adaptiveSubdivideCurve(
+  pts: [number, number][],
+  tol: number,
+  maxChord: number
+): [number, number][] {
+  if (pts.length <= 2) return pts;
 
-  return merged.length >= 3 ? merged : pts;
+  const result: [number, number][] = [];
+
+  function recurse(i0: number, i1: number) {
+    const p0 = pts[i0];
+    const p1 = pts[i1];
+    const dx = p1[0] - p0[0];
+    const dy = p1[1] - p0[1];
+    const chord = Math.hypot(dx, dy);
+
+    let maxDist = 0;
+    let maxIdx = i0;
+
+    if (chord > 1e-6) {
+      for (let k = i0 + 1; k < i1; k++) {
+        const vx = pts[k][0] - p0[0];
+        const vy = pts[k][1] - p0[1];
+        const dist = Math.abs(vx * dy - vy * dx) / chord;
+        if (dist > maxDist) {
+          maxDist = dist;
+          maxIdx = k;
+        }
+      }
+    }
+
+    const needsSplit = (maxDist > tol || chord > maxChord) && (i1 - i0 > 1);
+
+    if (needsSplit && maxIdx > i0 && maxIdx < i1) {
+      recurse(i0, maxIdx);
+      recurse(maxIdx, i1);
+    } else {
+      result.push(p0);
+    }
+  }
+
+  recurse(0, pts.length - 1);
+  result.push(pts[pts.length - 1]);
+  return result;
+}
+
+/**
+ * Trazador Adaptativo de Siluetas Redondeadas y Curvas:
+ * - Detecta arcos, cúpulas, bordes redondeados y zonas curvas continuas.
+ * - Respeta fielmente esquinas rígidas (ángulos mayores a cornerAngle).
+ * - En las zonas curvas, distribuye vértices suaves uniformemente guiados por curveFidelity.
+ * - En las zonas rectas, colapsa en segmentos limpios sin puntos redundantes.
+ */
+export function traceAdaptiveCurvedContour(
+  rawPts: [number, number][],
+  epsilon: number = 0.01,
+  cornerAngle: number = 65,
+  curveFidelity: number = 8,
+  roundnessSmooth: number = 2
+): [number, number][] {
+  if (rawPts.length <= 4) return rawPts;
+
+  // 1. Suavizado preliminar Chaikin/Laplaciano para remover el diente de sierra del píxel
+  const smoothPasses = Math.min(5, Math.max(0, Math.round(roundnessSmooth)));
+  let smoothed = rawPts;
+  for (let p = 0; p < smoothPasses; p++) {
+    smoothed = smoothPolygon(smoothed, 1);
+  }
+
+  const N = smoothed.length;
+  if (N < 6) return smoothed;
+
+  // 2. Detección de esquinas rígidas / vivas (True Sharp Corners)
+  const span = Math.max(1, Math.min(4, Math.floor(N / 40)));
+  const cornerScores: { idx: number; angle: number }[] = [];
+
+  for (let i = 0; i < N; i++) {
+    const prev = smoothed[(i - span + N) % N];
+    const curr = smoothed[i];
+    const next = smoothed[(i + span) % N];
+
+    const v1x = curr[0] - prev[0];
+    const v1y = curr[1] - prev[1];
+    const v2x = next[0] - curr[0];
+    const v2y = next[1] - curr[1];
+
+    const l1 = Math.hypot(v1x, v1y);
+    const l2 = Math.hypot(v2x, v2y);
+    if (l1 > 1e-6 && l2 > 1e-6) {
+      const dot = (v1x * v2x + v1y * v2y) / (l1 * l2);
+      const clampedDot = Math.max(-1, Math.min(1, dot));
+      const turnDeg = Math.acos(clampedDot) * (180 / Math.PI);
+      if (turnDeg >= cornerAngle) {
+        cornerScores.push({ idx: i, angle: turnDeg });
+      }
+    }
+  }
+
+  // Filtrar clusters de esquinas adyacentes para conservar el vértice de máxima agudeza
+  const cornerIndices: number[] = [];
+  if (cornerScores.length > 0) {
+    let currentCluster: { idx: number; angle: number }[] = [cornerScores[0]];
+    for (let c = 1; c < cornerScores.length; c++) {
+      const prevIdx = cornerScores[c - 1].idx;
+      const currIdx = cornerScores[c].idx;
+      if (Math.abs(currIdx - prevIdx) <= span * 2) {
+        currentCluster.push(cornerScores[c]);
+      } else {
+        currentCluster.sort((a, b) => b.angle - a.angle);
+        cornerIndices.push(currentCluster[0].idx);
+        currentCluster = [cornerScores[c]];
+      }
+    }
+    if (currentCluster.length > 0) {
+      currentCluster.sort((a, b) => b.angle - a.angle);
+      cornerIndices.push(currentCluster[0].idx);
+    }
+  }
+
+  // Si no se detectaron esquinas rígidas (forma completamente redondeada como cúpula pura, óvalo o esfera):
+  // Colocar 4 anclas ortogonales equidistantes para muestrear suavemente
+  if (cornerIndices.length < 2) {
+    cornerIndices.length = 0;
+    const numAnchors = 4;
+    for (let a = 0; a < numAnchors; a++) {
+      cornerIndices.push(Math.floor((a * N) / numAnchors));
+    }
+  }
+
+  cornerIndices.sort((a, b) => a - b);
+
+  // 3. Procesar cada sección entre esquinas consecutivas
+  const fidelity = Math.max(1, Math.min(15, curveFidelity));
+  // Tolerancia de desviación en curvas proporcional a 1 / fidelity
+  const curveTol = Math.max(0.0004, 0.007 / fidelity);
+  // Longitud máxima de cuerda en arcos redondeados para garantizar fluidez visual
+  const maxCurveChord = Math.max(0.018, 0.28 / fidelity);
+  // Tolerancia para tramos rectos
+  const straightTol = Math.max(0.003, epsilon);
+
+  const finalLoop: [number, number][] = [];
+  const distSq2D = (a: [number, number], b: [number, number]) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+
+  for (let c = 0; c < cornerIndices.length; c++) {
+    const startIdx = cornerIndices[c];
+    const endIdx = cornerIndices[(c + 1) % cornerIndices.length];
+
+    // Extraer puntos del segmento en sentido horario
+    const segment: [number, number][] = [];
+    if (endIdx > startIdx) {
+      for (let i = startIdx; i <= endIdx; i++) segment.push(smoothed[i]);
+    } else {
+      for (let i = startIdx; i < N; i++) segment.push(smoothed[i]);
+      for (let i = 0; i <= endIdx; i++) segment.push(smoothed[i]);
+    }
+
+    if (segment.length <= 2) {
+      if (finalLoop.length === 0 || distSq2D(finalLoop[finalLoop.length - 1], segment[0]) > 1e-7) {
+        finalLoop.push(segment[0]);
+      }
+      continue;
+    }
+
+    // Analizar si el segmento es recto o curvo
+    const pStart = segment[0];
+    const pEnd = segment[segment.length - 1];
+    const chordVx = pEnd[0] - pStart[0];
+    const chordVy = pEnd[1] - pStart[1];
+    const chordLen = Math.hypot(chordVx, chordVy);
+
+    let maxPerpDist = 0;
+    if (chordLen > 1e-6) {
+      for (let i = 1; i < segment.length - 1; i++) {
+        const vx = segment[i][0] - pStart[0];
+        const vy = segment[i][1] - pStart[1];
+        const perp = Math.abs(vx * chordVy - vy * chordVx) / chordLen;
+        if (perp > maxPerpDist) maxPerpDist = perp;
+      }
+    }
+
+    // Si la desviación perpendicular es mínima, es una recta plana
+    const isStraight = maxPerpDist < straightTol;
+
+    if (isStraight) {
+      if (finalLoop.length === 0 || distSq2D(finalLoop[finalLoop.length - 1], pStart) > 1e-7) {
+        finalLoop.push(pStart);
+      }
+    } else {
+      // Subdivisión adaptativa para curvas
+      const sampledCurve = adaptiveSubdivideCurve(segment, curveTol, maxCurveChord);
+      for (let i = 0; i < sampledCurve.length - 1; i++) {
+        const pt = sampledCurve[i];
+        if (finalLoop.length === 0 || distSq2D(finalLoop[finalLoop.length - 1], pt) > 1e-7) {
+          finalLoop.push(pt);
+        }
+      }
+    }
+  }
+
+  // Cerrar el loop de manera limpia
+  if (finalLoop.length >= 3) {
+    const last = finalLoop[finalLoop.length - 1];
+    const first = finalLoop[0];
+    if (distSq2D(last, first) < 1e-6) {
+      finalLoop.pop();
+    }
+  }
+
+  return finalLoop.length >= 3 ? finalLoop : smoothed;
+}
+
+/**
+ * Pipeline de Vectorización Adaptativa de Alta Precisión:
+ * - ROUNDED_ADAPTIVE: Modo inteligente para siluetas redondeadas, arcos y cúpulas (curvatura fiel).
+ * - HARD_SURFACE_RDP: Para almenas, dientes y arquitectura recta.
+ * - ORTHO_POLY: Aproximación angular 90°/45°.
+ * - BEZIER_SMOOTH: Curvas Bézier Schneider continuas.
+ */
+export function simplifyClosedPolygon(
+  pts: [number, number][],
+  epsilon: number = 0.012,
+  cornerAngle: number = 65,
+  contourMode: 'BEZIER_SMOOTH' | 'HARD_SURFACE_RDP' | 'ORTHO_POLY' | 'ROUNDED_ADAPTIVE' = 'ROUNDED_ADAPTIVE',
+  curveFidelity: number = 8,
+  roundnessSmooth: number = 2
+): [number, number][] {
+  if (pts.length <= 4) return pts;
+
+  // 1. MODO SILUETA REDONDEADA ADAPTATIVA:
+  // Abraza las zonas redondeadas y curvas con densidad de vértices uniforme y fluida,
+  // manteniendo aristas rectas y esquinas vivas intactas.
+  if (contourMode === 'ROUNDED_ADAPTIVE') {
+    return traceAdaptiveCurvedContour(pts, epsilon, cornerAngle, curveFidelity, roundnessSmooth);
+  }
+
+  // 2. MODO HARD SURFACE / POLÍGONO ORTOGONAL:
+  // Aplicamos Ramer-Douglas-Peucker sin difuminar esquinas para conservar almenas, dientes y entrantes/salientes exactos
+  if (contourMode === 'HARD_SURFACE_RDP' || contourMode === 'ORTHO_POLY') {
+    const targetEps = Math.max(0.001, epsilon);
+    let simplified = simplifyClosedContourRDP(pts, targetEps);
+
+    if (contourMode === 'ORTHO_POLY') {
+      simplified = snapToOrthogonalOrDiagonal(simplified, 0.15);
+    }
+
+    return simplified.length >= 3 ? simplified : pts;
+  }
+
+  // 3. Intentar ajuste armónico de círculo / elipse solo para formas analíticas puras
+  const harmonicShape = tryFitHarmonicCircleOrEllipse(pts);
+  if (harmonicShape) {
+    return harmonicShape;
+  }
+
+  // 4. Vectorización continua mediante ajuste de Curvas Bézier de Schneider (Libre de Dientes de Sierra)
+  try {
+    const smoothedPts = roundnessSmooth > 0 ? smoothPolygon(pts, Math.min(3, roundnessSmooth)) : pts;
+    const bezierCurves = fitBezierCurvesSchneider(smoothedPts, {
+      rdpEpsilon: Math.min(0.003, epsilon * 0.2),
+      maxFittingError: Math.min(0.012, epsilon * 0.8),
+      cornerAngleThresholdDeg: cornerAngle,
+      reparameterizeIterations: 4,
+      closedLoop: true
+    });
+
+    if (bezierCurves.length >= 2) {
+      const vectorPts: [number, number][] = [];
+      const samplesPerCurve = Math.max(3, Math.min(12, Math.round((curveFidelity ?? 8) * 0.8)));
+
+      for (const c of bezierCurves) {
+        for (let s = 0; s < samplesPerCurve; s++) {
+          const t = s / samplesPerCurve;
+          const invT = 1 - t;
+          const invT2 = invT * invT;
+          const invT3 = invT2 * invT;
+          const t2 = t * t;
+          const t3 = t2 * t;
+
+          // Ecuación explícita de curva Bézier cúbica: B(t) = (1-t)³P0 + 3(1-t)²tC1 + 3(1-t)t²C2 + t³P3
+          const bx = invT3 * c.p0[0] + 3 * invT2 * t * c.c1[0] + 3 * invT * t2 * c.c2[0] + t3 * c.p3[0];
+          const by = invT3 * c.p0[1] + 3 * invT2 * t * c.c1[1] + 3 * invT * t2 * c.c2[1] + t3 * c.p3[1];
+
+          vectorPts.push([
+            Math.round(bx * 10000) / 10000,
+            Math.round(by * 10000) / 10000
+          ]);
+        }
+      }
+
+      if (vectorPts.length >= 6) {
+        return vectorPts;
+      }
+    }
+  } catch (err) {
+    console.warn('Fallback en vectorización Bézier:', err);
+  }
+
+  // 5. Fallback: Suavizado Laplaciano robusto y RDP
+  const smoothed = smoothPolygon(pts, Math.max(1, roundnessSmooth));
+  const simplified = simplifyClosedContourRDP(smoothed, Math.max(0.001, epsilon));
+
+  return simplified.length >= 3 ? simplified : pts;
 }
 
 /**
@@ -1607,28 +2089,31 @@ function sampleSilhouetteSDF(sil: ProcessedSilhouette, u: number, v: number, inv
   if (u < -1 || u > 1 || v < -1 || v > 1) {
     const du = Math.max(0, Math.abs(u) - 1);
     const dv = Math.max(0, Math.abs(v) - 1);
-    return Math.hypot(du, dv) + 0.05;
+    return Math.sqrt(du * du + dv * dv) + 0.05;
   }
 
-  // Permutar coordenadas si la silueta superior se detectó en orientación vertical
   const finalU = invertAxis ? v : u;
   const finalV = invertAxis ? u : v;
 
-  const fx = ((finalU + 1) / 2) * (sil.width - 1);
-  const fy = ((1 - finalV) / 2) * (sil.height - 1);
+  const fx = ((finalU + 1) * 0.5) * (sil.width - 1);
+  const fy = ((1 - finalV) * 0.5) * (sil.height - 1);
 
-  const x0 = Math.floor(fx);
-  const x1 = Math.min(sil.width - 1, x0 + 1);
-  const y0 = Math.floor(fy);
-  const y1 = Math.min(sil.height - 1, y0 + 1);
+  const x0 = fx | 0;
+  const x1 = x0 < sil.width - 1 ? x0 + 1 : x0;
+  const y0 = fy | 0;
+  const y1 = y0 < sil.height - 1 ? y0 + 1 : y0;
 
   const tx = fx - x0;
   const ty = fy - y0;
 
-  const s00 = sil.sdf[y0 * sil.width + x0];
-  const s10 = sil.sdf[y0 * sil.width + x1];
-  const s01 = sil.sdf[y1 * sil.width + x0];
-  const s11 = sil.sdf[y1 * sil.width + x1];
+  const w = sil.width;
+  const y0w = y0 * w;
+  const y1w = y1 * w;
+
+  const s00 = sil.sdf[y0w + x0];
+  const s10 = sil.sdf[y0w + x1];
+  const s01 = sil.sdf[y1w + x0];
+  const s11 = sil.sdf[y1w + x1];
 
   const top = s00 + tx * (s10 - s00);
   const bot = s01 + tx * (s11 - s01);
@@ -1654,6 +2139,10 @@ export async function carveModelFromBlueprints(
 
   const viewKeys: BlueprintViewKey[] = ['front', 'top', 'side', 'back', 'bottom'];
   for (const key of viewKeys) {
+    if (options.preprocessedViews && options.preprocessedViews[key]) {
+      processedViews[key] = options.preprocessedViews[key]!;
+      continue;
+    }
     const viewCfg = views[key];
     if (viewCfg && viewCfg.url && viewCfg.enabled) {
       const imgData = await loadCanvasImageData(viewCfg.url, viewCfg);
@@ -1668,8 +2157,8 @@ export async function carveModelFromBlueprints(
     throw new Error('No hay imágenes de referencia válidas o activas para tallar el modelo.');
   }
 
-  // ── MODO 1 & 3: TALLADO VOLUMÉTRICO VISUAL HULL (Marching Cubes + SDF) ──
-  if (mode === 'VISUAL_HULL' || mode === 'SMOOTH_SCULPT') {
+  // ── MODO 1, 3 & 4: TALLADO VOLUMÉTRICO VISUAL HULL (Marching Cubes + SDF + Redondeo/Inflado) ──
+  if (mode === 'VISUAL_HULL' || mode === 'SMOOTH_SCULPT' || mode === 'CUSHION_INFLATION') {
     const res = Math.max(24, Math.min(96, resolution));
     const [dimX, dimY, dimZ] = dimensions;
     const halfX = dimX / 2;
@@ -1685,41 +2174,172 @@ export async function carveModelFromBlueprints(
     const hasBack = !!processedViews.back;
     const hasBottom = !!processedViews.bottom;
 
-    // Verificar si la silueta superior tiene orientación vertical
-    const topSil = processedViews.top;
-    let isTopVerticalLayout = false;
-    if (topSil && topSil.boundsNormalized) {
-      const spanX = topSil.boundsNormalized.maxU - topSil.boundsNormalized.minU;
-      const spanY = topSil.boundsNormalized.maxV - topSil.boundsNormalized.minV;
-      isTopVerticalLayout = spanY > spanX * 1.05;
+    // Parámetros de redondeo y curvatura de superficie
+    const roundness = options.roundness ?? (mode === 'SMOOTH_SCULPT' ? 0.45 : (mode === 'CUSHION_INFLATION' ? 0.65 : 0));
+    const cushionInflation = options.cushionInflation ?? (mode === 'CUSHION_INFLATION' ? 0.70 : (mode === 'SMOOTH_SCULPT' ? 0.35 : 0));
+    const filletK = options.edgeFilletRadius ?? (roundness > 0.01 ? roundness * 0.22 : 0);
+
+    // Función de máximo suavizado (smooth max) para biselar y redondear esquinas e intersecciones
+    const smaxVal = (a: number, b: number, k: number): number => {
+      if (k <= 0.001) return Math.max(a, b);
+      const h = Math.max(k - Math.abs(a - b), 0.0) / k;
+      return Math.max(a, b) + h * h * k * 0.25;
+    };
+
+    const normCoord = new Float32Array(res);
+    for (let i = 0; i < res; i++) {
+      normCoord[i] = ((i / (res - 1)) * 2 - 1);
     }
 
     let idx = 0;
     for (let x = 0; x < res; x++) {
-      const normX = ((x / (res - 1)) * 2 - 1); // [-1, 1]
+      const normX = normCoord[x];
       for (let y = 0; y < res; y++) {
-        const normY = ((y / (res - 1)) * 2 - 1); // [-1, 1]
+        const normY = normCoord[y];
+
+        // Pre-calcular frontal y trasero fijados en (normX, normY)
+        const baseDFront = hasFront ? sampleSilhouetteSDF(processedViews.front!, normX, normY) : -999;
+        const baseDBack = (hasBack && options.views.back?.carveEnabled !== false)
+          ? sampleSilhouetteSDF(processedViews.back!, -normX, normY)
+          : -999;
+
         for (let z = 0; z < res; z++) {
-          const normZ = ((z / (res - 1)) * 2 - 1); // [-1, 1]
+          const normZ = normCoord[z];
 
           let maxDist = -999;
 
-          // Vista Frontal: X -> normX, Y -> normY
-          if (hasFront) {
-            const dFront = sampleSilhouetteSDF(processedViews.front!, normX, normY);
-            if (dFront > maxDist) maxDist = dFront;
+          // Combinar frontal y trasera según su posición Z:
+          // normZ = -1.0 es la PARTE TRASERA (-Z), normZ = +1.0 es la PARTE DELANTERA (+Z)
+          const distFromRear = (normZ + 1.0) / 2.0; // 0.0 en trasera (-Z), 1.0 en delantera (+Z)
+
+          if (hasFront && hasBack && options.views.back?.carveEnabled !== false) {
+            const backCfg = options.views.back;
+            const depthLimit = Math.max(0.05, Math.min(1.0, options.backDepthLimit ?? backCfg?.depthLimit ?? 1.0));
+            if (depthLimit < 0.99) {
+              // La silueta trasera solo actúa en la zona posterior (distFromRear <= depthLimit)
+              maxDist = baseDFront;
+              if (distFromRear <= depthLimit) {
+                const t = Math.max(0, Math.min(1.0, (depthLimit - distFromRear) / 0.15));
+                if (baseDBack > 0) {
+                  const effectiveDBack = baseDBack * t;
+                  if (effectiveDBack > maxDist) maxDist = effectiveDBack;
+                }
+              }
+            } else {
+              // Si ambas vistas están presentes con profundidad completa:
+              // La vista frontal domina en la mitad delantera (normZ > 0)
+              // La vista trasera domina en la mitad trasera (normZ < 0)
+              const frontWeight = Math.max(0, Math.min(1.0, (normZ + 0.3) / 0.6));
+              if (normZ >= 0.2) {
+                maxDist = baseDFront;
+              } else if (normZ <= -0.2) {
+                maxDist = baseDBack;
+              } else {
+                maxDist = baseDFront * frontWeight + baseDBack * (1.0 - frontWeight);
+              }
+            }
+          } else if (hasFront) {
+            maxDist = baseDFront;
+          } else if (hasBack && options.views.back?.carveEnabled !== false) {
+            maxDist = baseDBack;
           }
 
-          // Vista Trasera: X -> -normX, Y -> normY
-          if (hasBack) {
-            const dBack = sampleSilhouetteSDF(processedViews.back!, -normX, normY);
-            if (dBack > maxDist) maxDist = dBack;
+          // Vista Frontal: Zonas de profundidad
+          if (hasFront) {
+            const frontZones = options.views.front?.depthZones || processedViews.front?.depthZones;
+            if (frontZones && frontZones.length > 0) {
+              for (const zone of frontZones) {
+                if (!zone.enabled) continue;
+                const minU = Math.min(zone.x1, zone.x2);
+                const maxU = Math.max(zone.x1, zone.x2);
+                const minV = Math.min(zone.y1, zone.y2);
+                const maxV = Math.max(zone.y1, zone.y2);
+
+                const du = Math.min(normX - minU, maxU - normX);
+                const dv = Math.min(normY - minV, maxV - normY);
+                const dInside = Math.min(du, dv);
+
+                if (dInside > -0.05) {
+                  const bevel = Math.max(0.01, zone.bevelRadius ?? 0.08);
+                  const t = Math.max(0, Math.min(1, (dInside + 0.01) / bevel));
+                  const smoothT = t * t * (3 - 2 * t);
+                  const maxAllowedZ = zone.heightMax * 2 - 1;
+                  const localMaxZ = 1.0 - smoothT * (1.0 - maxAllowedZ);
+                  if (normZ > localMaxZ) {
+                    const excessZ = normZ - localMaxZ;
+                    if (excessZ > maxDist) maxDist = excessZ;
+                  }
+                }
+              }
+            }
           }
 
           // Vista Superior (Planta): X -> normX, Z -> normZ
           if (hasTop) {
-            const dTop = sampleSilhouetteSDF(processedViews.top!, normX, normZ, isTopVerticalLayout);
+            const dTop = sampleSilhouetteSDF(processedViews.top!, normX, normZ);
             if (dTop > maxDist) maxDist = dTop;
+
+            // EVALUACIÓN DE ZONAS DE ALTURA / CAVIDADES
+            const topZones = options.views.top?.depthZones || processedViews.top?.depthZones;
+            if (topZones && topZones.length > 0) {
+              const u = normX;
+              const v = normZ;
+              for (const zone of topZones) {
+                if (!zone.enabled) continue;
+                const minU = Math.min(zone.x1, zone.x2);
+                const maxU = Math.max(zone.x1, zone.x2);
+                const minV = Math.min(zone.y1, zone.y2);
+                const maxV = Math.max(zone.y1, zone.y2);
+
+                const du = Math.min(u - minU, maxU - u);
+                const dv = Math.min(v - minV, maxV - v);
+                const dInside = Math.min(du, dv);
+
+                if (dInside > -0.05) {
+                  const bevel = Math.max(0.01, zone.bevelRadius ?? 0.08);
+                  const t = Math.max(0, Math.min(1, (dInside + 0.01) / bevel));
+                  const smoothT = t * t * (3 - 2 * t);
+
+                  const maxAllowedY = zone.heightMax * 2 - 1;
+                  const localMaxY = 1.0 - smoothT * (1.0 - maxAllowedY);
+
+                  if (normY > localMaxY) {
+                    const excessY = normY - localMaxY;
+                    if (excessY > maxDist) maxDist = excessY;
+                  }
+
+                  if (zone.heightMin && zone.heightMin > 0) {
+                    const minAllowedY = zone.heightMin * 2 - 1;
+                    const localMinY = -1.0 + smoothT * (minAllowedY - (-1.0));
+                    if (normY < localMinY) {
+                      const underY = localMinY - normY;
+                      if (underY > maxDist) maxDist = underY;
+                    }
+                  }
+                }
+              }
+            }
+
+            // RELIEVE CONTINUO POR MAPA DE ALTURAS
+            const topHeightmap = processedViews.top?.heightmap;
+            const topHeightStrength = options.views.top?.heightmapStrength ?? processedViews.top?.heightmapStrength;
+            if (topHeightmap && topHeightStrength && topHeightStrength > 0) {
+              const u = normX;
+              const v = normZ;
+              const pW = processedViews.top!.width;
+              const pH = processedViews.top!.height;
+              const fx = Math.floor(((u + 1) / 2) * (pW - 1));
+              const fy = Math.floor(((1 - v) / 2) * (pH - 1));
+              if (fx >= 0 && fx < pW && fy >= 0 && fy < pH) {
+                const hNorm = topHeightmap[fy * pW + fx];
+                const strength = topHeightStrength / 100;
+                const targetY = 1.0 - (1.0 - hNorm) * strength * 1.4;
+                if (normY > targetY) {
+                  const dRelief = normY - targetY;
+                  if (dRelief > maxDist) maxDist = dRelief;
+                }
+              }
+            }
           }
 
           // Vista Inferior: X -> normX, Z -> -normZ
@@ -1732,13 +2352,80 @@ export async function carveModelFromBlueprints(
           if (hasSide) {
             const dSide = sampleSilhouetteSDF(processedViews.side!, normZ, normY);
             if (dSide > maxDist) maxDist = dSide;
+
+            // Zonas de profundidad en vista lateral (restringen eje X de anchura)
+            const sideZones = options.views.side?.depthZones || processedViews.side?.depthZones;
+            if (sideZones && sideZones.length > 0) {
+              for (const zone of sideZones) {
+                if (!zone.enabled) continue;
+                const minU = Math.min(zone.x1, zone.x2);
+                const maxU = Math.max(zone.x1, zone.x2);
+                const minV = Math.min(zone.y1, zone.y2);
+                const maxV = Math.max(zone.y1, zone.y2);
+
+                const du = Math.min(normZ - minU, maxU - normZ);
+                const dv = Math.min(normY - minV, maxV - normY);
+                const dInside = Math.min(du, dv);
+
+                if (dInside > -0.05) {
+                  const bevel = Math.max(0.01, zone.bevelRadius ?? 0.08);
+                  const t = Math.max(0, Math.min(1, (dInside + 0.01) / bevel));
+                  const smoothT = t * t * (3 - 2 * t);
+                  const maxAllowedX = zone.heightMax * 2 - 1;
+                  const localMaxX = 1.0 - smoothT * (1.0 - maxAllowedX);
+                  if (normX > localMaxX) {
+                    const excessX = normX - localMaxX;
+                    if (excessX > maxDist) maxDist = excessX;
+                  }
+                }
+              }
+            }
           }
 
-          // Confinamiento estricto en el cubo [-1, 1] para que las extrusiones de 1 o más vistas
-          // generen tapas finales sólidas y modelos 100% cerrados/estancos
-          const boxLimitDist = Math.max(Math.abs(normX) - 0.96, Math.abs(normY) - 0.96, Math.abs(normZ) - 0.96);
-          if (boxLimitDist > maxDist) {
+          // Confinamiento en el cubo [-1, 1] o caja redondeada continua
+          let boxLimitDist: number;
+          if (filletK > 0.01 || roundness > 0.01) {
+            const r = Math.min(0.38, Math.max(0.04, filletK * 1.4 + roundness * 0.18));
+            const bX = 0.96 - r, bY = 0.96 - r, bZ = 0.96 - r;
+            const qx = Math.abs(normX) - bX;
+            const qy = Math.abs(normY) - bY;
+            const qz = Math.abs(normZ) - bZ;
+            const ox = Math.max(qx, 0);
+            const oy = Math.max(qy, 0);
+            const oz = Math.max(qz, 0);
+            boxLimitDist = Math.sqrt(ox * ox + oy * oy + oz * oz) + Math.min(Math.max(qx, Math.max(qy, qz)), 0) - r;
+          } else {
+            boxLimitDist = Math.max(Math.abs(normX) - 0.96, Math.abs(normY) - 0.96, Math.abs(normZ) - 0.96);
+          }
+
+          if (filletK > 0.01 && maxDist > -900) {
+            maxDist = smaxVal(maxDist, boxLimitDist, filletK);
+          } else if (boxLimitDist > maxDist) {
             maxDist = boxLimitDist;
+          }
+
+          // Abombado de silueta para tapicería / cojín (redondea el espesor en Z hacia los bordes)
+          if (cushionInflation > 0.01 && hasFront && !hasSide) {
+            const inDist = Math.max(0, -sampleSilhouetteSDF(processedViews.front!, normX, normY));
+            const domeR = Math.max(0.05, 0.48 * cushionInflation);
+            const u = Math.min(1.0, inDist / domeR);
+            const zTaper = Math.sqrt(Math.max(0, 1.0 - (1.0 - u) * (1.0 - u)));
+            const allowedZ = 0.95 * ((1.0 - cushionInflation * 0.72) + (cushionInflation * 0.72) * zTaper);
+            const zExcess = Math.abs(normZ) - allowedZ;
+            if (zExcess > 0) {
+              maxDist = smaxVal(maxDist, zExcess, Math.max(0.06, filletK * 1.5));
+            }
+          }
+
+          // Abombado convexo interior (sensación de tapizado o espuma acolchada)
+          if (cushionInflation > 0.01) {
+            const dInFront = hasFront ? Math.max(0, -sampleSilhouetteSDF(processedViews.front!, normX, normY)) : 0;
+            if (dInFront > 0.02) {
+              const bulgeFactor = Math.sin(Math.min(1.0, dInFront * 3.2) * Math.PI * 0.5);
+              const zWeight = Math.max(0, 1.0 - (Math.abs(normZ) / 0.96) ** 2);
+              const bulge = bulgeFactor * zWeight * cushionInflation * 0.16;
+              maxDist -= bulge;
+            }
           }
 
           if (mode === 'SMOOTH_SCULPT') {
@@ -1751,25 +2438,37 @@ export async function carveModelFromBlueprints(
       }
     }
 
+    const effectiveSmoothIters = (mode === 'SMOOTH_SCULPT' || mode === 'CUSHION_INFLATION' || options.topologyMode === 'CUSHION_UPHOLSTERY' || options.topologyMode === 'ROUNDED_ORGANIC')
+      ? Math.max(smoothIterations, 5)
+      : smoothIterations;
+
     const mesh = marchingCubes(scalarField, res, res, res, {
       isolevel: 0.0,
       boundsMin: [-halfX, -halfY, -halfZ],
       boundsMax: [halfX, halfY, halfZ],
-      smoothIterations: mode === 'SMOOTH_SCULPT' ? Math.max(3, smoothIterations) : smoothIterations,
-      smoothFactor: smoothFactor
+      smoothIterations: effectiveSmoothIters,
+      smoothFactor: smoothFactor,
+      laplacianRounding: roundness > 0.05 || cushionInflation > 0.05 || mode === 'CUSHION_INFLATION',
+      roundness: roundness
     });
 
     if (mesh.vertices.length === 0) {
       throw new Error('Las siluetas no se solapan en el espacio 3D. Prueba a ajustar el umbral o la alineación.');
     }
 
-    const optimized = optimizeBlueprintMeshTopology(mesh, {
-      mode: options.topologyMode || 'PLANAR_POLISHED',
-      snapToPlanes: options.snapToPlanes !== false,
+    let optimized = optimizeBlueprintMeshTopology(mesh, {
+      mode: options.topologyMode || (mode === 'CUSHION_INFLATION' ? 'CUSHION_UPHOLSTERY' : 'PLANAR_POLISHED'),
+      snapToPlanes: (options.topologyMode === 'CUSHION_UPHOLSTERY' || options.topologyMode === 'ROUNDED_ORGANIC') ? false : (options.snapToPlanes !== false),
       planarAngleToleranceDeg: options.planarAngleToleranceDeg || 18,
       decimationRatio: options.decimationRatio ?? 0.65,
-      featureAngleDeg: options.featureAngleDeg || 35
+      featureAngleDeg: options.featureAngleDeg || 35,
+      roundness: roundness,
+      relaxIterations: options.topologyMode === 'ROUNDED_ORGANIC' ? 12 : (options.topologyMode === 'CUSHION_UPHOLSTERY' ? 8 : undefined)
     });
+
+    if (options.subdivisionLevel && options.subdivisionLevel >= 1) {
+      optimized = subdivideMeshSmooth(optimized, 0.05 + roundness * 0.06);
+    }
 
     return optimized;
   }
@@ -2468,7 +3167,7 @@ export function safePreservingDecimateMesh(
     if (i0 === i1 || i1 === i2 || i2 === i0) continue;
     finalFaces.push({
       indices: [i0, i1, i2],
-      uvs: f.uvs,
+      uvs: f.uvs ? [...f.uvs] : undefined,
       materialIndex: f.materialIndex
     });
   }
@@ -2503,7 +3202,106 @@ export function safePreservingDecimateMesh(
 }
 
 /**
+ * Subdivide y suaviza una malla 3D aplicando curvatura continua tangencial (estilo PN-Triangles / Loop).
+ * Ideal para transformar extrusiones angulares o faceteadas en superficies suaves, pulidas y continuas.
+ */
+export function subdivideMeshSmooth(
+  mesh: { vertices: V3[]; faces: MeshFace[] },
+  curvaturePush: number = 0.08
+): { vertices: V3[]; faces: MeshFace[] } {
+  if (!mesh || !mesh.faces || mesh.faces.length === 0 || mesh.vertices.length > 25000) {
+    return mesh; // Limitar si la malla ya tiene altísima densidad para preservar rendimiento
+  }
+
+  const origVerts = mesh.vertices;
+  const numOrigVerts = origVerts.length;
+
+  // 1. Calcular normales de vértices originales
+  const vertNormals: [number, number, number][] = Array.from({ length: numOrigVerts }, () => [0, 0, 0]);
+  for (const f of mesh.faces) {
+    const [i0, i1, i2] = f.indices;
+    const v0 = origVerts[i0], v1 = origVerts[i1], v2 = origVerts[i2];
+    const ax = v1[0] - v0[0], ay = v1[1] - v0[1], az = v1[2] - v0[2];
+    const bx = v2[0] - v0[0], by = v2[1] - v0[1], bz = v2[2] - v0[2];
+    const nx = ay * bz - az * by;
+    const ny = az * bx - ax * bz;
+    const nz = ax * by - ay * bx;
+    vertNormals[i0][0] += nx; vertNormals[i0][1] += ny; vertNormals[i0][2] += nz;
+    vertNormals[i1][0] += nx; vertNormals[i1][1] += ny; vertNormals[i1][2] += nz;
+    vertNormals[i2][0] += nx; vertNormals[i2][1] += ny; vertNormals[i2][2] += nz;
+  }
+  for (let i = 0; i < numOrigVerts; i++) {
+    const [nx, ny, nz] = vertNormals[i];
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1e-7;
+    vertNormals[i] = [nx / len, ny / len, nz / len];
+  }
+
+  // 2. Crear vértices divididos en aristas
+  const newVerts: V3[] = origVerts.map(v => [v[0], v[1], v[2]]);
+  const edgeMap = new Map<string, number>();
+
+  const getEdgeMidpoint = (idxA: number, idxB: number): number => {
+    const key = idxA < idxB ? `${idxA}_${idxB}` : `${idxB}_${idxA}`;
+    const existing = edgeMap.get(key);
+    if (existing !== undefined) return existing;
+
+    const vA = origVerts[idxA];
+    const vB = origVerts[idxB];
+    const nA = vertNormals[idxA];
+    const nB = vertNormals[idxB];
+
+    const midX = (vA[0] + vB[0]) * 0.5;
+    const midY = (vA[1] + vB[1]) * 0.5;
+    const midZ = (vA[2] + vB[2]) * 0.5;
+
+    const avgNx = (nA[0] + nB[0]) * 0.5;
+    const avgNy = (nA[1] + nB[1]) * 0.5;
+    const avgNz = (nA[2] + nB[2]) * 0.5;
+    const nLen = Math.sqrt(avgNx * avgNx + avgNy * avgNy + avgNz * avgNz) || 1e-7;
+
+    const dx = vB[0] - vA[0], dy = vB[1] - vA[1], dz = vB[2] - vA[2];
+    const edgeLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const push = curvaturePush * edgeLen * 0.25;
+
+    const newIdx = newVerts.length;
+    newVerts.push([
+      midX + (avgNx / nLen) * push,
+      midY + (avgNy / nLen) * push,
+      midZ + (avgNz / nLen) * push
+    ]);
+    edgeMap.set(key, newIdx);
+    return newIdx;
+  };
+
+  const newFaces: MeshFace[] = [];
+  for (const f of mesh.faces) {
+    const [i0, i1, i2] = f.indices;
+    const m01 = getEdgeMidpoint(i0, i1);
+    const m12 = getEdgeMidpoint(i1, i2);
+    const m20 = getEdgeMidpoint(i2, i0);
+
+    const uv0 = f.uvs?.[0] || [0.5, 0.5];
+    const uv1 = f.uvs?.[1] || [0.5, 0.5];
+    const uv2 = f.uvs?.[2] || [0.5, 0.5];
+
+    const uv01: [number, number] = [(uv0[0] + uv1[0]) * 0.5, (uv0[1] + uv1[1]) * 0.5];
+    const uv12: [number, number] = [(uv1[0] + uv2[0]) * 0.5, (uv1[1] + uv2[1]) * 0.5];
+    const uv20: [number, number] = [(uv2[0] + uv0[0]) * 0.5, (uv2[1] + uv0[1]) * 0.5];
+
+    newFaces.push({ indices: [i0, m01, m20], uvs: [uv0, uv01, uv20], materialIndex: f.materialIndex });
+    newFaces.push({ indices: [i1, m12, m01], uvs: [uv1, uv12, uv01], materialIndex: f.materialIndex });
+    newFaces.push({ indices: [i2, m20, m12], uvs: [uv2, uv20, uv12], materialIndex: f.materialIndex });
+    newFaces.push({ indices: [m01, m12, m20], uvs: [uv01, uv12, uv20], materialIndex: f.materialIndex });
+  }
+
+  return { vertices: newVerts, faces: newFaces };
+}
+
+/**
  * Optimiza profundamente la topología y geometría generada a partir de bocetos y Marching Cubes:
+ * - CUSHION_UPHOLSTERY: Tapizado curvo para sofás, asientos y cojines con relajación tangencial y sin aplanado forzado.
+ * - ROUNDED_ORGANIC: Redondeo esferoidal profundo para figuras suaves, juguetes, personajes y peluches.
+ * - CURVED_FILLET: Conserva la forma general pero redondea todas las aristas vivas e intersecciones.
  * - LOW_POLY: Disolución coplanar + decimación proporcional profunda para modelos Game-Ready súper limpios.
  * - PLANAR_POLISHED: Detección y proyección estricta sobre planos matemáticos, ajuste nítido de aristas de intersección (creases) y disolución coplanar (Limited Dissolve).
  * - UNIFORM_ISOTROPIC: Suavizado laplaciano multicapa (Taubin) que preserva volumen y relaja tangencialmente los vértices para una superficie orgánica y continua.
@@ -2519,6 +3317,7 @@ export function optimizeBlueprintMeshTopology(
     relaxIterations?: number;
     decimationRatio?: number;
     featureAngleDeg?: number;
+    roundness?: number;
   } = {}
 ): { vertices: V3[]; faces: MeshFace[] } {
   if (!rawMesh || !rawMesh.vertices || rawMesh.vertices.length === 0 || rawMesh.faces.length === 0) {
@@ -2530,10 +3329,17 @@ export function optimizeBlueprintMeshTopology(
     return rawMesh;
   }
 
-  const snapToPlanes = options.snapToPlanes !== false;
+  const isOrganic = mode === 'CUSHION_UPHOLSTERY' || mode === 'ROUNDED_ORGANIC';
+  const snapToPlanes = isOrganic ? false : (options.snapToPlanes !== false);
   const planarAngleTol = (options.planarAngleToleranceDeg || 16) * (Math.PI / 180);
   const cosPlanarAngleTol = Math.cos(planarAngleTol);
-  const relaxIterations = options.relaxIterations ?? (mode === 'UNIFORM_ISOTROPIC' ? 5 : (mode === 'LOW_POLY' ? 0 : 2));
+  const relaxIterations = options.relaxIterations ?? (
+    mode === 'ROUNDED_ORGANIC' ? 12 :
+    mode === 'CUSHION_UPHOLSTERY' ? 8 :
+    mode === 'CURVED_FILLET' ? 4 :
+    mode === 'UNIFORM_ISOTROPIC' ? 5 :
+    mode === 'LOW_POLY' ? 0 : 2
+  );
 
   // 1. Clonar estructura y calcular bounding box
   let verts: V3[] = rawMesh.vertices.map(v => [v[0], v[1], v[2]]);
@@ -2787,8 +3593,9 @@ export function optimizeBlueprintMeshTopology(
     }
   }
 
-  // ── PASO 5: RELAJACIÓN ISOTRÓPICA (Solo para UNIFORM_ISOTROPIC o modo suave) ──
-  if (relaxIterations > 0 && mode === 'UNIFORM_ISOTROPIC') {
+  // ── PASO 5: RELAJACIÓN ISOTRÓPICA Y REDONDEO DE SUPERFICIE ──
+  const isRoundedMode = mode === 'UNIFORM_ISOTROPIC' || mode === 'CUSHION_UPHOLSTERY' || mode === 'ROUNDED_ORGANIC' || mode === 'CURVED_FILLET';
+  if (relaxIterations > 0 && isRoundedMode) {
     const vertNeighbors: Set<number>[] = Array.from({ length: verts.length }, () => new Set());
     const vertNormals: [number, number, number][] = Array.from({ length: verts.length }, () => [0, 0, 0]);
 
@@ -2813,7 +3620,7 @@ export function optimizeBlueprintMeshTopology(
       vertNormals[i] = [nx / len, ny / len, nz / len];
     }
 
-    const factor = 0.45;
+    const factor = mode === 'ROUNDED_ORGANIC' ? 0.58 : (mode === 'CUSHION_UPHOLSTERY' ? 0.52 : (mode === 'CURVED_FILLET' ? 0.48 : 0.45));
 
     for (let iter = 0; iter < relaxIterations; iter++) {
       const nextVerts: V3[] = [];
@@ -2859,7 +3666,7 @@ export function optimizeBlueprintMeshTopology(
  */
 export function generateBlueprintUVs(
   obj: { vertices: V3[]; faces: MeshFace[] },
-  viewKey: 'front' | 'side' | 'top' | 'auto' = 'auto',
+  viewKey: 'front' | 'side' | 'top' | 'back' | 'auto' = 'auto',
   customDimensions?: V3,
   viewConfig?: BlueprintImageConfig,
   _boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number }
@@ -2883,6 +3690,7 @@ export function generateBlueprintUVs(
   const flipH = viewConfig?.texFlipH ?? false;
   const flipV = viewConfig?.texFlipV ?? false;
   const mirrorOpposite = viewConfig?.texMirrorOpposite ?? false;
+  const projectBothSides = (viewConfig?.texProjectBothSides ?? false) || (viewConfig?.texMirrorOpposite ?? false);
 
   const faces = obj.faces.map(face => {
     if (!face || !face.indices || face.indices.length < 3) return face;
@@ -2923,28 +3731,60 @@ export function generateBlueprintUVs(
       let rawV = 0.5;
 
       if (viewKey === 'side') {
-        let pzNorm = z / halfZ;
-        let pyNorm = y / halfY;
-        if (mirrorOpposite && normalX < 0) {
-          pzNorm = -pzNorm;
+        if (!projectBothSides && normalX > 0.05) {
+          rawU = 0.001;
+          rawV = 0.001;
+        } else {
+          let pzNorm = z / halfZ;
+          let pyNorm = y / halfY;
+          if (mirrorOpposite && normalX < 0) {
+            pzNorm = -pzNorm;
+          }
+          rawU = (pzNorm + 1.0) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
         }
-        rawU = (1 - pzNorm) / 2;
-        rawV = (pyNorm + 1) / 2;
 
       } else if (viewKey === 'top') {
-        let pxNorm = x / halfX;
-        let pzNorm = z / halfZ;
-        rawU = (pxNorm + 1) / 2;
-        rawV = normalY >= 0 ? (1 - pzNorm) / 2 : (pzNorm + 1) / 2;
+        if (!projectBothSides && normalY <= -0.05) {
+          rawU = 0.001;
+          rawV = 0.001;
+        } else {
+          let pxNorm = x / halfX;
+          let pzNorm = z / halfZ;
+          rawU = (pxNorm + 1.0) / 2.0;
+          rawV = (pzNorm + 1.0) / 2.0;
+        }
 
       } else if (viewKey === 'front') {
-        let pxNorm = x / halfX;
-        let pyNorm = y / halfY;
-        if (mirrorOpposite && normalZ < 0) {
-          pxNorm = -pxNorm;
+        // Proyección Frontal (modelo en -Z): caras delanteras tienen normalZ <= -0.05
+        if (!projectBothSides && normalZ >= 0.05) {
+          rawU = 0.001;
+          rawV = 0.001;
+        } else {
+          let pxNorm = x / halfX;
+          let pyNorm = y / halfY;
+          if (mirrorOpposite && normalZ > 0) {
+            pxNorm = -pxNorm;
+          }
+          rawU = (pxNorm + 1.0) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
         }
-        rawU = (pxNorm + 1) / 2;
-        rawV = (pyNorm + 1) / 2;
+
+      } else if (viewKey === 'back') {
+        // Proyección Trasera (modelo en +Z): caras traseras tienen normalZ >= 0.05
+        if (!projectBothSides && normalZ <= -0.05) {
+          rawU = 0.001;
+          rawV = 0.001;
+        } else {
+          let pxNorm = x / halfX;
+          let pyNorm = y / halfY;
+          if (mirrorOpposite && normalZ < 0) {
+            pxNorm = -pxNorm;
+          }
+          // Mirando desde atrás (+Z a -Z), el eje +X está a la izquierda
+          rawU = (1.0 - pxNorm) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
+        }
 
       } else {
         // Modo Auto / Triplanar Ortográfico
@@ -2952,20 +3792,43 @@ export function generateBlueprintUVs(
           let pzNorm = z / halfZ;
           let pyNorm = y / halfY;
           if (mirrorOpposite && normalX < 0) pzNorm = -pzNorm;
-          rawU = (1 - pzNorm) / 2;
-          rawV = (pyNorm + 1) / 2;
+          rawU = (pzNorm + 1.0) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
         } else if (absY >= absX && absY >= absZ) {
           let pxNorm = x / halfX;
           let pzNorm = z / halfZ;
-          rawU = (pxNorm + 1) / 2;
-          rawV = normalY >= 0 ? (1 - pzNorm) / 2 : (pzNorm + 1) / 2;
-        } else {
+          rawU = (pxNorm + 1.0) / 2.0;
+          rawV = (pzNorm + 1.0) / 2.0;
+        } else if (normalZ < 0) {
+          // Frontal (-Z)
           let pxNorm = x / halfX;
           let pyNorm = y / halfY;
-          if (mirrorOpposite && normalZ < 0) pxNorm = -pxNorm;
-          rawU = (pxNorm + 1) / 2;
-          rawV = (pyNorm + 1) / 2;
+          if (mirrorOpposite) pxNorm = -pxNorm;
+          rawU = (pxNorm + 1.0) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
+        } else {
+          // Trasera (+Z)
+          let pxNorm = x / halfX;
+          let pyNorm = y / halfY;
+          if (mirrorOpposite) pxNorm = -pxNorm;
+          rawU = (1.0 - pxNorm) / 2.0;
+          rawV = (pyNorm + 1.0) / 2.0;
         }
+      }
+
+      // Soportar rotación en pasos de 90°
+      const rot = ((viewConfig?.rotation ?? 0) % 360 + 360) % 360;
+      if (rot === 90) {
+        const temp = rawU;
+        rawU = rawV;
+        rawV = 1.0 - temp;
+      } else if (rot === 180) {
+        rawU = 1.0 - rawU;
+        rawV = 1.0 - rawV;
+      } else if (rot === 270) {
+        const temp = rawU;
+        rawU = 1.0 - rawV;
+        rawV = temp;
       }
 
       // Aplicar transformaciones de usuario (Escala centrada y Desplazamiento)
@@ -3137,24 +4000,6 @@ function createExtrudedContourGeo(
  * Generador de Presets Geométricos para calibración y testeo del motor CSG / Visual Hull
  */
 export const GEOMETRIC_PRESETS = {
-  CUBO: {
-    id: "CUBO",
-    name: "Cubo Perfecto",
-    description: "Cubo simétrico 1×1×1 para calibración geométrica básica y pruebas de alineación.",
-    dimensions: [2.0, 2.0, 2.0] as [number, number, number],
-    draw: (ctx: CanvasRenderingContext2D, view: 'front' | 'side' | 'top', W: number, H: number) => {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#0f172a';
-      const padX = W * 0.2;
-      const padY = H * 0.2;
-      ctx.fillRect(padX, padY, W - 2 * padX, H - 2 * padY);
-      // Rejilla técnica de referencia
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 4;
-      ctx.strokeRect(padX, padY, W - 2 * padX, H - 2 * padY);
-    }
-  },
   CILINDRO: {
     id: "CILINDRO",
     name: "Cilindro Mecánico",
@@ -3182,108 +4027,6 @@ export const GEOMETRIC_PRESETS = {
         ctx.strokeRect(padX, padY, W - 2 * padX, H - 2 * padY);
       }
     }
-  },
-  ESFERA: {
-    id: "ESFERA",
-    name: "Esfera / Domo Ortográfico",
-    description: "Círculos concéntricos en las 3 vistas para validar reconstrucción suave 3D de esferoides.",
-    dimensions: [2.0, 2.0, 2.0] as [number, number, number],
-    draw: (ctx: CanvasRenderingContext2D, _view: 'front' | 'side' | 'top', W: number, H: number) => {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(W / 2, H / 2, W * 0.32, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#818cf8';
-      ctx.lineWidth = 4;
-      ctx.stroke();
-    }
-  },
-  RAMPA: {
-    id: "RAMPA",
-    name: "Prisma Triangular / Rampa",
-    description: "Triángulo en vista lateral y rectángulos en frontal y superior para probar biselados.",
-    dimensions: [2.0, 1.6, 2.4] as [number, number, number],
-    draw: (ctx: CanvasRenderingContext2D, view: 'front' | 'side' | 'top', W: number, H: number) => {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#0f172a';
-      if (view === 'side') {
-        // Triángulo rectángulo
-        ctx.beginPath();
-        ctx.moveTo(W * 0.15, H * 0.85);
-        ctx.lineTo(W * 0.85, H * 0.85);
-        ctx.lineTo(W * 0.15, H * 0.15);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 4;
-        ctx.stroke();
-      } else {
-        const padX = W * 0.15;
-        const padY = H * 0.15;
-        ctx.fillRect(padX, padY, W - 2 * padX, H - 2 * padY);
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 4;
-        ctx.strokeRect(padX, padY, W - 2 * padX, H - 2 * padY);
-      }
-    }
-  },
-  VEHICULO: {
-    id: "VEHICULO",
-    name: "Carrocería de Vehículo",
-    description: "Boceto ortográfico simplificado de automóvil con cabina, capó y proporciones reales.",
-    dimensions: [1.8, 1.4, 3.8] as [number, number, number],
-    draw: (ctx: CanvasRenderingContext2D, view: 'front' | 'side' | 'top', W: number, H: number) => {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#0f172a';
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 4;
-
-      if (view === 'side') {
-        // Perfil de carrocería con cabina inclinada y frontal bajo
-        ctx.beginPath();
-        ctx.moveTo(W * 0.08, H * 0.65); // Paragolpes trasero
-        ctx.lineTo(W * 0.22, H * 0.65); // Maletero
-        ctx.lineTo(W * 0.35, H * 0.38); // Luna trasera
-        ctx.lineTo(W * 0.65, H * 0.38); // Techo
-        ctx.lineTo(W * 0.78, H * 0.58); // Parabrisas delantero
-        ctx.lineTo(W * 0.94, H * 0.60); // Capó
-        ctx.lineTo(W * 0.94, H * 0.76); // Morro
-        ctx.lineTo(W * 0.08, H * 0.76); // Bajos
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      } else if (view === 'front') {
-        // Frontal con cabina estrechada
-        ctx.beginPath();
-        ctx.moveTo(W * 0.15, H * 0.75);
-        ctx.lineTo(W * 0.85, H * 0.75);
-        ctx.lineTo(W * 0.85, H * 0.55);
-        ctx.lineTo(W * 0.72, H * 0.38); // Techo estrecho
-        ctx.lineTo(W * 0.28, H * 0.38);
-        ctx.lineTo(W * 0.15, H * 0.55);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      } else {
-        // Vista superior (planta): silueta aerodinámica
-        ctx.beginPath();
-        ctx.moveTo(W * 0.22, H * 0.12);
-        ctx.lineTo(W * 0.78, H * 0.12);
-        ctx.lineTo(W * 0.88, H * 0.30);
-        ctx.lineTo(W * 0.88, H * 0.75);
-        ctx.lineTo(W * 0.78, H * 0.90);
-        ctx.lineTo(W * 0.22, H * 0.90);
-        ctx.lineTo(W * 0.12, H * 0.75);
-        ctx.lineTo(W * 0.12, H * 0.30);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      }
-    }
   }
 };
 
@@ -3297,7 +4040,7 @@ export function generatePresetImageDataUrls(presetKey: keyof typeof GEOMETRIC_PR
   dimensions: [number, number, number];
   name: string;
 } {
-  const preset = GEOMETRIC_PRESETS[presetKey] || GEOMETRIC_PRESETS.CUBO;
+  const preset = GEOMETRIC_PRESETS[presetKey] || GEOMETRIC_PRESETS.CILINDRO;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
@@ -3343,7 +4086,10 @@ export function drawBlueprintPreview(
   selectionBox: { x1: number; y1: number; x2: number; y2: number } | null = null,
   showSymmetryGuides: boolean = true,
   ghostOverlays: GhostOverlayData[] = [],
-  laserOptions?: { enabled: boolean; position: number; viewKey?: 'front' | 'side' | 'top'; silhouetteOpacity?: number }
+  laserOptions?: { enabled: boolean; position: number; viewKey?: 'front' | 'side' | 'top'; silhouetteOpacity?: number },
+  depthZones?: BlueprintDepthZone[],
+  selectedDepthZoneId?: string | null,
+  activeDrawingDepthZone?: { x1: number; y1: number; x2: number; y2: number } | null
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -3505,7 +4251,7 @@ export function drawBlueprintPreview(
     processed.contours.forEach((loop, loopIdx) => {
       if (loop.length < 2) return;
 
-      // Trazo de línea del contorno
+      // Trazo de línea del contorno vectorial: segmentos rectos exactos que unen cada punto de control
       ctx.save();
       ctx.strokeStyle = isEditPointsMode ? '#38bdf8' : '#ffffff';
       ctx.lineWidth = Math.max(1.2, (isEditPointsMode ? 2.5 : 1.8) / zoom);
@@ -3523,43 +4269,49 @@ export function drawBlueprintPreview(
       ctx.stroke();
       ctx.restore();
 
-      // Puntos de control interactivos
-      const step = isEditPointsMode ? 1 : 4;
-      for (let ptIdx = 0; ptIdx < loop.length; ptIdx += step) {
-        const [cx, cy] = toCanvas(loop[ptIdx][0], loop[ptIdx][1]);
-        const isSingleSelected = selectedPointInfo && selectedPointInfo.loopIdx === loopIdx && selectedPointInfo.ptIdx === ptIdx;
-        const isMultiSelected = multiSelectedPoints.some(p => p.loopIdx === loopIdx && p.ptIdx === ptIdx);
-        const isSelected = isSingleSelected || isMultiSelected;
-        const isHovered = hoveredPointInfo && hoveredPointInfo.loopIdx === loopIdx && hoveredPointInfo.ptIdx === ptIdx;
+      // Puntos de control interactivos (anchor points limpios y esenciales)
+      // Solo se dibujan en modo edición de puntos o cuando hay selección/hover
+      const shouldDrawPoints = isEditPointsMode || selectedPointInfo || multiSelectedPoints.length > 0 || hoveredPointInfo;
+      if (shouldDrawPoints) {
+        for (let ptIdx = 0; ptIdx < loop.length; ptIdx++) {
+          const [cx, cy] = toCanvas(loop[ptIdx][0], loop[ptIdx][1]);
+          const isSingleSelected = selectedPointInfo && selectedPointInfo.loopIdx === loopIdx && selectedPointInfo.ptIdx === ptIdx;
+          const isMultiSelected = multiSelectedPoints.some(p => p.loopIdx === loopIdx && p.ptIdx === ptIdx);
+          const isSelected = isSingleSelected || isMultiSelected;
+          const isHovered = hoveredPointInfo && hoveredPointInfo.loopIdx === loopIdx && hoveredPointInfo.ptIdx === ptIdx;
 
-        ctx.save();
-        ctx.beginPath();
-        // Radio escalado inversamente a zoom pero con límites visibles en pantalla
-        const baseRadius = isSelected ? 6.5 : isHovered ? 5.5 : isEditPointsMode ? 4.2 : 2.5;
-        const ptRadius = Math.max(2.0, baseRadius / zoom);
-        ctx.arc(cx, cy, ptRadius, 0, Math.PI * 2);
+          // Si no está en modo edición, solo dibujar si está seleccionado o hovered
+          if (!isEditPointsMode && !isSelected && !isHovered) continue;
 
-        if (isSelected) {
-          ctx.fillStyle = '#f59e0b'; // Dorado ámbar brillante
-          ctx.shadowColor = '#fbbf24';
-          ctx.shadowBlur = 10 / zoom;
-        } else if (isHovered) {
-          ctx.fillStyle = '#38bdf8'; // Celeste hover
-          ctx.shadowColor = '#0284c7';
-          ctx.shadowBlur = 8 / zoom;
-        } else if (isEditPointsMode) {
-          ctx.fillStyle = '#0284c7'; // Azul cian editable
-          ctx.shadowColor = 'rgba(0,0,0,0.6)';
-          ctx.shadowBlur = 3 / zoom;
-        } else {
-          ctx.fillStyle = color;
+          ctx.save();
+          ctx.beginPath();
+          // Radio escalado inversamente a zoom pero con límites visibles en pantalla
+          const baseRadius = isSelected ? 6.5 : isHovered ? 5.5 : 4.2;
+          const ptRadius = Math.max(2.0, baseRadius / zoom);
+          ctx.arc(cx, cy, ptRadius, 0, Math.PI * 2);
+
+          if (isSelected) {
+            ctx.fillStyle = '#f59e0b'; // Dorado ámbar brillante
+            ctx.shadowColor = '#fbbf24';
+            ctx.shadowBlur = 10 / zoom;
+          } else if (isHovered) {
+            ctx.fillStyle = '#38bdf8'; // Celeste hover
+            ctx.shadowColor = '#0284c7';
+            ctx.shadowBlur = 8 / zoom;
+          } else if (isEditPointsMode) {
+            ctx.fillStyle = '#0284c7'; // Azul cian editable
+            ctx.shadowColor = 'rgba(0,0,0,0.6)';
+            ctx.shadowBlur = 3 / zoom;
+          } else {
+            ctx.fillStyle = color;
+          }
+          ctx.fill();
+
+          ctx.strokeStyle = isSelected ? '#ffffff' : isHovered ? '#ffffff' : '#e2e8f0';
+          ctx.lineWidth = Math.max(1.0, (isSelected ? 2.2 : isHovered ? 1.8 : 1.2) / zoom);
+          ctx.stroke();
+          ctx.restore();
         }
-        ctx.fill();
-
-        ctx.strokeStyle = isSelected ? '#ffffff' : isHovered ? '#ffffff' : '#e2e8f0';
-        ctx.lineWidth = Math.max(1.0, (isSelected ? 2.2 : isHovered ? 1.8 : 1.2) / zoom);
-        ctx.stroke();
-        ctx.restore();
       }
     });
   }
@@ -3812,6 +4564,119 @@ export function drawBlueprintPreview(
       ctx.stroke();
     }
 
+    ctx.restore();
+  }
+
+  // 5. Dibujar Zonas de Altura / Cavidad (ej. Asiento de sofá vs brazos)
+  if (depthZones && depthZones.length > 0) {
+    depthZones.forEach(zone => {
+      const minU = Math.min(zone.x1, zone.x2);
+      const maxU = Math.max(zone.x1, zone.x2);
+      const minV = Math.min(zone.y1, zone.y2);
+      const maxV = Math.max(zone.y1, zone.y2);
+
+      const px1 = ((minU + 1) / 2) * (W - 1);
+      const py1 = ((1 - maxV) / 2) * (H - 1);
+      const px2 = ((maxU + 1) / 2) * (W - 1);
+      const py2 = ((1 - minV) / 2) * (H - 1);
+
+      const boxW = Math.abs(px2 - px1);
+      const boxH = Math.abs(py2 - py1);
+      const isSelected = selectedDepthZoneId === zone.id;
+
+      ctx.save();
+      // Relleno de la zona de cavidad
+      ctx.fillStyle = isSelected ? 'rgba(168, 85, 247, 0.28)' : (zone.enabled ? 'rgba(168, 85, 247, 0.16)' : 'rgba(100, 116, 139, 0.12)');
+      ctx.fillRect(px1, py1, boxW, boxH);
+
+      // Borde punteado
+      ctx.strokeStyle = isSelected ? '#e9d5ff' : (zone.enabled ? '#c084fc' : '#64748b');
+      ctx.lineWidth = Math.max(1.5, (isSelected ? 2.5 : 1.8) / zoom);
+      ctx.setLineDash([6 / zoom, 3 / zoom]);
+      if (isSelected) {
+        ctx.shadowColor = '#c084fc';
+        ctx.shadowBlur = 8 / zoom;
+      }
+      ctx.strokeRect(px1, py1, boxW, boxH);
+      ctx.restore();
+
+      // Esquinas interactivas / Tiradores de redimensionado si está seleccionada
+      if (isSelected) {
+        ctx.save();
+        const handleR = Math.max(4, 6 / zoom);
+        const corners = [
+          [px1, py1], // NW
+          [px2, py1], // NE
+          [px2, py2], // SE
+          [px1, py2]  // SW
+        ];
+        corners.forEach(([cx, cy]) => {
+          ctx.beginPath();
+          ctx.arc(cx, cy, handleR, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+          ctx.strokeStyle = '#9333ea';
+          ctx.lineWidth = 2 / zoom;
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+
+      // Etiqueta HUD de la Zona
+      ctx.save();
+      const labelText = `🛋️ ${zone.name}: ${Math.round(zone.heightMax * 100)}% Altura (${Math.round((1 - zone.heightMax) * 100)}% Hueco)`;
+      ctx.font = `bold ${Math.max(10, Math.round(11 / zoom))}px sans-serif`;
+      const textMetrics = ctx.measureText(labelText);
+      const pad = 4 / zoom;
+      const tagW = textMetrics.width + pad * 2;
+      const tagH = Math.max(14, 16 / zoom);
+      const tagX = px1 + 4 / zoom;
+      const tagY = Math.max(tagH, py1 - tagH - 2 / zoom);
+
+      ctx.fillStyle = isSelected ? 'rgba(88, 28, 135, 0.92)' : 'rgba(24, 24, 27, 0.88)';
+      ctx.strokeStyle = isSelected ? '#e9d5ff' : '#a855f7';
+      ctx.lineWidth = 1 / zoom;
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, tagW, tagH, 3 / zoom);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = isSelected ? '#ffffff' : '#f3e8ff';
+      ctx.fillText(labelText, tagX + pad, tagY + tagH - 4 / zoom);
+      ctx.restore();
+    });
+  }
+
+  // 6. Dibujar Zona de Altura en proceso de trazado por el usuario
+  if (activeDrawingDepthZone) {
+    const minU = Math.min(activeDrawingDepthZone.x1, activeDrawingDepthZone.x2);
+    const maxU = Math.max(activeDrawingDepthZone.x1, activeDrawingDepthZone.x2);
+    const minV = Math.min(activeDrawingDepthZone.y1, activeDrawingDepthZone.y2);
+    const maxV = Math.max(activeDrawingDepthZone.y1, activeDrawingDepthZone.y2);
+
+    const px1 = ((minU + 1) / 2) * (W - 1);
+    const py1 = ((1 - maxV) / 2) * (H - 1);
+    const px2 = ((maxU + 1) / 2) * (W - 1);
+    const py2 = ((1 - minV) / 2) * (H - 1);
+
+    const boxW = Math.abs(px2 - px1);
+    const boxH = Math.abs(py2 - py1);
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.25)';
+    ctx.fillRect(px1, py1, boxW, boxH);
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = Math.max(1.8, 2.5 / zoom);
+    ctx.setLineDash([5 / zoom, 3 / zoom]);
+    ctx.strokeRect(px1, py1, boxW, boxH);
+
+    // Etiqueta flotante mientras dibuja
+    const label = '✨ Trazando Asiento / Cavidad...';
+    ctx.font = `bold ${Math.max(10, Math.round(11 / zoom))}px sans-serif`;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(px1, Math.max(0, py1 - 18 / zoom), ctx.measureText(label).width + 8 / zoom, 16 / zoom);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText(label, px1 + 4 / zoom, Math.max(12 / zoom, py1 - 6 / zoom));
     ctx.restore();
   }
 

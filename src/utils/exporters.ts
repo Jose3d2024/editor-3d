@@ -194,7 +194,7 @@ export class Exporter {
   /**
    * Exports objects to GLTF/GLB
    */
-  static async exportGLTF(objects: CSGObject[], projectMaterials: MaterialData[], binary: boolean = true) {
+  static async exportGLTF(objects: CSGObject[], projectMaterials: MaterialData[], binary: boolean = true, baseFilename: string = 'export') {
     const scene = new THREE.Scene();
     const animations: THREE.AnimationClip[] = [];
     const tracks: THREE.KeyframeTrack[] = [];
@@ -242,12 +242,14 @@ export class Exporter {
       options.animations = animations;
     }
 
+    const cleanName = baseFilename.replace(/[/\\?%*:|"<>]/g, '_').trim() || 'export';
+
     exporter.parse(
       scene,
       (gltf) => {
         const output = binary ? (gltf as ArrayBuffer) : JSON.stringify(gltf, null, 2);
         const blob = new Blob([output], { type: binary ? 'application/octet-stream' : 'application/json' });
-        this.saveBlob(blob, `export.${binary ? 'glb' : 'gltf'}`);
+        this.saveBlob(blob, `${cleanName}.${binary ? 'glb' : 'gltf'}`);
       },
       (error) => {
         console.error('Error exporting GLTF', error);
@@ -259,7 +261,7 @@ export class Exporter {
   /**
    * Exports objects to OBJ
    */
-  static async exportOBJ(objects: CSGObject[], projectMaterials: MaterialData[]) {
+  static async exportOBJ(objects: CSGObject[], projectMaterials: MaterialData[], baseFilename: string = 'export') {
     const scene = new THREE.Scene();
     for (const obj of objects) {
       const object3D = await this.objectToObject3D(obj, projectMaterials);
@@ -268,16 +270,17 @@ export class Exporter {
 
     scene.updateMatrixWorld(true);
 
+    const cleanName = baseFilename.replace(/[/\\?%*:|"<>]/g, '_').trim() || 'export';
     const exporter = new OBJExporter();
     const result = exporter.parse(scene);
     const blob = new Blob([result], { type: 'text/plain' });
-    this.saveBlob(blob, 'export.obj');
+    this.saveBlob(blob, `${cleanName}.obj`);
   }
 
   /**
    * Exports objects to STL
    */
-  static async exportSTL(objects: CSGObject[], projectMaterials: MaterialData[]) {
+  static async exportSTL(objects: CSGObject[], projectMaterials: MaterialData[], baseFilename: string = 'export') {
     const scene = new THREE.Scene();
     for (const obj of objects) {
       const object3D = await this.objectToObject3D(obj, projectMaterials);
@@ -286,10 +289,11 @@ export class Exporter {
 
     scene.updateMatrixWorld(true);
 
+    const cleanName = baseFilename.replace(/[/\\?%*:|"<>]/g, '_').trim() || 'export';
     const exporter = new STLExporter();
     const result = exporter.parse(scene, { binary: true });
     const blob = new Blob([result], { type: 'application/octet-stream' });
-    this.saveBlob(blob, 'export.stl');
+    this.saveBlob(blob, `${cleanName}.stl`);
   }
 
   /**

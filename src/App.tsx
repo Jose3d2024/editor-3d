@@ -4,6 +4,7 @@ import { PropertiesPanel } from './components/PropertiesPanel';
 import { Timeline } from './components/Timeline';
 import { MultiViewport } from './components/MultiViewport';
 import { MaterialStudioViewport } from './components/MaterialStudioViewport';
+import { ViewportErrorBoundary } from './components/ViewportErrorBoundary';
 import { MeshProgressModal } from './components/MeshProgressModal';
 import { BooleanStudioModal } from './components/BooleanStudioModal';
 import { BlueprintCarverModal } from './components/BlueprintCarverModal';
@@ -71,10 +72,10 @@ export default function App() {
   // ── MODO VISOR DE MATERIALES AISLADO (Ahorro del 100% de recursos de la escena 3D) ──
   if (isMaterialStudioOpen) {
     return (
-      <>
+      <ViewportErrorBoundary fallbackTitle="Estudio de Materiales">
         <MaterialStudioViewport />
         <MeshProgressModal />
-      </>
+      </ViewportErrorBoundary>
     );
   }
 
@@ -91,7 +92,9 @@ export default function App() {
 
         {/* Viewport */}
         <div className="flex-1 relative overflow-hidden flex flex-col min-w-0">
-          <MultiViewport />
+          <ViewportErrorBoundary fallbackTitle="Visores 3D">
+            <MultiViewport />
+          </ViewportErrorBoundary>
           
           {/* Timeline Toggle Button */}
           <button
@@ -122,7 +125,7 @@ export default function App() {
             'transform transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]',
             'lg:relative lg:translate-x-0 lg:inset-auto',
             isSidebarOpen ? 'translate-x-0' : 'translate-x-full',
-            'w-80 sm:w-[340px] lg:w-[340px] xl:w-[360px]',
+            'w-80 sm:w-[360px] md:w-[375px] lg:w-[380px] xl:w-[410px]',
             'flex flex-col overflow-hidden',
           ].join(' ')}
           style={{ background: 'var(--surface-1)' }}

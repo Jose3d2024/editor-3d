@@ -33,11 +33,12 @@ import {
 import { getUVDebugTexture } from '../utils/proceduralTextures';
 import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
-import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X } from 'lucide-react';
+import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X, Magnet } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
 import { extractUniqueEdges } from '../utils/wireframeMesh';
 import { getLoopCutPreview } from '../utils/loopCut';
 import { safeFixed, safeNum } from '../utils/numberUtils';
+import { projectVerticesToFaces } from '../utils/faceSnap';
 
 interface ViewportProps {
   type: ViewportType;
@@ -207,6 +208,51 @@ const computeGizmoLayout = (
 };
 
 // ── Shared Reusable Geometries and Materials (Ultra-low memory, zero per-frame allocation, compact micro-precision) ──
+const createVertexPointTexture = (shape: 'circle' | 'cross' = 'circle'): THREE.CanvasTexture => {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, size, size);
+
+  if (shape === 'cross') {
+    // Crisp cross '+' / 'x' marker with high-contrast outline
+    ctx.lineWidth = 11;
+    ctx.strokeStyle = '#09090b';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(15, 15); ctx.lineTo(49, 49);
+    ctx.moveTo(49, 15); ctx.lineTo(15, 49);
+    ctx.stroke();
+
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(15, 15); ctx.lineTo(49, 49);
+    ctx.moveTo(49, 15); ctx.lineTo(15, 49);
+    ctx.stroke();
+  } else {
+    // Crisp circular dot with high-contrast dark border
+    ctx.beginPath();
+    ctx.arc(32, 32, 22, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#09090b';
+    ctx.stroke();
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+};
+
+const VERTEX_DOT_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('circle') : null;
+const VERTEX_CROSS_TEXTURE = typeof document !== 'undefined' ? createVertexPointTexture('cross') : null;
+
 const SHARED_VERTEX_GEO = new THREE.SphereGeometry(1, 6, 5);
 const SHARED_PICK_GEO = new THREE.SphereGeometry(1, 6, 4);
 const SHARED_SNAP_RING_GEO = new THREE.RingGeometry(0.02, 0.032, 16);
@@ -221,6 +267,53 @@ const SHARED_SNAP_MAT = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THR
 const SHARED_SNAP_DOT_MAT = new THREE.MeshBasicMaterial({ color: 0x00ffcc, depthTest: false });
 const SHARED_PICK_MAT = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
 const SHARED_CYAN_MAT = new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false });
+
+// Screen-space 2D Points Materials with constant pixel size (virtually 0 CPU/GPU cost, never scales up on zoom)
+const SHARED_POINTS_MAT = new THREE.PointsMaterial({
+  size: 7.5,
+  sizeAttenuation: false,
+  map: VERTEX_DOT_TEXTURE ?? undefined,
+  vertexColors: true,
+  transparent: true,
+  alphaTest: 0.05,
+  depthTest: false,
+});
+
+const SHARED_SEL_POINTS_MAT = new THREE.PointsMaterial({
+  size: 9.5,
+  sizeAttenuation: false,
+  map: VERTEX_DOT_TEXTURE ?? undefined,
+  color: 0xf59e0b,
+  transparent: true,
+  alphaTest: 0.05,
+  depthTest: false,
+});
+
+/**
+ * Calcula un tamaño de escala constante en píxeles de pantalla para punteros, indicadores y halos
+ * independientemente de si el usuario hace zoom extremo (acercarse o alejarse)
+ */
+const getAdaptiveHandleScale = (
+  worldPos: THREE.Vector3,
+  camera: THREE.Camera,
+  viewportHeight: number,
+  pixelRadius: number,
+  minScale = 0.0005,
+  maxScale = 0.05
+) => {
+  if ((camera as any).isPerspectiveCamera) {
+    const pCam = camera as THREE.PerspectiveCamera;
+    const dist = camera.position.distanceTo(worldPos);
+    const vFov = THREE.MathUtils.degToRad(pCam.fov);
+    const worldPerPixel = (2 * dist * Math.tan(vFov * 0.5)) / Math.max(200, viewportHeight || 800);
+    return Math.max(minScale, Math.min(maxScale, worldPerPixel * pixelRadius));
+  } else if ((camera as any).isOrthographicCamera) {
+    const oCam = camera as THREE.OrthographicCamera;
+    const worldPerPixel = (oCam.top - oCam.bottom) / (Math.max(200, viewportHeight || 800) * (oCam.zoom || 1));
+    return Math.max(minScale, Math.min(maxScale, worldPerPixel * pixelRadius));
+  }
+  return 0.012;
+};
 
 export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: initialTitle }) => {
   const [type, setType] = React.useState<ViewportType | 'CAMERA'>(initialType);
@@ -260,6 +353,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       groupRef.current?.children.find((c: any) => c.userData?.id === id) ||
       primitivesGroupRef.current?.children.find((c: any) => c.userData?.id === id)) as THREE.Mesh | undefined;
   };
+  (window as any).__getObjectMesh = getObjectMesh;
 
   const getCoincidentVertices = (geometry: THREE.BufferGeometry, index: number): number[] => {
     const pos = geometry.getAttribute('position');
@@ -335,6 +429,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     isolateGLTFSelection, clearSelection,
     maximizedViewport, setMaximizedViewport, saveHistory,
     gridSnapEnabled, setGridSnapEnabled, isRecording,
+    faceSnapConfig, setFaceSnapConfig, toggleFaceSnap,
     setSilueta, moveReferenceMode, setReference,
     addMaterial, assignMaterialToObjects,
     insertVertexMode, setInsertVertexMode,
@@ -345,7 +440,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     orthoDrawMode, setOrthoDrawMode,
     drawLockAxis, setDrawLockAxis
   } = useStore();
-  const { silueta } = project;
+  const silueta = project?.silueta || ({} as any);
 
   // Silueta interaction refs
   const siluetaDragRef = useRef<{ planeKey: 'front'|'back'|'left'|'right'|'top'|'bottom'; pointIndex: number } | null>(null);
@@ -879,6 +974,16 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     if (grid) grid.visible = project.showGrid !== false;
   }, [project.showGrid]);
 
+  useEffect(() => {
+    meshesRef.current.forEach((meshOrGroup) => {
+      meshOrGroup.traverse((child) => {
+        if (child.userData.isSkeletonHelper) {
+          child.visible = !!project.showSkeleton;
+        }
+      });
+    });
+  }, [project.showSkeleton]);
+
   // ── 1. Initialization ────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
@@ -962,10 +1067,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     if (containerRef.current) {
       while (containerRef.current.firstChild) containerRef.current.removeChild(containerRef.current.firstChild);
       containerRef.current.appendChild(renderer.domElement);
+      renderer.domElement.id = 'main-viewport-canvas';
       renderer.domElement.style.cssText = 'display:block;width:100%;height:100%;touch-action:none';
     }
     rendererRef.current = renderer;
@@ -1646,12 +1752,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   useEffect(() => {
     if (!sceneRef.current) return;
     const existing = sceneRef.current.getObjectByName('reference-plane');
-    if (existing) sceneRef.current.remove(existing);
 
     const viewKey = type.toLowerCase() as 'top'|'bottom'|'front'|'back'|'left'|'right';
-    if (!['top','bottom','front','back','left','right'].includes(viewKey)) return;
-    const refData = project.references[viewKey];
-    if (!refData?.url) return;
+    if (!['top','bottom','front','back','left','right'].includes(viewKey)) {
+      if (existing) sceneRef.current.remove(existing);
+      return;
+    }
+    const refData = project?.references ? project.references[viewKey] : undefined;
+    if (!refData?.url) {
+      if (existing) sceneRef.current.remove(existing);
+      return;
+    }
 
     new THREE.TextureLoader().load(refData.url, tex => {
       const old = sceneRef.current?.getObjectByName('reference-plane');
@@ -1662,6 +1773,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         new THREE.MeshBasicMaterial({ map:tex, transparent:true, opacity:refData.opacity, side:THREE.DoubleSide, depthWrite:false })
       );
       plane.name = 'reference-plane';
+      plane.userData = { aspect, baseScale: refData.scale };
+      
       const s = refData.scale[1] || refData.scale[0] || 5;
       const flipScaleX = (s * aspect) * (refData.flipX ? -1 : 1);
       const flipScaleY = s * (refData.flipY ? -1 : 1);
@@ -1714,23 +1827,23 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       isCancelled = true;
     };
   }, [
-    project.environment.hdriUrl,
-    project.environment.backgroundMode,
-    project.environment.backgroundVisible,
-    project.environment.backgroundColor,
-    project.environment.backgroundBlur,
-    project.environment.backgroundIntensity,
-    project.environment.rotation,
-    project.environment.intensity,
-    project.environment.exposure,
-    project.environment.maxResolution
+    project.environment?.hdriUrl,
+    project.environment?.backgroundMode,
+    project.environment?.backgroundVisible,
+    project.environment?.backgroundColor,
+    project.environment?.backgroundBlur,
+    project.environment?.backgroundIntensity,
+    project.environment?.rotation,
+    project.environment?.intensity,
+    project.environment?.exposure,
+    project.environment?.maxResolution
   ]);
 
   useEffect(() => {
     if (rendererRef.current) {
-      rendererRef.current.toneMappingExposure = project.environment.exposure ?? 1.1;
+      rendererRef.current.toneMappingExposure = project.environment?.exposure ?? 1.1;
     }
-  }, [project.environment.exposure]);
+  }, [project.environment?.exposure]);
 
   // ── 1.7 Silueta Reference Image ──────────────────────────────────────────
   useEffect(() => {
@@ -1848,7 +1961,42 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         transparent: (mData.opacity ?? obj.opacity ?? 1) < 1,
       };
 
-      if (obj.uvDebug || mData.uvDebug) {
+      // En modo Sólido y modos no texturizados, no mostrar texturas (albedo, normales, rugosidad, etc.) y mostrar solo el color sólido de Apariencia
+      if (viewMode !== 'TEXTURED' && viewMode !== 'TEXTURED_WIREFRAME') {
+        finalMData = {
+          ...finalMData,
+          color: mData.color || obj.color || '#ffffff',
+          map: undefined,
+          mapAlbedo: undefined,
+          normalMap: undefined,
+          mapNormal: undefined,
+          roughnessMap: undefined,
+          mapRoughness: undefined,
+          metalnessMap: undefined,
+          mapMetalness: undefined,
+          aoMap: undefined,
+          mapAO: undefined,
+          emissiveMap: undefined,
+          mapEmissive: undefined,
+          displacementMap: undefined,
+          mapDisplacement: undefined,
+          transmissionMap: undefined,
+          thicknessMap: undefined,
+          clearcoatMap: undefined,
+          clearcoatRoughnessMap: undefined,
+          clearcoatNormalMap: undefined,
+          sheenColorMap: undefined,
+          sheenRoughnessMap: undefined,
+          iridescenceMap: undefined,
+          iridescenceThicknessMap: undefined,
+          anisotropyMap: undefined,
+          ormMap: undefined,
+          bumpMap: undefined,
+          useParallax: false,
+          uvDebug: false,
+          triplanarBlend: undefined,
+        };
+      } else if (obj.uvDebug || mData.uvDebug) {
         finalMData = {
           ...finalMData,
           color: '#ffffff',
@@ -1864,7 +2012,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         };
       }
 
-      if (finalMData.useParallax && viewMode === 'TEXTURED') {
+      if (finalMData.useParallax && (viewMode === 'TEXTURED' || viewMode === 'TEXTURED_WIREFRAME')) {
         const loader = new THREE.TextureLoader();
         const loadTex = (url: string | undefined, isColor = false) => {
           if (!url) return undefined;
@@ -1954,7 +2102,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         
         // Resolve material: priority is inline material > materialId > default
         const projectMaterials = project.materials || [];
-        const referencedMaterial = obj.materialId ? project.materials.find(m => m.id === obj.materialId) : null;
+        const referencedMaterial = obj.materialId ? projectMaterials.find(m => m.id === obj.materialId) : null;
         
         // For imported 3D models (GLTF/OBJ), use custom replacement material only if explicitly customized by user:
         const hasCustomOverride = Boolean(
@@ -1972,58 +2120,134 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         }
 
         const applyViewModeToImported = (object3D: THREE.Object3D) => {
-          let meshIdx = 0;
+          // 1. Remove and dispose of any existing wireframe overlays first
+          const oldOverlays: THREE.Object3D[] = [];
           object3D.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) {
-              const mesh = child as THREE.Mesh;
-              mesh.castShadow = true;
-              mesh.receiveShadow = true;
-              if (customMaterial) {
-                mesh.material = customMaterial;
-              } else {
-                const mapMaterial = (origMat: THREE.Material) => {
-                  const projMat = projectMaterials.find(m => m.id === origMat.userData.csgMaterialId);
-                  if (projMat && (projMat as any).userModified) {
-                    return getMaterialForObject(obj, projMat);
-                  }
-                  return origMat;
-                };
-
-                if (Array.isArray(mesh.material)) {
-                  mesh.material = mesh.material.map(mapMaterial);
-                } else {
-                  mesh.material = mapMaterial(mesh.material);
-                }
-              }
-              
-              const meshId = `mesh-${meshIdx++}`;
-              const isMeshSelected = isSelected && selectedGLTFMeshes && selectedGLTFMeshes.includes(meshId);
-              
-              // Isolation mode
-              if (isSelected && isolateGLTFSelection) {
-                mesh.visible = isMeshSelected;
-              } else {
-                mesh.visible = true;
-              }
-
-              if (mesh.material) {
-                if (Array.isArray(mesh.material)) {
-                  mesh.material = mesh.material.map(m => {
-                    const cloned = m;
-                    (cloned as any).wireframe = viewMode === 'WIREFRAME';
-                    return cloned;
-                  });
-                } else {
-                  const cloned = mesh.material;
-                  (cloned as any).wireframe = viewMode === 'WIREFRAME';
-                  mesh.material = cloned;
-                }
-              }
-            }
-            if (child.userData.isSkeletonHelper) {
-              child.visible = viewMode === 'WIREFRAME' || isSelected;
+            if (child.userData?.isWireOverlay) {
+              oldOverlays.push(child);
             }
           });
+          oldOverlays.forEach((overlay) => {
+            if (overlay.parent) overlay.parent.remove(overlay);
+            if ((overlay as THREE.Mesh).material) {
+              const m = (overlay as THREE.Mesh).material;
+              if (Array.isArray(m)) m.forEach(x => x.dispose());
+              else m.dispose();
+            }
+          });
+
+          // 2. Collect genuine model meshes to avoid mutating hierarchy during traversal
+          let meshIdx = 0;
+          const contentMeshes: THREE.Mesh[] = [];
+          object3D.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh && !child.userData?.isWireOverlay) {
+              contentMeshes.push(child as THREE.Mesh);
+            }
+            if (child.userData?.isSkeletonHelper) {
+              child.visible = !!project.showSkeleton;
+            }
+          });
+
+          // 3. Configure materials and wireframe overlays safely on the collected meshes
+          for (const mesh of contentMeshes) {
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (customMaterial) {
+              mesh.material = customMaterial;
+            } else {
+              const mapMaterial = (origMat: THREE.Material) => {
+                const projMat = projectMaterials.find(m => m.id === origMat.userData.csgMaterialId);
+                if (projMat && (projMat as any).userModified) {
+                  return getMaterialForObject(obj, projMat);
+                }
+                if (viewMode !== 'TEXTURED' && viewMode !== 'TEXTURED_WIREFRAME') {
+                  const cloned = (origMat as any).clone();
+                  cloned.map = null;
+                  cloned.normalMap = null;
+                  cloned.roughnessMap = null;
+                  cloned.metalnessMap = null;
+                  cloned.aoMap = null;
+                  cloned.emissiveMap = null;
+                  cloned.displacementMap = null;
+                  cloned.bumpMap = null;
+                  if (obj.color && obj.color !== '#ffffff' && cloned.color) {
+                    cloned.color.set(obj.color);
+                  }
+                  cloned.needsUpdate = true;
+                  return cloned;
+                }
+                return origMat;
+              };
+
+              if (Array.isArray(mesh.material)) {
+                mesh.material = mesh.material.map(mapMaterial);
+              } else {
+                mesh.material = mapMaterial(mesh.material);
+              }
+            }
+            
+            const meshId = `mesh-${meshIdx++}`;
+            const isMeshSelected = isSelected && selectedGLTFMeshes && selectedGLTFMeshes.includes(meshId);
+            
+            // Isolation mode: solo aislar si está activado Y realmente hay partes seleccionadas en la lista.
+            // Si la selección está vacía o el usuario no seleccionó sub-mallas, NUNCA ocultar el modelo: mostrar todo.
+            if (isSelected && isolateGLTFSelection && selectedGLTFMeshes && selectedGLTFMeshes.length > 0) {
+              mesh.visible = isMeshSelected;
+            } else {
+              mesh.visible = true;
+            }
+
+            if (mesh.material) {
+              if (Array.isArray(mesh.material)) {
+                mesh.material = mesh.material.map(m => {
+                  const cloned = m;
+                  (cloned as any).wireframe = viewMode === 'WIREFRAME';
+                  return cloned;
+                });
+              } else {
+                const cloned = mesh.material;
+                (cloned as any).wireframe = viewMode === 'WIREFRAME';
+                mesh.material = cloned;
+              }
+            }
+
+            // If TEXTURED_WIREFRAME, add a clean wireframe overlay on top of the textured mesh
+            if (viewMode === 'TEXTURED_WIREFRAME') {
+              const wireMat = new THREE.MeshBasicMaterial({
+                wireframe: true,
+                color: isSelected ? 0x38bdf8 : 0x0284c7,
+                transparent: true,
+                opacity: 0.65,
+                depthTest: true,
+                depthWrite: false,
+                polygonOffset: true,
+                polygonOffsetFactor: -1,
+                polygonOffsetUnits: -4,
+              });
+
+              let wireOverlay: THREE.Mesh;
+              if ((mesh as THREE.SkinnedMesh).isSkinnedMesh) {
+                const skinnedMesh = mesh as THREE.SkinnedMesh;
+                const skinnedWire = new THREE.SkinnedMesh(skinnedMesh.geometry, wireMat);
+                skinnedWire.bind(skinnedMesh.skeleton, skinnedMesh.bindMatrix);
+                skinnedWire.bindMode = skinnedMesh.bindMode;
+                wireOverlay = skinnedWire;
+              } else {
+                wireOverlay = new THREE.Mesh(mesh.geometry, wireMat);
+              }
+
+              wireOverlay.position.set(0, 0, 0);
+              wireOverlay.rotation.set(0, 0, 0);
+              wireOverlay.scale.set(1, 1, 1);
+              wireOverlay.userData.isWireOverlay = true;
+              wireOverlay.renderOrder = 2;
+              if (mesh.morphTargetInfluences) {
+                wireOverlay.morphTargetInfluences = mesh.morphTargetInfluences;
+                wireOverlay.morphTargetDictionary = mesh.morphTargetDictionary;
+              }
+              mesh.add(wireOverlay);
+            }
+          }
         };
 
         const cacheKey = obj.meshData.data;
@@ -2058,6 +2282,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           if (hasBones) {
             const helper = new THREE.SkeletonHelper(clonedScene);
             helper.userData.isSkeletonHelper = true;
+            helper.visible = !!project.showSkeleton;
             clonedScene.add(helper);
           }
 
@@ -2125,6 +2350,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             if (hasBones) {
               const helper = new THREE.SkeletonHelper(clonedScene);
               helper.userData.isSkeletonHelper = true;
+              helper.visible = !!project.showSkeleton;
               clonedScene.add(helper);
             }
 
@@ -2277,18 +2503,22 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const anchorWorld = anchor.clone().applyMatrix4(mat4);
               const isAnchorSel = selectedSet.has(i);
 
-              // ── Anchor point (Compact, lightweight micro-dot) ──
-              const anchorMesh = new THREE.Mesh(
-                SHARED_VERTEX_GEO,
-                isAnchorSel ? SHARED_SELECTED_MAT : SHARED_WHITE_MAT
+              // ── Anchor point (Crisp screen-space 2D point with fixed pixel size) ──
+              const anchorGeo = new THREE.BufferGeometry().setFromPoints([anchorWorld]);
+              const anchorPts = new THREE.Points(
+                anchorGeo,
+                new THREE.PointsMaterial({
+                  size: isAnchorSel ? 9.5 : 7.5,
+                  sizeAttenuation: false,
+                  map: VERTEX_DOT_TEXTURE ?? undefined,
+                  color: isAnchorSel ? 0xf59e0b : 0xffffff,
+                  transparent: true,
+                  alphaTest: 0.05,
+                  depthTest: false,
+                })
               );
-              anchorMesh.scale.setScalar(isAnchorSel ? 0.020 : 0.014);
-              anchorMesh.position.copy(anchorWorld);
-              anchorMesh.renderOrder = 4;
-              anchorMesh.userData.id = obj.id;
-              anchorMesh.userData.handleType = 'anchor';
-              anchorMesh.userData.anchorIdx = i;
-              group.add(anchorMesh);
+              anchorPts.renderOrder = 40;
+              group.add(anchorPts);
 
               // Show handles only for selected anchors (or all if in edit mode)
               const showHandles = inEditMode && isBezier && h;
@@ -2303,18 +2533,23 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const outLine = new THREE.Line(outLineGeo, new THREE.LineBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.7, depthTest: false }));
                 outLine.userData.id = obj.id;
                 group.add(outLine);
-                // Handle dot
-                const outMesh = new THREE.Mesh(
-                  SHARED_VERTEX_GEO,
-                  selectedSet.has(i + 10000) ? SHARED_SELECTED_MAT : SHARED_OUT_MAT
+                // Handle 2D point
+                const outGeo = new THREE.BufferGeometry().setFromPoints([outWorld]);
+                const isOutSel = selectedSet.has(i + 10000);
+                const outPts = new THREE.Points(
+                  outGeo,
+                  new THREE.PointsMaterial({
+                    size: 6.5,
+                    sizeAttenuation: false,
+                    map: VERTEX_DOT_TEXTURE ?? undefined,
+                    color: isOutSel ? 0xf59e0b : 0x3b82f6,
+                    transparent: true,
+                    alphaTest: 0.05,
+                    depthTest: false,
+                  })
                 );
-                outMesh.scale.setScalar(0.011);
-                outMesh.position.copy(outWorld);
-                outMesh.renderOrder = 4;
-                outMesh.userData.id = obj.id;
-                outMesh.userData.handleType = 'bezierOut';
-                outMesh.userData.anchorIdx = i;
-                group.add(outMesh);
+                outPts.renderOrder = 42;
+                group.add(outPts);
 
                 // ── IN handle (green) ──
                 const rawIn = new THREE.Vector3(...h.in);
@@ -2324,17 +2559,22 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const inLine = new THREE.Line(inLineGeo, new THREE.LineBasicMaterial({ color: 0x44cc44, transparent: true, opacity: 0.7, depthTest: false }));
                 inLine.userData.id = obj.id;
                 group.add(inLine);
-                const inMesh = new THREE.Mesh(
-                  SHARED_VERTEX_GEO,
-                  selectedSet.has(i + 20000) ? SHARED_SELECTED_MAT : SHARED_IN_MAT
+                const inGeo = new THREE.BufferGeometry().setFromPoints([inWorld]);
+                const isInSel = selectedSet.has(i + 20000);
+                const inPts = new THREE.Points(
+                  inGeo,
+                  new THREE.PointsMaterial({
+                    size: 6.5,
+                    sizeAttenuation: false,
+                    map: VERTEX_DOT_TEXTURE ?? undefined,
+                    color: isInSel ? 0xf59e0b : 0x22c55e,
+                    transparent: true,
+                    alphaTest: 0.05,
+                    depthTest: false,
+                  })
                 );
-                inMesh.scale.setScalar(0.011);
-                inMesh.position.copy(inWorld);
-                inMesh.renderOrder = 4;
-                inMesh.userData.id = obj.id;
-                inMesh.userData.handleType = 'bezierIn';
-                inMesh.userData.anchorIdx = i;
-                group.add(inMesh);
+                inPts.renderOrder = 42;
+                group.add(inPts);
               }
 
               // Invisible pick sphere for anchor
@@ -2567,7 +2807,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
         
         // Resolve material: priority is inline material > materialId > default
         const projectMaterials = project.materials || [];
-        const referencedMaterial = obj.materialId ? project.materials.find(m => m.id === obj.materialId) : null;
+        const referencedMaterial = obj.materialId ? projectMaterials.find(m => m.id === obj.materialId) : null;
         
         // Use referenced material cleanly, only applying inline overrides if explicitly user-modified
         const m = (referencedMaterial
@@ -2621,15 +2861,19 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       const isWireOnly = obj.isWireframeOnly || !obj.faces || obj.faces.length === 0;
       const wireColor = isWireOnly
         ? (isSelected ? 0x60a5fa : 0x4ade80) // Vibrant green or blue for wireframe objects
-        : (viewMode === 'WIREFRAME' ? (isSelected ? 0x4f8ef7 : 0x22dd44) : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444));
+        : (viewMode === 'WIREFRAME' 
+            ? (isSelected ? 0x4f8ef7 : 0x22dd44) 
+            : (viewMode === 'TEXTURED_WIREFRAME'
+                ? (isSelected ? 0x38bdf8 : 0x0284c7)
+                : (viewMode === 'FACES_VERTICES' ? (isSelected ? 0x38bdf8 : 0x64748b) : 0x444444)));
 
       const edgeLines = new THREE.LineSegments(
         edgeGeo,
         new THREE.LineBasicMaterial({
           color: wireColor,
-          opacity: isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0))),
+          opacity: isWireOnly ? 0.95 : (viewMode === 'WIREFRAME' ? 1 : (viewMode === 'TEXTURED_WIREFRAME' ? 0.85 : (viewMode === 'FACES_VERTICES' ? 0.85 : (editMode !== 'OBJECT' ? (isSelected ? 0.5 : 0.05) : 0)))),
           transparent: true,
-          visible: isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'FACES_VERTICES' || editMode !== 'OBJECT',
+          visible: isWireOnly || viewMode === 'WIREFRAME' || viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'FACES_VERTICES' || editMode !== 'OBJECT',
           depthTest: !isWireOnly && viewMode !== 'WIREFRAME', 
           depthWrite: false
         })
@@ -2714,26 +2958,51 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             group.add(lines);
           }
 
-          // 2. Control Point nodes (clickable)
+          // 2. Control Point nodes (crisp screen-space 2D points + invisible pick proxies)
+          const cpCoords: number[] = [];
+          const cpColors: number[] = [];
           for (let u = 0; u < uCount; u++) {
             for (let v = 0; v < vCount; v++) {
               const cp = cps[u][v];
               const isSel = selSet.has(`${u},${v}`);
-              const sphereRadius = isSel ? 0.018 : 0.012;
-              const dot = new THREE.Mesh(
-                SHARED_VERTEX_GEO,
-                isSel ? SHARED_SELECTED_MAT : SHARED_CYAN_MAT
-              );
-              dot.scale.setScalar(sphereRadius);
               const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
                 .multiply(initialScale)
                 .applyEuler(initialRot)
                 .add(initialPos);
-              dot.position.copy(world);
-              dot.renderOrder = isSel ? 25 : 10;
-              dot.userData = { id: obj.id, isNurbsControlPoint: true, u, v };
-              group.add(dot);
+              cpCoords.push(world.x, world.y, world.z);
+              if (isSel) {
+                cpColors.push(0.96, 0.62, 0.04);
+              } else {
+                cpColors.push(0.02, 0.71, 0.83);
+              }
+
+              // Invisible picking proxy
+              const pickDot = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
+              pickDot.scale.setScalar(0.045);
+              pickDot.position.copy(world);
+              pickDot.userData = { id: obj.id, isNurbsControlPoint: true, u, v };
+              group.add(pickDot);
             }
+          }
+
+          if (cpCoords.length > 0) {
+            const cpGeo = new THREE.BufferGeometry();
+            cpGeo.setAttribute('position', new THREE.Float32BufferAttribute(cpCoords, 3));
+            cpGeo.setAttribute('color', new THREE.Float32BufferAttribute(cpColors, 3));
+            const cpPts = new THREE.Points(
+              cpGeo,
+              new THREE.PointsMaterial({
+                size: 8.0,
+                sizeAttenuation: false,
+                map: VERTEX_DOT_TEXTURE ?? undefined,
+                vertexColors: true,
+                transparent: true,
+                alphaTest: 0.05,
+                depthTest: false,
+              })
+            );
+            cpPts.renderOrder = 35;
+            group.add(cpPts);
           }
         } else if (obj.nurbsCurve) {
           const curve = obj.nurbsCurve;
@@ -2771,96 +3040,159 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             group.add(lines);
           }
 
-          // 2. Control Point nodes (clickable)
+          // 2. Control Point nodes (crisp screen-space 2D points + invisible pick proxies)
+          const cpCurveCoords: number[] = [];
+          const cpCurveColors: number[] = [];
           for (let i = 0; i < cps.length; i++) {
             const cp = cps[i];
             const isSel = selSet.has(i);
-            const sphereRadius = isSel ? 0.018 : 0.012;
-            const dot = new THREE.Mesh(
-              SHARED_VERTEX_GEO,
-              isSel ? SHARED_SELECTED_MAT : SHARED_CYAN_MAT
-            );
-            dot.scale.setScalar(sphereRadius);
             const world = new THREE.Vector3(cp.point[0], cp.point[1], cp.point[2])
               .multiply(initialScale)
               .applyEuler(initialRot)
               .add(initialPos);
-            dot.position.copy(world);
-            dot.renderOrder = isSel ? 25 : 10;
-            dot.userData = { id: obj.id, isNurbsControlPoint: true, u: i, v: 0 };
-            group.add(dot);
+            cpCurveCoords.push(world.x, world.y, world.z);
+            if (isSel) {
+              cpCurveColors.push(0.96, 0.62, 0.04);
+            } else {
+              cpCurveColors.push(0.02, 0.71, 0.83);
+            }
+
+            const pickDot = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
+            pickDot.scale.setScalar(0.045);
+            pickDot.position.copy(world);
+            pickDot.userData = { id: obj.id, isNurbsControlPoint: true, u: i, v: 0 };
+            group.add(pickDot);
+          }
+
+          if (cpCurveCoords.length > 0) {
+            const cpCurveGeo = new THREE.BufferGeometry();
+            cpCurveGeo.setAttribute('position', new THREE.Float32BufferAttribute(cpCurveCoords, 3));
+            cpCurveGeo.setAttribute('color', new THREE.Float32BufferAttribute(cpCurveColors, 3));
+            const cpCurvePts = new THREE.Points(
+              cpCurveGeo,
+              new THREE.PointsMaterial({
+                size: 8.0,
+                sizeAttenuation: false,
+                map: VERTEX_DOT_TEXTURE ?? undefined,
+                vertexColors: true,
+                transparent: true,
+                alphaTest: 0.05,
+                depthTest: false,
+              })
+            );
+            cpCurvePts.renderOrder = 35;
+            group.add(cpCurvePts);
           }
         } else if (editMode === 'VERTEX' || viewMode === 'FACES_VERTICES') {
             const pointGeo = new THREE.BufferGeometry();
             const logicalVerts: number[] = [];
+            const vertColors: number[] = [];
+            const selectedSet = new Set(selectedVertexIndices);
+
             if (obj.vertices) {
               obj.vertices.forEach((v, i) => {
                 const off = obj.vertexOffsets?.[i] || [0,0,0];
                 logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+                const isSel = isSelected && selectedSet.has(i);
+                if (isSel) {
+                  // Vibrant selected vertex color (amber-gold / orange)
+                  vertColors.push(0.96, 0.62, 0.04);
+                } else if (viewMode === 'FACES_VERTICES' && !isSelected) {
+                  // Cyan for unselected in faces+vertices mode
+                  vertColors.push(0.02, 0.71, 0.83);
+                } else {
+                  // Clean crisp white with dark border
+                  vertColors.push(1.0, 1.0, 1.0);
+                }
               });
             }
+
             pointGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
+            pointGeo.setAttribute('color', new THREE.Float32BufferAttribute(vertColors, 3));
             pointGeo.computeBoundingSphere();
-            const pts = new THREE.Points(pointGeo, new THREE.PointsMaterial({ visible:true, transparent:true, opacity:0, size:0.25 }));
+
+            // Main screen-space 2D points (crisp 7.5px circular dot with outline, fixed screen size, zero GPU waste)
+            const pts = new THREE.Points(pointGeo, SHARED_POINTS_MAT);
             pts.position.copy(initialPos);
             pts.rotation.copy(initialRot);
             pts.scale.copy(initialScale);
             pts.updateMatrixWorld(true);
+            pts.renderOrder = 40;
+            group.add(pts);
+
             if (isSelected || editMode === 'VERTEX') {
               vertexPointsRef.current = pts;
             }
 
-            const selectedSet = new Set(selectedVertexIndices);
-            const logicalPosAttr = pointGeo.getAttribute('position');
-            const totalVerts = logicalPosAttr.count;
-            // On dense meshes (> 80 vertices), do not instantiate thousands of individual sphere meshes;
-            // only render selected vertices + dynamic hover dots on pointer move
-            const isDenseMesh = totalVerts > 80;
-
-            for (let i = 0; i < totalVerts; i++) {
-              const isSel = isSelected && selectedSet.has(i);
-              if (!isSel && isDenseMesh) {
-                continue;
+            // If any vertices are selected, render a prominent highlighted cross/dot layer
+            if (isSelected && selectedVertexIndices.length > 0 && obj.vertices) {
+              const selVerts: number[] = [];
+              selectedVertexIndices.forEach(idx => {
+                if (idx < (obj.vertices?.length || 0)) {
+                  const v = obj.vertices![idx];
+                  const off = obj.vertexOffsets?.[idx] || [0,0,0];
+                  selVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
+                }
+              });
+              if (selVerts.length > 0) {
+                const selGeo = new THREE.BufferGeometry();
+                selGeo.setAttribute('position', new THREE.Float32BufferAttribute(selVerts, 3));
+                const selPts = new THREE.Points(selGeo, SHARED_SEL_POINTS_MAT);
+                selPts.position.copy(initialPos);
+                selPts.rotation.copy(initialRot);
+                selPts.scale.copy(initialScale);
+                selPts.updateMatrixWorld(true);
+                selPts.renderOrder = 55;
+                group.add(selPts);
               }
+            }
 
-              const dot = new THREE.Mesh(
-                SHARED_VERTEX_GEO,
-                isSel ? SHARED_ACTIVE_MAT : (viewMode === 'FACES_VERTICES' && !isSelected ? SHARED_CYAN_MAT : SHARED_WHITE_MAT)
-              );
-              dot.scale.setScalar(isSel ? 0.024 : (viewMode === 'FACES_VERTICES' && !isSelected ? 0.010 : 0.013));
-              const world = new THREE.Vector3(logicalPosAttr.getX(i), logicalPosAttr.getY(i), logicalPosAttr.getZ(i))
-                .multiply(initialScale)
-                .applyEuler(initialRot)
-                .add(initialPos);
-              dot.position.copy(world);
-              dot.renderOrder = isSel ? 50 : 35;
-              dot.userData = {
-                id: obj.id,
-                isVertexHandle: true,
-                vertexIndex: i
-              };
-              group.add(dot);
+            // Invisible picking proxies for fast click & drag detection (only for meshes with <= 300 vertices)
+            const totalVerts = obj.vertices?.length || 0;
+            if (totalVerts <= 300) {
+              for (let i = 0; i < totalVerts; i++) {
+                const pickDot = new THREE.Mesh(SHARED_PICK_GEO, SHARED_PICK_MAT);
+                pickDot.scale.setScalar(0.045);
+                const v = obj.vertices![i];
+                const off = obj.vertexOffsets?.[i] || [0,0,0];
+                const world = new THREE.Vector3(v[0]+off[0], v[1]+off[1], v[2]+off[2])
+                  .multiply(initialScale)
+                  .applyEuler(initialRot)
+                  .add(initialPos);
+                pickDot.position.copy(world);
+                pickDot.userData = {
+                  id: obj.id,
+                  isVertexHandle: true,
+                  vertexIndex: i
+                };
+                group.add(pickDot);
+              }
             }
           } else if (editMode === 'EDGE' || editMode === 'FACE') {
-            // Render subtle landmark dots only for small meshes (<= 60 vertices) to prevent lag on dense meshes
+            // Render subtle landmark dots only for small meshes (<= 60 vertices) to prevent lag
             if (obj.vertices && obj.vertices.length > 0 && obj.vertices.length <= 60) {
               const logicalVerts: number[] = [];
               obj.vertices.forEach((v, i) => {
                 const off = obj.vertexOffsets?.[i] || [0,0,0];
                 logicalVerts.push(v[0]+off[0], v[1]+off[1], v[2]+off[2]);
               });
-              for (let i = 0; i < obj.vertices.length; i++) {
-                const dot = new THREE.Mesh(SHARED_VERTEX_GEO, SHARED_CYAN_MAT);
-                dot.scale.setScalar(0.008);
-                const world = new THREE.Vector3(logicalVerts[i*3], logicalVerts[i*3+1], logicalVerts[i*3+2])
-                  .multiply(initialScale)
-                  .applyEuler(initialRot)
-                  .add(initialPos);
-                dot.position.copy(world);
-                dot.renderOrder = 30;
-                dot.userData.id = obj.id;
-                group.add(dot);
-              }
+              const pGeo = new THREE.BufferGeometry();
+              pGeo.setAttribute('position', new THREE.Float32BufferAttribute(logicalVerts, 3));
+              const pMat = new THREE.PointsMaterial({
+                size: 6.0,
+                sizeAttenuation: false,
+                map: VERTEX_DOT_TEXTURE ?? undefined,
+                color: 0x06b6d4,
+                transparent: true,
+                alphaTest: 0.05,
+                depthTest: false,
+              });
+              const landmarkPts = new THREE.Points(pGeo, pMat);
+              landmarkPts.position.copy(initialPos);
+              landmarkPts.rotation.copy(initialRot);
+              landmarkPts.scale.copy(initialScale);
+              landmarkPts.renderOrder = 30;
+              group.add(landmarkPts);
             }
           }
 
@@ -4059,7 +4391,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       if (moveReferenceMode && event.button === 0) {
         const viewKey = type.toLowerCase() as 'top'|'bottom'|'front'|'back'|'left'|'right';
         if (['top','bottom','front','back','left','right'].includes(viewKey)) {
-          const refData = project.references[viewKey];
+          const refData = project?.references ? project.references[viewKey] : undefined;
           if (refData?.url) {
             const point = getPoint(event, true);
             if (point) {
@@ -4836,7 +5168,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                         SHARED_VERTEX_GEO,
                         isSel ? SHARED_ACTIVE_MAT : SHARED_SELECTED_MAT
                       );
-                      dot.scale.setScalar(0.016);
+                      const edgeDotScale = getAdaptiveHandleScale(p, camera, rect.height, isSel ? 5.5 : 4.5, 0.0006, 0.025);
+                      dot.scale.setScalar(edgeDotScale);
                       dot.position.copy(p);
                       dot.renderOrder = 65;
                       hoverGroup.add(dot);
@@ -5012,32 +5345,23 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
 
             if (vtxHovered && hitPos && hoverGroup) {
-              // Existing vertex hover styling:
-              // Changes color to distinguish from creating:
-              // - Selected: Bright Red/Coral (#ef4444) dot + halo ring
-              // - Unselected: Bright Golden Amber (#f59e0b) dot + halo ring
+              // Existing vertex hover styling (crisp 2D point/cross with fixed screen pixels):
               const dotColor = isHoveredSelected ? 0xef4444 : 0xf59e0b;
-              const ringColor = isHoveredSelected ? 0xfda4af : 0xfde68a;
 
-              // Center highlight dot
-              const hoverDot = new THREE.Mesh(
-                SHARED_VERTEX_GEO,
-                new THREE.MeshBasicMaterial({ color: dotColor, depthTest: false })
-              );
-              hoverDot.scale.setScalar(isHoveredSelected ? 0.028 : 0.024);
-              hoverDot.position.copy(hitPos);
+              const hoverGeo = new THREE.BufferGeometry();
+              hoverGeo.setAttribute('position', new THREE.Float32BufferAttribute([hitPos.x, hitPos.y, hitPos.z], 3));
+              const hoverMat = new THREE.PointsMaterial({
+                size: isHoveredSelected ? 11.5 : 9.5,
+                sizeAttenuation: false,
+                map: VERTEX_CROSS_TEXTURE ?? undefined,
+                color: dotColor,
+                transparent: true,
+                alphaTest: 0.05,
+                depthTest: false,
+              });
+              const hoverDot = new THREE.Points(hoverGeo, hoverMat);
               hoverDot.renderOrder = 65;
               hoverGroup.add(hoverDot);
-
-              // Outer halo ring indicating existing element (move or delete)
-              const hoverRing = new THREE.Mesh(
-                SHARED_VERTEX_GEO,
-                new THREE.MeshBasicMaterial({ color: ringColor, wireframe: true, depthTest: false })
-              );
-              hoverRing.scale.setScalar(isHoveredSelected ? 0.040 : 0.036);
-              hoverRing.position.copy(hitPos);
-              hoverRing.renderOrder = 66;
-              hoverGroup.add(hoverRing);
 
               // Hovering over an existing vertex allows moving (grab) or selecting for deletion
               rendererRef.current.domElement.style.cursor = isHoveredSelected ? 'grab' : 'pointer';
@@ -5130,7 +5454,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                           SHARED_VERTEX_GEO,
                           new THREE.MeshBasicMaterial({ color: 0x22d3ee, depthTest: false })
                         );
-                        cutDot.scale.setScalar(0.016);
+                        const cutDotScale = getAdaptiveHandleScale(pStart, camera, rect.height, 4.0, 0.0005, 0.025);
+                        cutDot.scale.setScalar(cutDotScale);
                         cutDot.position.copy(pStart);
                         cutDot.renderOrder = 85;
                         hoverGroup.add(cutDot);
@@ -5152,7 +5477,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                       SHARED_VERTEX_GEO,
                       new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false, transparent: true, opacity: 0.95 })
                     );
-                    previewDot.scale.setScalar(0.024);
+                    const loopPrevScale = getAdaptiveHandleScale(bestWorldPt, camera, rect.height, 5.5, 0.0007, 0.035);
+                    previewDot.scale.setScalar(loopPrevScale);
                     previewDot.position.copy(bestWorldPt);
                     previewDot.renderOrder = 90;
                     hoverGroup.add(previewDot);
@@ -5162,7 +5488,8 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                       SHARED_VERTEX_GEO,
                       new THREE.MeshBasicMaterial({ color: 0x06b6d4, depthTest: false, transparent: true, opacity: 0.95 })
                     );
-                    previewDot.scale.setScalar(0.022);
+                    const prevScale = getAdaptiveHandleScale(bestWorldPt, camera, rect.height, 5.5, 0.0007, 0.035);
+                    previewDot.scale.setScalar(prevScale);
                     previewDot.position.copy(bestWorldPt);
                     previewDot.renderOrder = 70;
                     hoverGroup.add(previewDot);
@@ -5553,7 +5880,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               });
             }
           } else {
-            const mesh = primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId) as THREE.Mesh | undefined;
+            const mesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
             let movLocal = mov.clone();
             if (mesh) {
               const invMat = new THREE.Matrix4().copy(mesh.matrixWorld).setPosition(0, 0, 0).invert();
@@ -5561,6 +5888,67 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
             const cht = gs.dragHandleType;
             const cai = gs.dragAnchorIdx;
+
+            const applyFaceSnappingOffsets = (
+              objId: string,
+              startOffsets: Record<string, [number, number, number]>,
+              deltaLocal: THREE.Vector3
+            ) => {
+              const curObj = projectRef.current.objects.find(o => o.id === objId);
+              const faceSnap = useStore.getState().faceSnapConfig;
+
+              if (faceSnap?.enabled && curObj?.vertices) {
+                const targetMeshes: THREE.Object3D[] = [];
+                if (faceSnap.targetObjectId) {
+                  const tgt = meshesRef.current.get(faceSnap.targetObjectId);
+                  if (tgt) targetMeshes.push(tgt);
+                } else {
+                  meshesRef.current.forEach((m, id) => {
+                    if (id !== objId) targetMeshes.push(m);
+                  });
+                }
+
+                if (targetMeshes.length > 0) {
+                  const targetMesh = (meshesRef.current.get(objId) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === objId)) as THREE.Mesh | undefined;
+                  const meshMatrixWorld = targetMesh ? targetMesh.matrixWorld : new THREE.Matrix4();
+
+                  const verticesWithOffsets = Object.entries(startOffsets).map(([idxStr, so]) => {
+                    const idx = parseInt(idxStr);
+                    const baseV = curObj.vertices[idx] || [0, 0, 0];
+                    const candLocal = new THREE.Vector3(
+                      baseV[0] + so[0] + deltaLocal.x,
+                      baseV[1] + so[1] + deltaLocal.y,
+                      baseV[2] + so[2] + deltaLocal.z
+                    );
+                    const candWorld = candLocal.clone().applyMatrix4(meshMatrixWorld);
+                    return {
+                      index: idx,
+                      candidateWorldPos: candWorld,
+                      baseLocalPos: new THREE.Vector3(baseV[0], baseV[1], baseV[2])
+                    };
+                  });
+
+                  const { updates } = projectVerticesToFaces(
+                    verticesWithOffsets,
+                    targetMeshes,
+                    meshMatrixWorld,
+                    camera,
+                    {
+                      projectIndividualElements: faceSnap.projectIndividualElements,
+                      offset: faceSnap.offset
+                    }
+                  );
+                  updateVertexOffsets(objId, updates);
+                  return;
+                }
+              }
+
+              updateVertexOffsets(objId, Object.entries(startOffsets).map(([idx, so]) => ({
+                index: parseInt(idx),
+                offset: [so[0] + deltaLocal.x, so[1] + deltaLocal.y, so[2] + deltaLocal.z] as [number, number, number]
+              })));
+            };
+
             if (curSelObj?.type === 'SHAPE' && (cht === 'bezierOut' || cht === 'bezierIn') && cai !== undefined) {
               const side = cht === 'bezierOut' ? 'out' : 'in';
               const startRel = gs.startVertexOffsets[cht === 'bezierOut' ? cai+10000 : cai+20000] ?? [0,0,0];
@@ -5568,9 +5956,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               const breakIt = event.altKey;
               useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
             } else {
-              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
-                index:parseInt(idx), offset:[so[0] + movLocal.x, so[1] + movLocal.y, so[2] + movLocal.z] as [number,number,number]
-              })));
+              applyFaceSnappingOffsets(selectedObjectId, gs.startVertexOffsets, movLocal);
             }
           }
         } else {
@@ -5806,9 +6192,60 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 useStore.getState().updateBezierHandle(selectedObjectId, cai, side, newRel, breakIt);
               }
             } else {
-              updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
-                index:parseInt(idx), offset:[so[0] + moveLocal.x, so[1] + moveLocal.y, so[2] + moveLocal.z] as [number,number,number]
-              })));
+              // Apply face snapping if active
+              const faceSnap = useStore.getState().faceSnapConfig;
+              if (faceSnap?.enabled && curSelObj?.vertices) {
+                const targetMeshes: THREE.Object3D[] = [];
+                if (faceSnap.targetObjectId) {
+                  const tgt = meshesRef.current.get(faceSnap.targetObjectId);
+                  if (tgt) targetMeshes.push(tgt);
+                } else {
+                  meshesRef.current.forEach((m, id) => {
+                    if (id !== selectedObjectId) targetMeshes.push(m);
+                  });
+                }
+
+                if (targetMeshes.length > 0) {
+                  const targetMesh = (meshesRef.current.get(selectedObjectId!) || primitivesGroupRef.current?.children.find((c: any) => c.userData.id === selectedObjectId)) as THREE.Mesh | undefined;
+                  const meshMatrixWorld = targetMesh ? targetMesh.matrixWorld : new THREE.Matrix4();
+
+                  const verticesWithOffsets = Object.entries(gs.startVertexOffsets).map(([idxStr, so]) => {
+                    const idx = parseInt(idxStr);
+                    const baseV = curSelObj.vertices[idx] || [0, 0, 0];
+                    const candLocal = new THREE.Vector3(
+                      baseV[0] + so[0] + moveLocal.x,
+                      baseV[1] + so[1] + moveLocal.y,
+                      baseV[2] + so[2] + moveLocal.z
+                    );
+                    const candWorld = candLocal.clone().applyMatrix4(meshMatrixWorld);
+                    return {
+                      index: idx,
+                      candidateWorldPos: candWorld,
+                      baseLocalPos: new THREE.Vector3(baseV[0], baseV[1], baseV[2])
+                    };
+                  });
+
+                  const { updates } = projectVerticesToFaces(
+                    verticesWithOffsets,
+                    targetMeshes,
+                    meshMatrixWorld,
+                    camera,
+                    {
+                      projectIndividualElements: faceSnap.projectIndividualElements,
+                      offset: faceSnap.offset
+                    }
+                  );
+                  updateVertexOffsets(selectedObjectId, updates);
+                } else {
+                  updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
+                    index:parseInt(idx), offset:[so[0] + moveLocal.x, so[1] + moveLocal.y, so[2] + moveLocal.z] as [number,number,number]
+                  })));
+                }
+              } else {
+                updateVertexOffsets(selectedObjectId, Object.entries(gs.startVertexOffsets).map(([idx,so])=>({
+                  index:parseInt(idx), offset:[so[0] + moveLocal.x, so[1] + moveLocal.y, so[2] + moveLocal.z] as [number,number,number]
+                })));
+              }
             }
           }
         }
@@ -7129,7 +7566,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
   return (
     <div
       className={`relative w-full h-full border overflow-hidden bg-zinc-900 transition-colors touch-none ${
-        silueta.activePlane ? (
+        silueta?.activePlane ? (
           (type === 'FRONT') ? `border-red-500 shadow-[inset_0_0_0_${silueta.activePlane === 'front' ? '3px' : '1px'}_rgba(239,68,68,1)]` :
           (type === 'LEFT' || type === 'RIGHT') ? `border-cyan-400 shadow-[inset_0_0_0_${silueta.activePlane === type.toLowerCase() ? '3px' : '1px'}_rgba(34,211,238,1)]` :
           (type === 'TOP') ? `border-green-500 shadow-[inset_0_0_0_${silueta.activePlane === 'top' ? '3px' : '1px'}_rgba(34,197,94,1)]` :
@@ -7278,11 +7715,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
           {fn:handleResetView,title:'Reset Vista', icon:<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>},
           {
             fn: handleToggleHdriBg,
-            title: (project.environment.backgroundMode === 'HDRI' && project.environment.backgroundVisible !== false)
+            title: (project.environment?.backgroundMode === 'HDRI' && project.environment?.backgroundVisible !== false)
               ? 'Mapa HDRI de fondo: VISIBLE (Haz clic para ocultar del visor)'
               : 'Mapa HDRI de fondo: OCULTO (Haz clic para mostrar mapa HDRI en el visor)',
             rawIcon: <Globe size={16} />,
-            active: (project.environment.backgroundMode === 'HDRI' && project.environment.backgroundVisible !== false)
+            active: (project.environment?.backgroundMode === 'HDRI' && project.environment?.backgroundVisible !== false)
           },
           ...(selectedObjectId ? [
             {fn:handleRecenterPivot, title:'Centrar Pivote / Origen al Objeto', icon:<><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>},
@@ -7313,12 +7750,34 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             ⊞
           </button>
         )}
+
+        {/* Face Snap / Snapping to geometry (Retopology magnet) */}
+        <button
+          onPointerDown={e => e.stopPropagation()}
+          onClick={e => {
+            e.stopPropagation();
+            toggleFaceSnap?.();
+          }}
+          className={`p-2 sm:p-1.5 rounded-lg shadow-xl cursor-pointer touch-none transition-colors border text-[10px] font-bold leading-none flex items-center justify-center ${
+            faceSnapConfig?.enabled
+              ? 'bg-amber-500 border-amber-300 text-black shadow-amber-500/40 ring-1 ring-amber-400 font-black'
+              : 'bg-zinc-800/95 border-white/10 text-zinc-400 hover:bg-zinc-700 hover:text-white'
+          }`}
+          title={
+            faceSnapConfig?.enabled
+              ? `Imán Ajuste a Caras: ACTIVADO (Offset: ${faceSnapConfig?.offset ?? 0.005}, Proy. Individual: ${faceSnapConfig?.projectIndividualElements ? 'SÍ' : 'NO'})`
+              : 'Activar Imán Ajuste a Caras (Snapping para Retopología)'
+          }
+        >
+          <Magnet size={14} className={faceSnapConfig?.enabled ? 'text-black' : 'text-zinc-400'} />
+        </button>
       </div>
 
-      {activeViewport===type && project.objects.find(o=>o.id===selectedObjectId) && (
+      {activeViewport===type && (project.objects || []).find(o=>o.id===selectedObjectId) && (
         <div className="absolute bottom-1 left-1 z-30 px-1.5 py-0.5 bg-black/50 text-[10px] text-white font-mono rounded pointer-events-none">
           {(()=>{
-            const obj = project.objects.find(o=>o.id===selectedObjectId)!;
+            const obj = (project.objects || []).find(o=>o.id===selectedObjectId);
+            if (!obj) return null;
             const _interp = getInterpolatedTransform(obj, currentTime);
             const pos = _interp?.position || [0, 0, 0];
             return `X:${safeFixed(pos[0], 2)} Y:${safeFixed(pos[1], 2)} Z:${safeFixed(pos[2], 2)}${obj.keyframes?.length ? ` [${obj.keyframes.length}kf]` : ''}`;

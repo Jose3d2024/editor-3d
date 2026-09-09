@@ -585,7 +585,7 @@ export const MaterialStudioViewport: React.FC = () => {
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -665,8 +665,8 @@ export const MaterialStudioViewport: React.FC = () => {
         refs.previewGroup.rotation.y += delta * animState.current.speed;
       }
 
-      // Volumetric Shader updates
-      if (refs.currentMaterial && (refs.currentMaterial as any).isShaderMaterial) {
+      // Shader & dynamic uniforms updates (CSM, Volumetric, WebGPU Glass)
+      if (refs.currentMaterial) {
         const sm = refs.currentMaterial as any;
         if (sm.uniforms?.uTime) sm.uniforms.uTime.value = elapsedTime;
         if (sm.userData?.shader?.uniforms) {
