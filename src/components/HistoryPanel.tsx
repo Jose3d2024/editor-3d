@@ -31,6 +31,9 @@ export const HistoryPanel: React.FC = () => {
     redo,
     jumpToHistory,
     clearHistory,
+    deleteHistoryStep,
+    deleteFutureHistory,
+    deletePastHistory,
     selectedObjectId,
     project
   } = useStore();
@@ -97,6 +100,21 @@ export const HistoryPanel: React.FC = () => {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
+  const getDisplayStepLabel = (step: HistoryStep) => {
+    if (!step.label) return 'Herramienta de Malla';
+    // Si el paso histórico viene con el prefijo genérico antiguo "Modificar [Objeto]"
+    if (step.label.startsWith('Modificar ')) {
+      if (step.category === 'retopo') return 'Ceñir / Retopología (Shrinkwrap)';
+      if (step.category === 'edit') return 'Edición de Malla';
+      if (step.category === 'transform') return 'Transformar: Mover / Rotar';
+      if (step.category === 'material') return 'Material y Color';
+      if (step.category === 'boolean') return 'Operación Booleana';
+      if (step.category === 'create') return 'Creación de Malla';
+      return 'Edición / Herramienta de Malla';
+    }
+    return step.label;
+  };
+
   const canUndo = historyIndex > 0;
   const canRedo = historySteps && historyIndex < historySteps.length - 1;
 
@@ -117,14 +135,36 @@ export const HistoryPanel: React.FC = () => {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={clearHistory}
-            title="Consolidar el estado actual y limpiar el historial previo"
-            className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[10px] font-semibold rounded border border-zinc-700 transition-colors cursor-pointer"
-          >
-            Consolidar
-          </button>
+          <div className="flex items-center gap-1">
+            {historyIndex < (historySteps?.length || 1) - 1 && (
+              <button
+                type="button"
+                onClick={deleteFutureHistory}
+                title="Eliminar todos los pasos futuros de rehacer a partir del paso actual"
+                className="px-1.5 py-0.5 bg-zinc-850 hover:bg-rose-900/60 text-zinc-400 hover:text-rose-200 text-[9px] font-semibold rounded border border-zinc-700/60 hover:border-rose-700/60 transition-colors cursor-pointer"
+              >
+                Podar Futuros
+              </button>
+            )}
+            {historyIndex > 0 && (
+              <button
+                type="button"
+                onClick={deletePastHistory}
+                title="Borrar pasos anteriores conservando el estado actual"
+                className="px-1.5 py-0.5 bg-zinc-850 hover:bg-zinc-750 text-zinc-400 hover:text-zinc-200 text-[9px] font-semibold rounded border border-zinc-700/60 transition-colors cursor-pointer"
+              >
+                Podar Anteriores
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={clearHistory}
+              title="Consolidar el estado actual y limpiar todo el historial previo"
+              className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-[10px] font-semibold rounded border border-zinc-700 transition-colors cursor-pointer"
+            >
+              Consolidar
+            </button>
+          </div>
         </div>
 
         {/* Action Controls: Undo, Redo, Jump to Origin */}
@@ -191,7 +231,7 @@ export const HistoryPanel: React.FC = () => {
           <div className="flex items-center gap-1 overflow-x-auto pb-0.5 custom-scrollbar text-[9px]">
             {[
               { id: 'all', label: 'Todos' },
-              { id: 'retopo', label: '✨ ZRemesher' },
+              { id: 'retopo', label: '✨ Remeser' },
               { id: 'edit', label: '✂️ Malla' },
               { id: 'transform', label: '📐 Transform' },
               { id: 'create', label: '📦 Creación' },
@@ -272,8 +312,8 @@ export const HistoryPanel: React.FC = () => {
                   {/* Step Title & Object details */}
                   <div className="min-w-0 flex-1 space-y-0.5">
                     <div className="flex items-center gap-1.5">
-                      <span className={`text-[11px] font-semibold truncate ${isCurrent ? 'text-amber-200 font-bold' : isPast ? 'text-zinc-200' : 'text-zinc-400'}`}>
-                        {step.label}
+                      <span className={`text-[11px] font-semibold truncate ${isCurrent ? 'text-amber-200 font-bold' : isPast ? 'text-zinc-200' : 'text-zinc-400'}`} title={step.label}>
+                        {getDisplayStepLabel(step)}
                       </span>
                       {isCurrent && (
                         <span className="text-[8.5px] px-1.5 py-0.2 rounded-full bg-amber-500 text-black font-extrabold uppercase tracking-wider shrink-0 animate-pulse">
@@ -298,8 +338,8 @@ export const HistoryPanel: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Right: Direct action badge */}
-                <div className="shrink-0 flex items-center">
+                {/* Right: Direct action badge and delete button */}
+                <div className="shrink-0 flex items-center gap-1">
                   {isCurrent ? (
                     <span className="text-[9.5px] text-amber-400 font-bold px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-700/60">
                       Activo
@@ -319,6 +359,19 @@ export const HistoryPanel: React.FC = () => {
                       title="Rehacer directamente hasta este punto"
                     >
                       Rehacer
+                    </button>
+                  )}
+                  {historySteps && historySteps.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteHistoryStep(index);
+                      }}
+                      className="p-1 rounded bg-zinc-900 hover:bg-rose-900/60 text-zinc-500 hover:text-rose-300 border border-zinc-800 hover:border-rose-700/60 transition-colors cursor-pointer"
+                      title={`Eliminar este paso (#${index + 1}: ${step.label}) del historial`}
+                    >
+                      <Trash2 size={11} />
                     </button>
                   )}
                 </div>

@@ -36,7 +36,7 @@ export function extractUniqueEdges(
     return obj.parameters.wireframeEdges;
   }
 
-  const dissolveCoplanars = options?.dissolveCoplanars ?? false;
+  const dissolveCoplanars = options?.dissolveCoplanars ?? true;
   const coplanarAngleDeg = options?.coplanarAngleDeg ?? 3.5;
   const cosTol = Math.cos((coplanarAngleDeg * Math.PI) / 180);
 
@@ -65,7 +65,7 @@ export function extractUniqueEdges(
       }
     }
 
-    // Filtrar aristas diagonales coplanares interiores
+    // Filtrar aristas diagonales coplanares interiores (solo diagonales entre pares de triángulos coplanares)
     if (dissolveCoplanars && verts.length > 0) {
       // Precalcular normales de caras
       const faceNormals: (THREE.Vector3 | null)[] = faces.map(f => {
@@ -88,13 +88,36 @@ export function extractUniqueEdges(
         const { vA, vB } = sharedList[0];
         // Si la arista es compartida por exactamente 2 caras interiores:
         if (sharedList.length === 2) {
-          const n0 = faceNormals[sharedList[0].fIdx];
-          const n1 = faceNormals[sharedList[1].fIdx];
-          if (n0 && n1) {
-            const dot = n0.dot(n1);
-            // Si ambas caras son coplanares (paralelas en el mismo plano), es una diagonal interna
-            if (dot >= cosTol) {
-              return; // Omitir arista diagonal redundante
+          const f0 = faces[sharedList[0].fIdx];
+          const f1 = faces[sharedList[1].fIdx];
+          const f0Idxs = f0.indices || [];
+          const f1Idxs = f1.indices || [];
+          
+          // IMPORTANTE: Solo disolver si AMBAS caras son triángulos (arista diagonal de triangulación).
+          // Si cualquiera de las caras es un cuadrilátero (length === 4) o n-gon, la arista es un borde
+          // legítimo de polígono y NUNCA debe disolverse.
+          if (f0Idxs.length === 3 && f1Idxs.length === 3) {
+            const n0 = faceNormals[sharedList[0].fIdx];
+            const n1 = faceNormals[sharedList[1].fIdx];
+            if (n0 && n1) {
+              const dot = n0.dot(n1);
+              if (dot >= cosTol) {
+                // Verificar que los vértices opuestos estén en lados contrarios de la arista (diagonal convexa)
+                const opp0 = f0Idxs.find(v => v !== vA && v !== vB);
+                const opp1 = f1Idxs.find(v => v !== vA && v !== vB);
+                if (opp0 !== undefined && opp1 !== undefined && verts[vA] && verts[vB] && verts[opp0] && verts[opp1]) {
+                  const pA = new THREE.Vector3(...verts[vA]);
+                  const pB = new THREE.Vector3(...verts[vB]);
+                  const p0 = new THREE.Vector3(...verts[opp0]);
+                  const p1 = new THREE.Vector3(...verts[opp1]);
+                  const edgeDir = new THREE.Vector3().subVectors(pB, pA).normalize();
+                  const side0 = new THREE.Vector3().crossVectors(edgeDir, p0.clone().sub(pA)).dot(n0);
+                  const side1 = new THREE.Vector3().crossVectors(edgeDir, p1.clone().sub(pA)).dot(n0);
+                  if (side0 * side1 < -1e-6) {
+                    return; // Omitir diagonal interna de triangulación
+                  }
+                }
+              }
             }
           }
         }

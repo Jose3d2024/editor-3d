@@ -1393,48 +1393,224 @@ export async function isotropicRemeshGLBModel(
           totalVertices += posAttr.count;
         }
 
-        // Relajación tangencial de posiciones para homogeneizar los triángulos resultantes
-        const newPosAttr = geometry.attributes.position;
-        const nV = newPosAttr.count;
-        const curIdx = geometry.index!.array;
-        const curNFaces = Math.floor(curIdx.length / 3);
+        // ─── RELAJACIÓN ISÓTROPA TANGENCIAL NO DESTRUCTIVA (TAUBIN + LOCK DE BORDES Y SEAMS) ───
+        // Previene desgarros en costuras UV, preserva bordes vivos y evita la pérdida o inflación de volumen
+        const curPosAttr = geometry.attributes.position;
+        const nV = curPosAttr.count;
+        const curIdx = geometry.index?.array;
+        const curNFaces = curIdx ? Math.floor(curIdx.length / 3) : 0;
 
-        const vNeighbors: Set<number>[] = Array.from({ length: nV }, () => new Set<number>());
-        for (let f = 0; f < curNFaces; f++) {
-          const i0 = curIdx[f * 3], i1 = curIdx[f * 3 + 1], i2 = curIdx[f * 3 + 2];
-          vNeighbors[i0].add(i1); vNeighbors[i0].add(i2);
-          vNeighbors[i1].add(i0); vNeighbors[i1].add(i2);
-          vNeighbors[i2].add(i0); vNeighbors[i2].add(i1);
-        }
+        if (nV >= 4 && curIdx && curNFaces > 0) {
+          // 1. Agrupamiento espacial de vértices coincidentes (seams de UVs o normales divididas)
+          // Todos los vértices que comparten la misma coordenada 3D exacta se tratan como un único nodo espacial
+          const posToSpatial = new Int32Array(nV);
+          const spatialPositions: THREE.Vector3[] = [];
+          const spatialToVerts = new Map<number, number[]>();
+          const spatialHash = new Map<string, number>();
 
-        for (let it = 0; it < iterations; it++) {
-          geometry.computeVertexNormals();
-          const normAttr = geometry.attributes.normal;
-          for (let vi = 0; vi < nV; vi++) {
-            const nbs = Array.from(vNeighbors[vi]);
-            if (nbs.length < 2) continue;
-            let cx = 0, cy = 0, cz = 0;
-            for (const ni of nbs) {
-              cx += newPosAttr.getX(ni);
-              cy += newPosAttr.getY(ni);
-              cz += newPosAttr.getZ(ni);
+          for (let i = 0; i < nV; i++) {
+            const x = curPosAttr.getX(i);
+            const y = curPosAttr.getY(i);
+            const z = curPosAttr.getZ(i);
+            const key = `${Math.round(x * 10000)}_${Math.round(y * 10000)}_${Math.round(z * 10000)}`;
+            let sId = spatialHash.get(key);
+            if (sId === undefined) {
+              sId = spatialPositions.length;
+              spatialPositions.push(new THREE.Vector3(x, y, z));
+              spatialHash.set(key, sId);
+              spatialToVerts.set(sId, [i]);
+            } else {
+              spatialToVerts.get(sId)!.push(i);
             }
-            cx /= nbs.length; cy /= nbs.length; cz /= nbs.length;
-
-            const vx = newPosAttr.getX(vi), vy = newPosAttr.getY(vi), vz = newPosAttr.getZ(vi);
-            let dx = cx - vx, dy = cy - vy, dz = cz - vz;
-
-            if (normAttr) {
-              const nx = normAttr.getX(vi), ny = normAttr.getY(vi), nz = normAttr.getZ(vi);
-              const dot = dx * nx + dy * ny + dz * nz;
-              dx -= dot * nx; dy -= dot * ny; dz -= dot * nz;
-            }
-
-            newPosAttr.setXYZ(vi, vx + dx * 0.5, vy + dy * 0.5, vz + dz * 0.5);
+            posToSpatial[i] = sId;
           }
+
+          const nSpatial = spatialPositions.length;
+
+          // 2. Mapeo de aristas espaciales y caras para detectar bordes abiertos y aristas vivas
+          const spatialEdgeFaces = new Map<string, number[]>();
+          const spatialFaces: [number, number, number][] = [];
+          const spatialFaceNormals: THREE.Vector3[] = [];
+
+          for (let f = 0; f < curNFaces; f++) {
+            const s0 = posToSpatial[curIdx[f * 3]];
+            const s1 = posToSpatial[curIdx[f * 3 + 1]];
+            const s2 = posToSpatial[curIdx[f * 3 + 2]];
+            if (s0 === s1 || s1 === s2 || s2 === s0) continue;
+
+            const fIdx = spatialFaces.length;
+            spatialFaces.push([s0, s1, s2]);
+
+            const v0 = spatialPositions[s0];
+            const v1 = spatialPositions[s1];
+            const v2 = spatialPositions[s2];
+            const ab = new THREE.Vector3().subVectors(v1, v0);
+            const ac = new THREE.Vector3().subVectors(v2, v0);
+            const fn = new THREE.Vector3().crossVectors(ab, ac);
+            if (fn.lengthSq() > 1e-12) fn.normalize();
+            else fn.set(0, 1, 0);
+            spatialFaceNormals.push(fn);
+
+            for (const [u, v] of [[s0, s1], [s1, s2], [s2, s0]]) {
+              const eKey = u < v ? `${u}_${v}` : `${v}_${u}`;
+              const list = spatialEdgeFaces.get(eKey) || [];
+              list.push(fIdx);
+              spatialEdgeFaces.set(eKey, list);
+            }
+          }
+
+          // 3. Detección de aristas vivas y bordes abiertos
+          const isLockedSpatial = new Uint8Array(nSpatial);
+          const spatialNeighbors: Set<number>[] = Array.from({ length: nSpatial }, () => new Set<number>());
+          let totalEdgeLen = 0;
+          let countedEdges = 0;
+
+          spatialEdgeFaces.forEach((fList, eKey) => {
+            const sep = eKey.indexOf('_');
+            const u = parseInt(eKey.substring(0, sep), 10);
+            const v = parseInt(eKey.substring(sep + 1), 10);
+
+            spatialNeighbors[u].add(v);
+            spatialNeighbors[v].add(u);
+
+            const edgeLen = spatialPositions[u].distanceTo(spatialPositions[v]);
+            totalEdgeLen += edgeLen;
+            countedEdges++;
+
+            if (fList.length === 1) {
+              // Borde abierto: estrictamente protegido para impedir desgarros o contracción de silueta
+              isLockedSpatial[u] = 1;
+              isLockedSpatial[v] = 1;
+            } else if (fList.length >= 2) {
+              // Arista viva o quiebre mecánico (> 35°)
+              const nA = spatialFaceNormals[fList[0]];
+              const nB = spatialFaceNormals[fList[1]];
+              if (nA && nB && nA.dot(nB) < 0.819) {
+                isLockedSpatial[u] = 1;
+                isLockedSpatial[v] = 1;
+              }
+            }
+          });
+
+          const avgEdgeLen = countedEdges > 0 ? totalEdgeLen / countedEdges : 0.05;
+          const maxDisp = avgEdgeLen * 0.10;
+
+          // 4. Normales promedio por nodo espacial
+          const spatialNormals: THREE.Vector3[] = Array.from({ length: nSpatial }, () => new THREE.Vector3());
+          spatialFaces.forEach(([s0, s1, s2], fIdx) => {
+            const fn = spatialFaceNormals[fIdx];
+            spatialNormals[s0].add(fn);
+            spatialNormals[s1].add(fn);
+            spatialNormals[s2].add(fn);
+          });
+          for (let s = 0; s < nSpatial; s++) {
+            if (spatialNormals[s].lengthSq() > 1e-12) spatialNormals[s].normalize();
+            else spatialNormals[s].set(0, 1, 0);
+          }
+
+          // 5. Filtro Taubin sin pérdida de volumen (λ = 0.18, μ = -0.19)
+          const lambda = 0.18;
+          const mu = -0.19;
+          const safeIters = Math.max(1, Math.min(iterations, 3));
+
+          let currentSpatial = spatialPositions.map(p => p.clone());
+          let nextSpatial = spatialPositions.map(p => p.clone());
+
+          for (let it = 0; it < safeIters; it++) {
+            // Sub-paso 1: paso positivo
+            for (let s = 0; s < nSpatial; s++) {
+              if (isLockedSpatial[s]) {
+                nextSpatial[s].copy(currentSpatial[s]);
+                continue;
+              }
+              const nbs = Array.from(spatialNeighbors[s]);
+              if (nbs.length < 3) {
+                nextSpatial[s].copy(currentSpatial[s]);
+                continue;
+              }
+
+              let cx = 0, cy = 0, cz = 0;
+              for (const nb of nbs) {
+                cx += currentSpatial[nb].x;
+                cy += currentSpatial[nb].y;
+                cz += currentSpatial[nb].z;
+              }
+              cx /= nbs.length; cy /= nbs.length; cz /= nbs.length;
+
+              const p = currentSpatial[s];
+              let dx = cx - p.x, dy = cy - p.y, dz = cz - p.z;
+
+              const n = spatialNormals[s];
+              const dot = dx * n.x + dy * n.y + dz * n.z;
+              dx -= dot * n.x;
+              dy -= dot * n.y;
+              dz -= dot * n.z;
+
+              const dispLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (dispLen > maxDisp) {
+                const scale = maxDisp / dispLen;
+                dx *= scale; dy *= scale; dz *= scale;
+              }
+
+              nextSpatial[s].set(p.x + dx * lambda, p.y + dy * lambda, p.z + dz * lambda);
+            }
+
+            for (let s = 0; s < nSpatial; s++) currentSpatial[s].copy(nextSpatial[s]);
+
+            // Sub-paso 2: paso negativo anti-contracción Taubin
+            for (let s = 0; s < nSpatial; s++) {
+              if (isLockedSpatial[s]) {
+                nextSpatial[s].copy(currentSpatial[s]);
+                continue;
+              }
+              const nbs = Array.from(spatialNeighbors[s]);
+              if (nbs.length < 3) {
+                nextSpatial[s].copy(currentSpatial[s]);
+                continue;
+              }
+
+              let cx = 0, cy = 0, cz = 0;
+              for (const nb of nbs) {
+                cx += currentSpatial[nb].x;
+                cy += currentSpatial[nb].y;
+                cz += currentSpatial[nb].z;
+              }
+              cx /= nbs.length; cy /= nbs.length; cz /= nbs.length;
+
+              const p = currentSpatial[s];
+              let dx = cx - p.x, dy = cy - p.y, dz = cz - p.z;
+
+              const n = spatialNormals[s];
+              const dot = dx * n.x + dy * n.y + dz * n.z;
+              dx -= dot * n.x;
+              dy -= dot * n.y;
+              dz -= dot * n.z;
+
+              const dispLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (dispLen > maxDisp) {
+                const scale = maxDisp / dispLen;
+                dx *= scale; dy *= scale; dz *= scale;
+              }
+
+              nextSpatial[s].set(p.x + dx * mu, p.y + dy * mu, p.z + dz * mu);
+            }
+
+            for (let s = 0; s < nSpatial; s++) currentSpatial[s].copy(nextSpatial[s]);
+          }
+
+          // 6. Asignar las posiciones sincronizadas a todos los vértices duplicados en la misma coordenada
+          for (let s = 0; s < nSpatial; s++) {
+            const vIndices = spatialToVerts.get(s);
+            if (!vIndices) continue;
+            const finalP = currentSpatial[s];
+            for (const vi of vIndices) {
+              curPosAttr.setXYZ(vi, finalP.x, finalP.y, finalP.z);
+            }
+          }
+
+          curPosAttr.needsUpdate = true;
+          geometry.computeVertexNormals();
         }
-        newPosAttr.needsUpdate = true;
-        geometry.computeVertexNormals();
       }
     });
 

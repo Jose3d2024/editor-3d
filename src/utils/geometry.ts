@@ -598,9 +598,12 @@ function buildStar(points: number, inner: number, outer: number, height: number)
     const topNext = 2 + nextI * 2;
     const botNext = 2 + nextI * 2 + 1;
 
-    faces.push({ indices: [topCenterIdx, topCurr, topNext] });
-    faces.push({ indices: [bottomCenterIdx, botNext, botCurr] });
-    faces.push({ indices: [topCurr, botCurr, botNext, topNext] });
+    // Tapa superior (visto desde +Y hacia abajo, sentido antihorario: centro -> siguiente -> actual)
+    faces.push({ indices: [topCenterIdx, topNext, topCurr] });
+    // Tapa inferior (visto desde -Y hacia arriba, sentido antihorario: centro -> actual -> siguiente)
+    faces.push({ indices: [bottomCenterIdx, botCurr, botNext] });
+    // Pared exterior (normal hacia afuera del objeto: actual arriba -> siguiente arriba -> siguiente abajo -> actual abajo)
+    faces.push({ indices: [topCurr, topNext, botNext, botCurr] });
   }
 
   return weldVertices(verts, faces);

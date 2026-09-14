@@ -343,8 +343,13 @@ interface Store extends AppState {
   isotropicRemeshObject: (id: string, targetEdgeLength?: number, iterations?: number) => Promise<void>;
   applyShrinkwrapToObject: (sourceId: string, targetId: string, config: import('../types').ShrinkwrapConfig) => Promise<void>;
   applySilhouetteVacuumWrapToObject: (sourceId: string, targetId: string, config?: import('../utils/shrinkwrap').SilhouetteVacuumWrapConfig) => Promise<void>;
+  optimizeConformedMeshToObject: (sourceId: string, targetId?: string, options?: import('../utils/shrinkwrap').OptimizeConformedMeshOptions) => Promise<void>;
+  pruneAirBridgingFacesToObject: (sourceId: string, targetId: string, options?: import('../utils/shrinkwrap').PruneAirFacesOptions) => Promise<void>;
+  cleanSpikesObject: (sourceId: string, targetId?: string) => Promise<void>;
   solidifyObject: (id: string, thickness?: number, offset?: number) => Promise<void>;
+  applyVoxelRemeshToObject: (id: string, options?: import('../utils/voxelRemesher').VoxelRemeshOptions) => Promise<void>;
   retopologizeObject: (id: string, options?: import('../utils/retopology').RetopologyOptions & { selectedMeshes?: string[]; convertToNative?: boolean }) => Promise<void>;
+  convertMeshToQuadsObject: (id: string, options?: { preserveCreases?: boolean; creaseAngleDeg?: number }) => Promise<void>;
   dissolveCoplanarObject: (id: string, angleToleranceDeg?: number, options?: { selectedMeshes?: string[] }) => Promise<void>;
   optimizeCurvedObject: (id: string, ratio?: number, options?: { preserveCreases?: boolean; creaseAngleDeg?: number; smoothNormals?: boolean; selectedMeshes?: string[] }) => Promise<void>;
   cleanIslandsObject: (id: string, minRatio?: number) => Promise<void>;
@@ -1015,7 +1020,12 @@ export const useStore = create<Store>()((set, get) => ({
     let cat = category || 'general';
     if (!label) {
       const prevProj = newHistory[newHistory.length - 1];
-      if (!prevProj) {
+      const processingTitle = get().meshProcessing?.title;
+
+      if (processingTitle) {
+        label = processingTitle;
+        cat = 'retopo';
+      } else if (!prevProj) {
         label = 'Modificación de Proyecto';
       } else if (project.objects.length > prevProj.objects.length) {
         label = `Añadir ${selObj?.name || 'Objeto'}`;
@@ -1024,8 +1034,43 @@ export const useStore = create<Store>()((set, get) => ({
         label = 'Eliminar Objeto';
         cat = 'delete';
       } else if (selObj) {
-        label = `Modificar ${selObj.name || selObj.type}`;
-        cat = 'edit';
+        const prevObj = prevProj.objects.find((o: any) => o.id === selObj.id);
+        if (prevObj) {
+          const prevVerts = prevObj.vertices?.length ?? (prevObj.stats?.vertices ?? 0);
+          const curVerts = vCount;
+          const prevFaces = prevObj.faces?.length ?? (prevObj.stats?.faces ?? 0);
+          const curFaces = fCount;
+
+          if (curFaces !== prevFaces && curFaces > 0 && prevFaces > 0) {
+            if (curFaces < prevFaces) {
+              label = `Poda de Malla (-${(prevFaces - curFaces).toLocaleString()} caras)`;
+              cat = 'retopo';
+            } else {
+              label = `Subdivisión / Relleno (+${(curFaces - prevFaces).toLocaleString()} caras)`;
+              cat = 'edit';
+            }
+          } else if (curVerts !== prevVerts && curVerts > 0 && prevVerts > 0) {
+            label = `Edición de Malla (${curVerts > prevVerts ? '+' : ''}${curVerts - prevVerts} v)`;
+            cat = 'edit';
+          } else if (
+            prevObj.transform && selObj.transform &&
+            (prevObj.transform.position.some((p: number, i: number) => Math.abs(p - selObj.transform.position[i]) > 1e-4) ||
+             prevObj.transform.rotation.some((r: number, i: number) => Math.abs(r - selObj.transform.rotation[i]) > 1e-4) ||
+             prevObj.transform.scale.some((s: number, i: number) => Math.abs(s - selObj.transform.scale[i]) > 1e-4))
+          ) {
+            label = 'Transformar: Mover / Rotar';
+            cat = 'transform';
+          } else if (JSON.stringify(prevObj.material) !== JSON.stringify(selObj.material) || prevObj.color !== selObj.color) {
+            label = 'Material y Color';
+            cat = 'material';
+          } else {
+            label = 'Edición de Malla';
+            cat = 'edit';
+          }
+        } else {
+          label = `Edición de ${selObj.name || selObj.type}`;
+          cat = 'edit';
+        }
       } else {
         label = 'Modificación de Escena';
       }
@@ -1136,6 +1181,100 @@ export const useStore = create<Store>()((set, get) => ({
         }
       ],
       historyIndex: 0
+    });
+  },
+  deleteHistoryStep: (targetIndex: number) => {
+    const { history, historySteps, historyIndex, selectedObjectId } = get();
+    if (history.length <= 1 || targetIndex < 0 || targetIndex >= history.length) {
+      get().clearHistory();
+      return;
+    }
+
+    const newHistory = history.filter((_, idx) => idx !== targetIndex);
+    const newSteps = historySteps.filter((_, idx) => idx !== targetIndex);
+
+    let newIndex = historyIndex;
+    if (targetIndex < historyIndex) {
+      newIndex = historyIndex - 1;
+    } else if (targetIndex === historyIndex) {
+      newIndex = Math.min(targetIndex, newHistory.length - 1);
+    }
+
+    const targetProject = JSON.parse(JSON.stringify(newHistory[newIndex]));
+    const selObj = selectedObjectId ? targetProject.objects.find((o: any) => o.id === selectedObjectId) : null;
+    const vCount = selObj?.vertices?.length ?? 0;
+    const fCount = selObj?.faces?.length ?? 0;
+    const curVerts = get().selectedVertexIndices;
+    const curFaces = get().selectedFaceIndices;
+    const curEdges = get().selectedEdgeIndices;
+
+    set({
+      history: newHistory,
+      historySteps: newSteps,
+      historyIndex: newIndex,
+      project: targetProject,
+      selectedVertexIndices: curVerts.filter(i => i < 10000 ? i < vCount : true),
+      selectedFaceIndices: curFaces.filter(i => i < fCount),
+      selectedEdgeIndices: curEdges.filter(i => i < vCount)
+    });
+  },
+  deleteFutureHistory: () => {
+    const { history, historySteps, historyIndex } = get();
+    if (historyIndex >= history.length - 1) return;
+    const newHistory = history.slice(0, historyIndex + 1);
+    const newSteps = historySteps.slice(0, historyIndex + 1);
+    set({
+      history: newHistory,
+      historySteps: newSteps
+    });
+  },
+  deletePastHistory: () => {
+    const { history, historySteps, historyIndex } = get();
+    if (historyIndex <= 0) return;
+    const newHistory = history.slice(historyIndex);
+    const newSteps = historySteps.slice(historyIndex);
+    set({
+      history: newHistory,
+      historySteps: newSteps,
+      historyIndex: 0
+    });
+  },
+  deleteHistoryRange: (fromIndex: number, toIndex: number) => {
+    const { history, historySteps, historyIndex, selectedObjectId } = get();
+    const minIdx = Math.max(0, Math.min(fromIndex, toIndex));
+    const maxIdx = Math.min(history.length - 1, Math.max(fromIndex, toIndex));
+
+    const newHistory = history.filter((_, idx) => idx < minIdx || idx > maxIdx);
+    const newSteps = historySteps.filter((_, idx) => idx < minIdx || idx > maxIdx);
+
+    if (newHistory.length === 0) {
+      get().clearHistory();
+      return;
+    }
+
+    let newIndex = historyIndex;
+    if (historyIndex > maxIdx) {
+      newIndex = historyIndex - (maxIdx - minIdx + 1);
+    } else if (historyIndex >= minIdx && historyIndex <= maxIdx) {
+      newIndex = Math.min(minIdx, newHistory.length - 1);
+    }
+
+    const targetProject = JSON.parse(JSON.stringify(newHistory[newIndex]));
+    const selObj = selectedObjectId ? targetProject.objects.find((o: any) => o.id === selectedObjectId) : null;
+    const vCount = selObj?.vertices?.length ?? 0;
+    const fCount = selObj?.faces?.length ?? 0;
+    const curVerts = get().selectedVertexIndices;
+    const curFaces = get().selectedFaceIndices;
+    const curEdges = get().selectedEdgeIndices;
+
+    set({
+      history: newHistory,
+      historySteps: newSteps,
+      historyIndex: newIndex,
+      project: targetProject,
+      selectedVertexIndices: curVerts.filter(i => i < 10000 ? i < vCount : true),
+      selectedFaceIndices: curFaces.filter(i => i < fCount),
+      selectedEdgeIndices: curEdges.filter(i => i < vCount)
     });
   },
 
@@ -2228,7 +2367,7 @@ export const useStore = create<Store>()((set, get) => ({
       selectedObjectIds: newIds,
       selectedObjectId: newIds[newIds.length - 1]
     });
-    get().saveHistory();
+    get().saveHistory('Duplicar Selección', 'create');
   },
   mirrorSelected: (axis) => {
     const { project, selectedObjectIds } = get();
@@ -2245,7 +2384,7 @@ export const useStore = create<Store>()((set, get) => ({
         })
       }
     });
-    get().saveHistory();
+    get().saveHistory('Espejar Objeto', 'transform');
   },
 
   smoothObject: async (id, factor, iterations = 1) => {
@@ -2261,14 +2400,14 @@ export const useStore = create<Store>()((set, get) => ({
         return;
       }
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? smoothedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Suavizado Laplaciano', 'edit');
       return;
     }
 
     if (obj.meshData) obj = await convertImportedToCSG(obj);
     const result = smoothMesh(obj, factor, iterations);
     set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
-    get().saveHistory();
+    get().saveHistory('Suavizado Laplaciano', 'edit');
   },
 
   roundAnglesObject: async (id, radius = 0.08, segments = 3, angleThresholdDeg = 35) => {
@@ -2298,7 +2437,7 @@ export const useStore = create<Store>()((set, get) => ({
         )
       }
     });
-    get().saveHistory();
+    get().saveHistory('Biselar / Redondear Ángulos', 'edit');
   },
 
   subdivideObject: async (id) => {
@@ -2314,14 +2453,14 @@ export const useStore = create<Store>()((set, get) => ({
         return;
       }
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? subdividedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Subdividir Malla', 'edit');
       return;
     }
 
     if (obj.meshData) obj = await convertImportedToCSG(obj);
     const result = subdivideMesh(obj);
     set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, type: 'MESH', parameters: {}, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {} } : o)}});
-    get().saveHistory();
+    get().saveHistory('Subdividir Malla', 'edit');
   },
 
   applyNoiseObject: async (id, config) => {
@@ -2524,7 +2663,7 @@ export const useStore = create<Store>()((set, get) => ({
         );
 
         set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-        get().saveHistory();
+        get().saveHistory('Relajación Tangencial', 'retopo');
 
         set(s => ({
           meshProcessing: s.meshProcessing ? {
@@ -2551,8 +2690,68 @@ export const useStore = create<Store>()((set, get) => ({
         };
       }
 
-      const { regularizeMeshTopology } = await import('../utils/meshUtils');
-      const result = regularizeMeshTopology(obj, { strength, iterations, featureAngleDeg });
+      let result: { vertices: V3[]; faces: MeshFace[] };
+
+      let targetObj: CSGObject | undefined = undefined;
+      const targetId = obj.parameters?.targetId || (get() as any).shrinkTargetId;
+      if (targetId) {
+        targetObj = get().project.objects.find(o => o.id === targetId);
+      }
+      if (!targetObj) {
+        // Buscar otro modelo de referencia en el proyecto (ej. modelo GLTF importado o malla densa)
+        targetObj = get().project.objects.find(o => o.id !== id && ((o.meshData && o.meshData.type === 'gltf') || (o.vertices && o.vertices.length > 500)));
+      }
+
+      if (targetObj) {
+        // Disponemos de una malla destino: relajación tangencial con re-proyección BVH a superficie
+        const { extractTargetGeometry, regularizeSurfaceOnBVH, getObjectWorldMatrix } = await import('../utils/shrinkwrap');
+        const { MeshBVH } = await import('three-mesh-bvh');
+        const targetGeo = await extractTargetGeometry(targetObj);
+        if (targetGeo && targetGeo.attributes.position && targetGeo.attributes.position.count > 0) {
+          const targetBvh = new MeshBVH(targetGeo);
+          const tgtPosAttr = targetGeo.attributes.position;
+          const tgtIndexAttr = targetGeo.index;
+          const getTgtFaceNormal = (faceIndex: number) => {
+            let i0 = faceIndex * 3, i1 = faceIndex * 3 + 1, i2 = faceIndex * 3 + 2;
+            if (tgtIndexAttr) {
+              i0 = tgtIndexAttr.getX(faceIndex * 3);
+              i1 = tgtIndexAttr.getX(faceIndex * 3 + 1);
+              i2 = tgtIndexAttr.getX(faceIndex * 3 + 2);
+            }
+            const p0 = new THREE.Vector3().fromBufferAttribute(tgtPosAttr, i0);
+            const p1 = new THREE.Vector3().fromBufferAttribute(tgtPosAttr, i1);
+            const p2 = new THREE.Vector3().fromBufferAttribute(tgtPosAttr, i2);
+            const fn = new THREE.Vector3().crossVectors(new THREE.Vector3().subVectors(p1, p0), new THREE.Vector3().subVectors(p2, p0)).normalize();
+            return fn.lengthSq() < 1e-6 ? new THREE.Vector3(0, 1, 0) : fn;
+          };
+
+          const srcWorldMat = getObjectWorldMatrix(obj);
+          const srcWorldInv = srcWorldMat.clone().invert();
+          const currentPositions = obj.vertices!.map(v => new THREE.Vector3(v[0], v[1], v[2]).applyMatrix4(srcWorldMat));
+
+          const regRes = regularizeSurfaceOnBVH(
+            currentPositions,
+            obj.faces || [],
+            targetBvh,
+            getTgtFaceNormal,
+            { iterations, strength }
+          );
+
+          const finalVerts: V3[] = regRes.positions.map(p => {
+            const loc = p.clone().applyMatrix4(srcWorldInv);
+            return [loc.x, loc.y, loc.z] as V3;
+          });
+
+          targetGeo.dispose();
+          result = { vertices: finalVerts, faces: obj.faces || [] };
+        } else {
+          const { regularizeMeshTopology } = await import('../utils/meshUtils');
+          result = regularizeMeshTopology(obj, { strength, iterations, featureAngleDeg });
+        }
+      } else {
+        const { regularizeMeshTopology } = await import('../utils/meshUtils');
+        result = regularizeMeshTopology(obj, { strength, iterations, featureAngleDeg });
+      }
       
       const updatedObj: CSGObject = {
         ...obj,
@@ -2567,7 +2766,7 @@ export const useStore = create<Store>()((set, get) => ({
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Relajación Tangencial', 'retopo');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -2622,7 +2821,7 @@ export const useStore = create<Store>()((set, get) => ({
         );
 
         set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-        get().saveHistory();
+        get().saveHistory('Remallado Isótropo Uniforme', 'retopo');
 
         set(s => ({
           meshProcessing: s.meshProcessing ? {
@@ -2669,7 +2868,7 @@ export const useStore = create<Store>()((set, get) => ({
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Remallado Isótropo Uniforme', 'retopo');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -2733,15 +2932,16 @@ export const useStore = create<Store>()((set, get) => ({
       } as any);
 
       const updatedObj: CSGObject = {
+        ...sourceObj,
         ...result.updatedObject,
         type: 'MESH',
-        parameters: {},
+        parameters: { ...(sourceObj.parameters || {}), ...(result.updatedObject.parameters || {}) },
         meshData: undefined,
         smoothShading: sourceObj.smoothShading ?? true,
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === sourceId ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Shrinkwrap (1 Pasada)', 'retopo');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -2802,15 +3002,16 @@ export const useStore = create<Store>()((set, get) => ({
       const result = await applySilhouetteVacuumWrap(sourceObj, targetObj, config);
 
       const updatedObj: CSGObject = {
+        ...sourceObj,
         ...result.updatedObject,
         type: 'MESH',
-        parameters: {},
+        parameters: { ...(sourceObj.parameters || {}), ...(result.updatedObject.parameters || {}) },
         meshData: undefined,
         smoothShading: sourceObj.smoothShading ?? true,
       };
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === sourceId ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Ceñir a Silueta (Vacuum Wrap)', 'retopo');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -2824,6 +3025,174 @@ export const useStore = create<Store>()((set, get) => ({
       }));
     } catch (e) {
       console.error('Error aplicando Vacuum Wrap:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  optimizeConformedMeshToObject: async (sourceId: string, targetId?: string, options: import('../utils/shrinkwrap').OptimizeConformedMeshOptions = {}) => {
+    const { project } = get();
+    let sourceObj = project.objects.find(o => o.id === sourceId);
+    const targetObj = targetId ? project.objects.find(o => o.id === targetId) : undefined;
+    if (!sourceObj) return;
+
+    const initialVerts = sourceObj.vertices?.length ?? sourceObj.stats?.vertices ?? 0;
+    const initialFaces = sourceObj.faces?.length ?? sourceObj.stats?.faces ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Optimización de Malla y Reducción de Polígonos',
+        subtitle: `Analizando estructura y reduciendo polígonos de "${sourceObj.name}"...`,
+        progress: 30,
+        objectName: sourceObj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (!sourceObj.vertices || sourceObj.vertices.length === 0) {
+        if (sourceObj.meshData) {
+          const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+          sourceObj = await convertImportedToCSG(sourceObj);
+        } else {
+          const { fromThreeGeometry } = await import('../utils/modifiers');
+          const geo = createBaseGeometry(sourceObj);
+          const res = fromThreeGeometry(geo);
+          sourceObj = {
+            ...sourceObj,
+            vertices: res.vertices,
+            faces: res.faces,
+          };
+        }
+      }
+
+      const { optimizeConformedMesh } = await import('../utils/shrinkwrap');
+      const result = await optimizeConformedMesh(sourceObj, targetObj, options);
+
+      const updatedObj: CSGObject = {
+        ...sourceObj,
+        ...result.updatedObject,
+        type: 'MESH',
+        parameters: { ...(sourceObj.parameters || {}), ...(result.updatedObject.parameters || {}) },
+        meshData: undefined,
+        smoothShading: sourceObj.smoothShading ?? true,
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === sourceId ? updatedObj : o)}});
+      get().saveHistory('Optimizar Malla (Reducción Estructural)', 'retopo');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Malla optimizada! (de ${initialFaces.toLocaleString()} a ${updatedObj.faces.length.toLocaleString()} caras, -${result.stats.reductionPct}%)`,
+          completed: true,
+          finalVertCount: updatedObj.vertices.length,
+          finalFaceCount: updatedObj.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error optimizando malla:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  pruneAirBridgingFacesToObject: async (sourceId: string, targetId: string, options: import('../utils/shrinkwrap').PruneAirFacesOptions = {}) => {
+    const { project } = get();
+    let sourceObj = project.objects.find(o => o.id === sourceId);
+    const targetObj = project.objects.find(o => o.id === targetId);
+    if (!sourceObj || !targetObj) return;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Poda de Membranas en el Aire',
+        subtitle: `Eliminando caras que flotan en el vacío respecto a "${targetObj.name}"...`,
+        progress: 35,
+        objectName: sourceObj.name,
+        vertCount: sourceObj.vertices?.length ?? 0,
+        faceCount: sourceObj.faces?.length ?? 0,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      const { pruneAirBridgingFaces } = await import('../utils/shrinkwrap');
+      const res = await pruneAirBridgingFaces(sourceObj, targetObj, options);
+
+      const updatedObj: CSGObject = {
+        ...sourceObj,
+        ...res.updatedObject,
+        type: 'MESH',
+        meshData: undefined,
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === sourceId ? updatedObj : o)}});
+      get().saveHistory('Podar Telas Flotantes (Anti-Huecos)', 'retopo');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Poda completada! (${res.prunedFacesCount} caras flotantes eliminadas, ${updatedObj.faces.length} caras finales)`,
+          completed: true,
+          finalVertCount: updatedObj.vertices.length,
+          finalFaceCount: updatedObj.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error podando membranas en el aire:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  cleanSpikesObject: async (sourceId: string, targetId?: string) => {
+    const { project } = get();
+    let sourceObj = project.objects.find(o => o.id === sourceId);
+    if (!sourceObj) return;
+    const targetObj = targetId ? project.objects.find(o => o.id === targetId) : undefined;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Limpieza de Espinas y Rebabas',
+        subtitle: `Eliminando espinas, caras filosas y triángulos invertidos...`,
+        progress: 40,
+        objectName: sourceObj.name,
+        vertCount: sourceObj.vertices?.length ?? 0,
+        faceCount: sourceObj.faces?.length ?? 0,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      const { cleanMeshSpikes } = await import('../utils/shrinkwrap');
+      const res = await cleanMeshSpikes(sourceObj, targetObj);
+
+      const updatedObj: CSGObject = {
+        ...sourceObj,
+        ...res.updatedObject,
+        type: 'MESH',
+        meshData: undefined,
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === sourceId ? updatedObj : o)}});
+      get().saveHistory('Limpiar Espinas y Rebabas', 'edit');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Limpieza completada! (${res.removedCount} espinas eliminadas, ${updatedObj.faces.length} caras finales)`,
+          completed: true,
+          finalVertCount: updatedObj.vertices.length,
+          finalFaceCount: updatedObj.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error limpiando espinas:', e);
       set({ meshProcessing: null });
     }
   },
@@ -2865,7 +3234,7 @@ export const useStore = create<Store>()((set, get) => ({
       const updatedObj = solidifyMesh(obj, thickness, offset);
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Modificador Solidificar', 'edit');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -2879,6 +3248,75 @@ export const useStore = create<Store>()((set, get) => ({
       }));
     } catch (e) {
       console.error('Error aplicando Solidify:', e);
+      set({ meshProcessing: null });
+    }
+  },
+
+  applyVoxelRemeshToObject: async (id: string, options: import('../utils/voxelRemesher').VoxelRemeshOptions = {}) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    const initialVerts = obj.vertices?.length ?? obj.stats?.vertices ?? 0;
+    const initialFaces = obj.faces?.length ?? obj.stats?.faces ?? 0;
+
+    set({
+      meshProcessing: {
+        active: true,
+        title: 'Remallado Voxel (SDF + Marching Cubes)',
+        subtitle: `Voxelizando "${obj.name}" y garantizando topología estanca...`,
+        progress: 20,
+        objectName: obj.name,
+        vertCount: initialVerts,
+        faceCount: initialFaces,
+      }
+    });
+    await new Promise(r => setTimeout(r, 40));
+
+    try {
+      if (!obj.vertices || obj.vertices.length === 0) {
+        if (obj.meshData) {
+          const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+          obj = await convertImportedToCSG(obj);
+        } else {
+          const { fromThreeGeometry } = await import('../utils/modifiers');
+          const geo = createBaseGeometry(obj);
+          const res = fromThreeGeometry(geo);
+          obj = {
+            ...obj,
+            vertices: res.vertices,
+            faces: res.faces,
+          };
+        }
+      }
+
+      const { voxelRemesh } = await import('../utils/voxelRemesher');
+      const result = await voxelRemesh(obj, options);
+
+      const updatedObj: CSGObject = {
+        ...obj,
+        ...result.updatedObject,
+        type: 'MESH',
+        parameters: { ...(obj.parameters || {}), ...(result.updatedObject.parameters || {}) },
+        meshData: undefined,
+        smoothShading: obj.smoothShading ?? true,
+      };
+
+      set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+      get().saveHistory('Remallado Voxel (SDF + BVH)', 'retopo');
+
+      set(s => ({
+        meshProcessing: s.meshProcessing ? {
+          ...s.meshProcessing,
+          progress: 100,
+          subtitle: `¡Remallado Voxel completado! (${result.stats.finalFaces} caras, ${result.stats.quads} quads, ${result.stats.triangles} tris)`,
+          completed: true,
+          finalVertCount: updatedObj.vertices.length,
+          finalFaceCount: updatedObj.faces.length,
+        } : null
+      }));
+    } catch (e) {
+      console.error('Error aplicando Remallado Voxel:', e);
       set({ meshProcessing: null });
     }
   },
@@ -2961,7 +3399,7 @@ export const useStore = create<Store>()((set, get) => ({
       }
 
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
-      get().saveHistory();
+      get().saveHistory('Disolver Caras Coplanares', 'edit');
 
       if (obj.meshData && obj.meshData.type === 'gltf') {
         set(s => ({
@@ -2997,7 +3435,7 @@ export const useStore = create<Store>()((set, get) => ({
     set({
       meshProcessing: {
         active: true,
-        title: 'ZRemesher: Auto-Retopología',
+        title: 'Remeser: Auto-Retopología',
         subtitle: `Inicializando análisis espacial y BVH (Objetivo: ${targetDesc})...`,
         progress: 15,
         objectName: obj.name,
@@ -3070,7 +3508,7 @@ export const useStore = create<Store>()((set, get) => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡ZRemesher completado! ${result.report.join(' · ')}`,
+            subtitle: `¡Remeser completado! ${result.report.join(' · ')}`,
             completed: true,
             finalVertCount: result.stats.vertices,
             finalFaceCount: result.stats.finalFaces,
@@ -3081,7 +3519,7 @@ export const useStore = create<Store>()((set, get) => ({
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
       const modeStr = options.mode === 'PURE_QUADS' ? '100% Quads' : (options.mode === 'QUAD_DOMINANT' ? 'Quads Dominante' : (options.mode === 'ISOTROPIC_TRI' ? 'Isótropo' : 'Retopología'));
       const polyCount = (updatedObj.stats?.faces || options.targetCount || (options as any).targetFaces || 5000).toLocaleString();
-      get().saveHistory(`ZRemesher: ${modeStr} (~${polyCount}p)`, 'retopo');
+      get().saveHistory(`Remeser: ${modeStr} (~${polyCount}p)`, 'retopo');
 
       if (obj.meshData && obj.meshData.type === 'gltf' && !options.convertToNative) {
         const finalVerts = updatedObj.stats?.vertices ?? 0;
@@ -3092,7 +3530,7 @@ export const useStore = create<Store>()((set, get) => ({
           meshProcessing: s.meshProcessing ? {
             ...s.meshProcessing,
             progress: 100,
-            subtitle: `¡ZRemesher completado! ${finalFaces.toLocaleString()} caras (${reduction > 0 ? `-${reduction}%` : ''} · ${quadsCount.toLocaleString()} quads generados) · Texturas y UVs preservadas`,
+            subtitle: `¡Remeser completado! ${finalFaces.toLocaleString()} caras (${reduction > 0 ? `-${reduction}%` : ''} · ${quadsCount.toLocaleString()} quads generados) · Texturas y UVs preservadas`,
             completed: true,
             finalVertCount: finalVerts,
             finalFaceCount: finalFaces,
@@ -3100,9 +3538,52 @@ export const useStore = create<Store>()((set, get) => ({
         }));
       }
     } catch (e) {
-      console.error('Error en ZRemesher:', e);
+      console.error('Error en Remeser:', e);
       set({ meshProcessing: null });
     }
+  },
+
+  convertMeshToQuadsObject: async (id, options = {}) => {
+    const { project } = get();
+    let obj = project.objects.find(o => o.id === id);
+    if (!obj) return;
+
+    if (obj.meshData) {
+      const { convertImportedToCSG } = await import('../utils/modifiers_advanced');
+      obj = await convertImportedToCSG(obj);
+    }
+    if (!obj.vertices || obj.vertices.length === 0) {
+      const { createBaseGeometry } = await import('../utils/csg');
+      const { fromThreeGeometry } = await import('../utils/modifiers');
+      const geo = createBaseGeometry(obj);
+      const res = fromThreeGeometry(geo);
+      obj = {
+        ...obj,
+        vertices: res.vertices,
+        faces: res.faces,
+      };
+    }
+
+    const { convertMeshToQuads } = await import('../utils/retopology');
+    const res = convertMeshToQuads(obj, options);
+    const updatedObj = {
+      ...res.updatedObject,
+      type: 'MESH' as const,
+      parameters: {},
+      meshData: undefined,
+      vertexOffsets: {},
+      smoothShading: true,
+      stats: {
+        ...(obj.stats || {}),
+        vertices: res.updatedObject.vertices.length,
+        faces: res.updatedObject.faces.length,
+        quads: res.quadsCount,
+        triangles: res.trianglesCount,
+      }
+    };
+
+    set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? updatedObj : o)}});
+    get().saveHistory(`Convertir a Quads (${res.quadsCount} quads)`, 'retopo');
   },
 
   optimizeCurvedObject: async (id, ratio = 0.5, options = { preserveCreases: true, creaseAngleDeg: 40, smoothNormals: true }) => {
@@ -4894,7 +5375,7 @@ export const useStore = create<Store>()((set, get) => ({
       const { healMesh } = await import('../utils/manifoldUtils');
       const result = await healMesh(obj.vertices, obj.faces);
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
-      get().saveHistory();
+      get().saveHistory('Curado Topológico Manifold', 'edit');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {
@@ -4937,7 +5418,7 @@ export const useStore = create<Store>()((set, get) => ({
       if (obj.meshData) obj = await convertImportedToCSG(obj);
       const result = fillHoles(obj);
       set({ project: { ...get().project, objects: get().project.objects.map(o => o.id === id ? { ...o, meshData: undefined, vertices: result.vertices, faces: result.faces, vertexOffsets: {}, stats: { vertices: result.vertices.length, faces: result.faces.length } } : o)}});
-      get().saveHistory();
+      get().saveHistory('Tapar Huecos Poligonales', 'edit');
 
       set(s => ({
         meshProcessing: s.meshProcessing ? {

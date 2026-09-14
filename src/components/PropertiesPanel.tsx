@@ -2122,9 +2122,14 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     regularizeObject,
     isotropicRemeshObject,
     retopologizeObject,
+    convertMeshToQuadsObject,
     applyShrinkwrapToObject,
     applySilhouetteVacuumWrapToObject,
+    optimizeConformedMeshToObject,
+    pruneAirBridgingFacesToObject,
+    cleanSpikesObject,
     solidifyObject,
+    applyVoxelRemeshToObject,
     faceSnapConfig,
     setFaceSnapConfig,
     toggleFaceSnap,
@@ -2176,10 +2181,37 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
   const [shrinkwrapOnlySelected, setShrinkwrapOnlySelected] = useState<boolean>(false);
   const [isApplyingShrinkwrap, setIsApplyingShrinkwrap] = useState<boolean>(false);
   const [retopoPlaneSubdivs, setRetopoPlaneSubdivs] = useState<number>(100);
-  const [retopoPlaneOrientation, setRetopoPlaneOrientation] = useState<'FRONT' | 'TOP' | 'SIDE'>('FRONT');
-  const [retopoCageSubdivs, setRetopoCageSubdivs] = useState<number>(64);
+  const [retopoPlaneOrientation, setRetopoPlaneOrientation] = useState<'FRONT' | 'TOP' | 'SIDE' | 'VIEW'>('FRONT');
+  const [retopoClampRayHits, setRetopoClampRayHits] = useState<boolean>(true);
+  const [retopoCageSubdivs, setRetopoCageSubdivs] = useState<number>(32);
   const [retopoCageShape, setRetopoCageShape] = useState<'ELLIPSOID' | 'BOX'>('ELLIPSOID');
+  const [retopoPruneAir, setRetopoPruneAir] = useState<boolean>(true);
+  const [retopoAirSensitivity, setRetopoAirSensitivity] = useState<'conservative' | 'balanced' | 'aggressive'>('balanced');
+  const [retopoAirDistThreshold, setRetopoAirDistThreshold] = useState<number>(0.035);
+  const [retopoMaxStretchRatio, setRetopoMaxStretchRatio] = useState<number>(2.6);
+  const [retopoAutoFillHoles, setRetopoAutoFillHoles] = useState<boolean>(true);
+  const [isFillingHoles, setIsFillingHoles] = useState<boolean>(false);
+  const [retopoAggressiveAir, setRetopoAggressiveAir] = useState<boolean>(false);
   const [isApplyingVacuum, setIsApplyingVacuum] = useState<boolean>(false);
+  const [isPruningAir, setIsPruningAir] = useState<boolean>(false);
+  const [isCleaningSpikes, setIsCleaningSpikes] = useState<boolean>(false);
+
+  // Estados de Optimización de Malla Ceñida a Silueta
+  const [retopoAutoOptimize, setRetopoAutoOptimize] = useState<boolean>(false);
+  const [retopoOptimizationRatio, setRetopoOptimizationRatio] = useState<number>(0.35);
+  const [retopoPreserveCreases, setRetopoPreserveCreases] = useState<boolean>(true);
+  const [retopoCreaseAngleDeg, setRetopoCreaseAngleDeg] = useState<number>(25);
+  const [retopoOutputMode, setRetopoOutputMode] = useState<'QUAD_DOMINANT' | 'PURE_QUADS' | 'TRIANGLES'>('QUAD_DOMINANT');
+  const [retopoReprojectTarget, setRetopoReprojectTarget] = useState<boolean>(true);
+  const [isOptimizingMesh, setIsOptimizingMesh] = useState<boolean>(false);
+
+  // Estados de Remallado Voxel (Comfy3D / GeomPack Pipeline)
+  const [voxelTargetFaces, setVoxelTargetFaces] = useState<number>(1200);
+  const [voxelResolution, setVoxelResolution] = useState<number>(44);
+  const [voxelPreserveSharp, setVoxelPreserveSharp] = useState<boolean>(true);
+  const [voxelSnapPlanar, setVoxelSnapPlanar] = useState<boolean>(true);
+  const [voxelOutputMode, setVoxelOutputMode] = useState<'QUAD_DOMINANT' | 'TRIANGLES'>('QUAD_DOMINANT');
+  const [isVoxelRemeshing, setIsVoxelRemeshing] = useState<boolean>(false);
 
   const [solidifyThickness, setSolidifyThickness] = useState<number>(0.05);
   const [solidifyOffset, setSolidifyOffset] = useState<number>(0.0);
@@ -2631,12 +2663,12 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             </button>
           </div>
 
-          {/* 3. ZRemesher: Auto-Retopología (Flujo de Quads) */}
+          {/* 3. Remeser: Auto-Retopología (Flujo de Quads) */}
           <div className="space-y-1.5 bg-zinc-950/70 border border-fuchsia-500/40 p-2 rounded-lg shadow-sm">
             <div className="flex items-center justify-between">
               <span className="text-[9.5px] text-fuchsia-300 font-bold flex items-center gap-1">
                 <Layers size={11} className="text-fuchsia-400" />
-                <span>3. ZRemesher: Auto-Retopología (Quads)</span>
+                <span>3. Remeser: Auto-Retopología (Quads)</span>
               </span>
               <span className="text-[8px] bg-fuchsia-950/80 text-fuchsia-300 border border-fuchsia-600/40 px-1 py-0.5 rounded font-mono font-bold">
                 Quad Flow
@@ -2665,6 +2697,15 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                 100% Quads (Puros)
               </button>
             </div>
+            <button
+              type="button"
+              onClick={() => convertMeshToQuadsObject(obj.id, { preserveCreases: false })}
+              className="w-full py-1 bg-zinc-900 hover:bg-zinc-800 text-cyan-300 border border-cyan-500/30 rounded text-[8.5px] font-bold transition-all shadow-sm active:scale-95 cursor-pointer flex items-center justify-center gap-1"
+              title="Convierte pares de caras triangulares coplanares en caras cuadriláteras (Quads) eliminando las aristas diagonales"
+            >
+              <Box size={10} className="text-cyan-400" />
+              <span>Convertir Malla a Quads (Disolver Diagonales)</span>
+            </button>
           </div>
 
           {/* 4. Snapping: Ajuste a Caras (Imán de Retopología) */}
@@ -2765,9 +2806,14 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                 ? project.objects.find(o => o.id === shrinkTargetId) 
                 : availableTargets[0];
 
+              const isCurrentObjCage = !!(obj.parameters as any)?.isWrapperCage || 
+                obj.name.toLowerCase().includes('cage') || 
+                obj.name.toLowerCase().includes('envoltura');
+              const effectiveTarget = (isCurrentObjCage && resolvedTarget) ? resolvedTarget : obj;
+
               const handleCreateRetopoPlane = (subdivs = retopoPlaneSubdivs, orient = retopoPlaneOrientation) => {
                 const newObj = createRetopoQuadPlane({
-                  targetObj: obj,
+                  targetObj: effectiveTarget,
                   subdivisions: subdivs,
                   orientation: orient,
                   marginFactor: 1.15
@@ -2775,12 +2821,12 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
                 addObject(newObj);
                 selectObject(newObj.id);
-                setShrinkTargetId(obj.id);
+                setShrinkTargetId(effectiveTarget.id);
               };
 
               const handleCreateWrapperCage = (subdivs = retopoCageSubdivs, shape = retopoCageShape) => {
                 const newObj = createRetopoCage({
-                  targetObj: obj,
+                  targetObj: effectiveTarget,
                   subdivisions: subdivs,
                   marginFactor: 1.08,
                   shape: shape
@@ -2788,11 +2834,117 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
 
                 addObject(newObj);
                 selectObject(newObj.id);
-                setShrinkTargetId(obj.id);
+                setShrinkTargetId(effectiveTarget.id);
               };
 
               return (
                 <div className="space-y-2">
+                  {/* Banner de ayuda rápida si el objeto activo es una Envoltura o Cage */}
+                  {(obj.name.toLowerCase().includes('cage') || obj.name.toLowerCase().includes('envoltura')) && (
+                    <div className="p-2.5 bg-gradient-to-r from-amber-950/70 via-orange-950/60 to-zinc-900/80 border border-amber-500/50 rounded-lg space-y-2 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-bold text-[9px] text-amber-300">
+                          <Scissors size={12} className="text-amber-400 shrink-0" />
+                          <span>¿Membranas o telas flotando entre patas/alas?</span>
+                        </div>
+                        <span className="text-[7.5px] bg-amber-500/20 text-amber-200 border border-amber-500/40 px-1 py-0.2 rounded font-mono font-bold">
+                          Anti-Huecos
+                        </span>
+                      </div>
+                      <p className="text-[8px] text-amber-200/90 leading-tight">
+                        Elimina las telas que flotan en el aire entre patas o bajo el vientre protegiendo las superficies reales y auto-sellando los huecos.
+                      </p>
+
+                      {/* Modo Sensibilidad */}
+                      <div className="grid grid-cols-3 gap-1 pt-0.5">
+                        {[
+                          { id: 'conservative', label: '🛡️ Conservador', desc: 'Cero huecos' },
+                          { id: 'balanced', label: '⚖️ Equilibrado', desc: 'Recomendado' },
+                          { id: 'aggressive', label: '⚡ Agresivo', desc: 'Separar patas' }
+                        ].map(s => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => {
+                              setRetopoAirSensitivity(s.id as any);
+                              if (s.id === 'conservative') {
+                                setRetopoMaxStretchRatio(3.5);
+                                setRetopoAirDistThreshold(0.055);
+                              } else if (s.id === 'aggressive') {
+                                setRetopoMaxStretchRatio(2.0);
+                                setRetopoAirDistThreshold(0.025);
+                              } else {
+                                setRetopoMaxStretchRatio(2.6);
+                                setRetopoAirDistThreshold(0.035);
+                              }
+                            }}
+                            className={`py-1 px-1 rounded text-[7.5px] font-bold text-center cursor-pointer transition-all ${
+                              retopoAirSensitivity === s.id
+                                ? 'bg-amber-600 text-white shadow-sm'
+                                : 'bg-zinc-900/80 text-zinc-400 hover:text-zinc-200 border border-white/5'
+                            }`}
+                            title={s.desc}
+                          >
+                            <div>{s.label}</div>
+                            <div className="text-[6.5px] font-normal opacity-80">{s.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex gap-1 pt-0.5">
+                        <button
+                          type="button"
+                          disabled={isPruningAir || isApplyingVacuum}
+                          onClick={async () => {
+                            const targetObj = resolvedTarget || availableTargets[0];
+                            if (!targetObj) {
+                              alert('Se necesita el modelo original de referencia para podar las telas flotantes.');
+                              return;
+                            }
+                            setIsPruningAir(true);
+                            try {
+                              await pruneAirBridgingFacesToObject(obj.id, targetObj.id, {
+                                sensitivity: retopoAirSensitivity,
+                                airDistanceThreshold: retopoAirDistThreshold,
+                                maxStretchRatio: retopoMaxStretchRatio,
+                                autoFillHoles: retopoAutoFillHoles,
+                                offset: shrinkwrapOffset
+                              });
+                            } catch (err) {
+                              console.error('Error al podar telas flotantes:', err);
+                              alert('Ocurrió un error al podar las membranas.');
+                            } finally {
+                              setIsPruningAir(false);
+                            }
+                          }}
+                          className="flex-1 py-1.5 bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white rounded font-bold text-[8.5px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-md active:scale-95"
+                        >
+                          <Scissors size={11} />
+                          <span>{isPruningAir ? 'Podando telas...' : '🧹 Limpiar Telas Ahora'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isFillingHoles}
+                          onClick={async () => {
+                            setIsFillingHoles(true);
+                            try {
+                              await fillHolesObject(obj.id);
+                            } catch (err) {
+                              console.error('Error tapando huecos:', err);
+                            } finally {
+                              setIsFillingHoles(false);
+                            }
+                          }}
+                          className="py-1.5 px-2 bg-emerald-900/80 hover:bg-emerald-800 text-emerald-200 border border-emerald-500/40 rounded font-bold text-[8.5px] flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95 shadow-sm"
+                          title="Detecta y cierra automáticamente cualquier borde abierto o agujero en la malla"
+                        >
+                          <span>{isFillingHoles ? 'Sellando...' : '🕳️ Tapar Huecos'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Selector y Generador de Malla de Retopología: Plano Quads o Cage Envoltura 3D */}
                   <div className="p-2 bg-cyan-950/30 border border-cyan-500/30 rounded-lg space-y-2">
                     <div className="flex items-center justify-between">
@@ -2834,11 +2986,12 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                       </div>
                       <div className="flex items-center justify-between gap-1 text-[7.5px]">
                         <span className="text-zinc-400">Orientación:</span>
-                        <div className="flex gap-1">
+                        <div className="flex flex-wrap gap-1">
                           {[
                             { id: 'FRONT', label: 'Frente (Z)' },
                             { id: 'TOP', label: 'Cenital (Y)' },
-                            { id: 'SIDE', label: 'Lateral (X)' }
+                            { id: 'SIDE', label: 'Lateral (X)' },
+                            { id: 'VIEW', label: 'Cámara Activa' }
                           ].map(orient => (
                             <button
                               key={orient.id}
@@ -2855,6 +3008,15 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                           ))}
                         </div>
                       </div>
+                      <label className="flex items-center gap-1.5 text-[7.5px] text-cyan-200 cursor-pointer pt-0.5">
+                        <input
+                          type="checkbox"
+                          checked={retopoClampRayHits}
+                          onChange={e => setRetopoClampRayHits(e.target.checked)}
+                          className="w-3 h-3 accent-cyan-500 rounded cursor-pointer"
+                        />
+                        <span>Preservar bordes exteriores del plano (evita colapsar en punta)</span>
+                      </label>
                       <button
                         type="button"
                         onClick={() => handleCreateRetopoPlane(retopoPlaneSubdivs, retopoPlaneOrientation)}
@@ -2871,18 +3033,19 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         <span>2. Cage Envoltura 3D (Silueta completa 360°):</span>
                         <span className="text-blue-300 font-mono font-bold">{retopoCageSubdivs}x{retopoCageSubdivs}</span>
                       </div>
-                      <div className="grid grid-cols-4 gap-1">
+                      <div className="grid grid-cols-5 gap-1">
                         {[
+                          { label: '8x8', val: 8 },
                           { label: '16x16', val: 16 },
-                          { label: '32x32', val: 32 },
-                          { label: '64x64', val: 64, star: true },
-                          { label: '100x100', val: 100 },
+                          { label: '24x24', val: 24 },
+                          { label: '32x32', val: 32, star: true },
+                          { label: '64x64', val: 64 },
                         ].map(preset => (
                           <button
                             key={preset.val}
                             type="button"
                             onClick={() => setRetopoCageSubdivs(preset.val)}
-                            className={`py-0.5 px-1 rounded text-[7.5px] font-mono font-bold transition-all cursor-pointer ${
+                            className={`py-0.5 px-0.5 rounded text-[7px] font-mono font-bold transition-all cursor-pointer ${
                               retopoCageSubdivs === preset.val
                                 ? 'bg-blue-600 text-white shadow-sm'
                                 : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
@@ -2897,7 +3060,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         <div className="flex gap-1">
                           {[
                             { id: 'ELLIPSOID', label: 'Elipsoide Proporcional' },
-                            { id: 'BOX', label: 'Caja Bounding' }
+                            { id: 'BOX', label: '📦 Caja (Recomendada para patas / bípedos)' }
                           ].map(shape => (
                             <button
                               key={shape.id}
@@ -2905,7 +3068,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                               onClick={() => setRetopoCageShape(shape.id as any)}
                               className={`px-1.5 py-0.5 rounded text-[7.5px] font-bold cursor-pointer transition-colors ${
                                 retopoCageShape === shape.id
-                                  ? 'bg-blue-600 text-white'
+                                  ? 'bg-blue-600 text-white shadow-sm'
                                   : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
                               }`}
                             >
@@ -2914,14 +3077,178 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                           ))}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleCreateWrapperCage(retopoCageSubdivs, retopoCageShape)}
-                        className="w-full py-1 bg-blue-600 hover:bg-blue-500 text-white rounded font-bold text-[8.5px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-sm active:scale-95"
-                      >
-                        <Box size={11} />
-                        <span>Crear Cage Envoltura Silueta ({retopoCageSubdivs}x{retopoCageSubdivs})</span>
-                      </button>
+                      <div className="space-y-1.5 pt-1 border-t border-blue-500/20">
+                        {/* Control de Optimización y Reducción de Polígonos */}
+                        <div className="p-1 bg-cyan-950/40 rounded border border-cyan-500/30 space-y-1">
+                          <label className="flex items-center justify-between gap-1 text-[7.5px] text-cyan-200 cursor-pointer">
+                            <span className="font-bold flex items-center gap-1">
+                              <Sparkles size={9} className="text-cyan-400" />
+                              <span>Decimar / Reducir polígonos tras envoltura</span>
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={retopoAutoOptimize}
+                              onChange={e => setRetopoAutoOptimize(e.target.checked)}
+                              className="w-3 h-3 accent-cyan-500 rounded cursor-pointer"
+                            />
+                          </label>
+                          {!retopoAutoOptimize && (
+                            <p className="text-[7px] text-cyan-300/80 leading-tight">
+                              ✓ <strong>Flujo de Quads Puro:</strong> Mantiene la cuadrícula regular y bucles ortogonales sin triángulos diagonales ni telarañas.
+                            </p>
+                          )}
+
+                          {retopoAutoOptimize && (
+                            <div className="space-y-1 pt-0.5 border-t border-cyan-500/20">
+                              <div className="flex items-center justify-between text-[7px] text-cyan-200/90">
+                                <span>Reducción de polígonos:</span>
+                                <span className="font-mono font-bold text-cyan-300">
+                                  {retopoOptimizationRatio === 0.5 ? '50% (Fiel)' : retopoOptimizationRatio === 0.35 ? '65% (Equilibrada ★)' : retopoOptimizationRatio === 0.2 ? '80% (Optimizada)' : '90% (Low-Poly)'}
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-4 gap-0.5">
+                                {[
+                                  { label: '50%', val: 0.5 },
+                                  { label: '65% ★', val: 0.35 },
+                                  { label: '80%', val: 0.2 },
+                                  { label: '90%', val: 0.1 }
+                                ].map(p => (
+                                  <button
+                                    key={p.val}
+                                    type="button"
+                                    onClick={() => setRetopoOptimizationRatio(p.val)}
+                                    className={`py-0.5 px-0.5 rounded text-[7px] font-mono transition-all cursor-pointer ${
+                                      retopoOptimizationRatio === p.val
+                                        ? 'bg-cyan-600 text-white font-bold shadow-sm'
+                                        : 'bg-zinc-900/90 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                                    }`}
+                                  >
+                                    {p.label}
+                                  </button>
+                                ))}
+                              </div>
+                              <div className="flex items-center justify-between pt-0.5">
+                                <label className="flex items-center gap-1 text-[7px] text-zinc-300 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={retopoPreserveCreases}
+                                    onChange={e => setRetopoPreserveCreases(e.target.checked)}
+                                    className="w-2.5 h-2.5 accent-cyan-500 rounded cursor-pointer"
+                                  />
+                                  <span>Bloquear aristas vivas</span>
+                                </label>
+                                <div className="flex items-center gap-0.5 bg-zinc-900 p-0.5 rounded border border-white/5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setRetopoOutputMode('QUAD_DOMINANT')}
+                                    className={`px-1 py-0.2 rounded text-[6.5px] font-bold transition-all ${
+                                      retopoOutputMode === 'QUAD_DOMINANT' ? 'bg-cyan-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                                    }`}
+                                    title="Quads Dominantes (conserva quads con algunos triángulos de transición)"
+                                  >
+                                    Quads
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setRetopoOutputMode('PURE_QUADS')}
+                                    className={`px-1 py-0.2 rounded text-[6.5px] font-bold transition-all ${
+                                      retopoOutputMode === 'PURE_QUADS' ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                                    }`}
+                                    title="100% Quads puros sin ninguna cara triangular"
+                                  >
+                                    100% Quads
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setRetopoOutputMode('TRIANGLES')}
+                                    className={`px-1 py-0.2 rounded text-[6.5px] font-bold transition-all ${
+                                      retopoOutputMode === 'TRIANGLES' ? 'bg-cyan-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                                    }`}
+                                    title="Triángulos isótropos estándar"
+                                  >
+                                    Tris
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <label className="flex items-center gap-1.5 text-[7.5px] text-blue-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={retopoPruneAir}
+                            onChange={e => setRetopoPruneAir(e.target.checked)}
+                            className="w-3 h-3 accent-blue-500 rounded cursor-pointer"
+                          />
+                          <span>Podar telas y membranas en el aire (separa patas automáticamente)</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 text-[7.5px] text-blue-300/80 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={retopoAggressiveAir}
+                            onChange={e => setRetopoAggressiveAir(e.target.checked)}
+                            disabled={!retopoPruneAir}
+                            className="w-3 h-3 accent-blue-500 rounded cursor-pointer disabled:opacity-40"
+                          />
+                          <span>Poda agresiva de chasms (elimina cortinas entre extremidades)</span>
+                        </label>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleCreateWrapperCage(retopoCageSubdivs, retopoCageShape)}
+                          className="py-1 bg-zinc-800 hover:bg-zinc-700 border border-blue-500/30 text-blue-200 rounded font-bold text-[8px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-sm active:scale-95"
+                        >
+                          <Box size={10} />
+                          <span>Solo Crear Cage</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isApplyingVacuum}
+                          onClick={async () => {
+                            setIsApplyingVacuum(true);
+                            try {
+                              const targetObjForWrap = effectiveTarget;
+                              const newObj = createRetopoCage({
+                                targetObj: targetObjForWrap,
+                                subdivisions: retopoCageSubdivs,
+                                marginFactor: 1.08,
+                                shape: retopoCageShape
+                              });
+                              addObject(newObj);
+                              selectObject(newObj.id);
+                              setShrinkTargetId(targetObjForWrap.id);
+                              await applySilhouetteVacuumWrapToObject(newObj.id, targetObjForWrap.id, {
+                                autoSubdivide: false,
+                                iterations: 6,
+                                relaxation: 0.22,
+                                offset: shrinkwrapOffset,
+                                clampToRayHitsOnly: false,
+                                pruneAirFaces: retopoPruneAir,
+                                aggressivePruning: retopoAggressiveAir,
+                                optimizeTopology: retopoAutoOptimize,
+                                reductionRatio: retopoOptimizationRatio,
+                                preserveCreases: retopoPreserveCreases,
+                                creaseAngleDeg: retopoCreaseAngleDeg,
+                                outputTopology: retopoOutputMode,
+                                snapPlanarFaces: true,
+                                snapSharpFeatures: true,
+                                antiRounding: true
+                              });
+                            } catch (err) {
+                              console.error('Error auto wrapping 360:', err);
+                              alert('Ocurrió un error al envolver la silueta 360.');
+                            } finally {
+                              setIsApplyingVacuum(false);
+                            }
+                          }}
+                          className="py-1 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 disabled:opacity-50 text-white rounded font-bold text-[8px] flex items-center justify-center gap-1 cursor-pointer transition-all shadow-md active:scale-95"
+                        >
+                          <Sparkles size={10} />
+                          <span>✨ Envolver 360°</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -3073,26 +3400,123 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                   )}
 
                   {/* Vacuum / Deep Silhouette Shrinkwrap Action Card */}
-                  <div className="p-2.5 bg-gradient-to-br from-cyan-950/80 via-blue-950/70 to-indigo-950/80 border-2 border-cyan-400/80 rounded-lg space-y-2 shadow-lg">
+                  <div className="p-2.5 bg-gradient-to-br from-cyan-950/80 via-blue-950/70 to-indigo-950/80 border-2 border-cyan-400/80 rounded-lg space-y-2.5 shadow-lg">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5 font-bold text-[9.5px] text-cyan-200">
                         <Sparkles size={13} className="text-cyan-400 animate-pulse" />
                         <span>✨ Ajustar a Silueta Completa (Vacuum Wrap)</span>
                       </div>
                       <span className="text-[7.5px] bg-cyan-500/30 text-cyan-200 border border-cyan-400/50 px-1.5 py-0.5 rounded font-mono font-bold">
-                        Recomendado
+                        Anti-Huecos
                       </span>
                     </div>
 
                     <p className="text-[8px] text-cyan-100/90 leading-relaxed">
-                      Succión profunda al vacío por contracción iterativa (5 pasadas con relajación Laplaciana). Si la malla tiene pocas caras (ej. 480 caras), <b>la subdivide automáticamente para alcanzar miles de vértices</b> y ceñirse entre las patas, bajo el vientre, cuello y silueta completa.
+                      Succión profunda al vacío por contracción iterativa (5 pasadas con relajación Laplaciana). Si la malla tiene pocas caras (ej. 480 caras), <b>la subdivide automáticamente para alcanzar miles de vértices</b> y ceñirse entre las patas, bajo el vientre, cuello y silueta completa sin agujeros.
                     </p>
+
+                    {/* Controles de Poda y Prevención de Huecos */}
+                    <div className="p-2 bg-black/40 border border-cyan-500/30 rounded-md space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8.5px] font-bold text-cyan-300">Poda de Telas en el Aire:</span>
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={retopoPruneAir}
+                            onChange={e => setRetopoPruneAir(e.target.checked)}
+                            className="w-3.5 h-3.5 accent-cyan-400 rounded cursor-pointer"
+                          />
+                          <span className="text-[8px] text-cyan-200 font-mono font-bold">{retopoPruneAir ? 'ACTIVA' : 'OFF'}</span>
+                        </label>
+                      </div>
+
+                      {retopoPruneAir && (
+                        <div className="space-y-1.5 pt-0.5">
+                          {/* Sensibilidad / Modo */}
+                          <div className="grid grid-cols-3 gap-1">
+                            {[
+                              { id: 'conservative', label: '🛡️ Conservador', sub: 'Cero Huecos' },
+                              { id: 'balanced', label: '⚖️ Equilibrado', sub: 'Recomendado' },
+                              { id: 'aggressive', label: '⚡ Agresivo', sub: 'Separar Patas' }
+                            ].map(s => (
+                              <button
+                                key={s.id}
+                                type="button"
+                                onClick={() => {
+                                  setRetopoAirSensitivity(s.id as any);
+                                  if (s.id === 'conservative') {
+                                    setRetopoMaxStretchRatio(3.5);
+                                    setRetopoAirDistThreshold(0.055);
+                                  } else if (s.id === 'aggressive') {
+                                    setRetopoMaxStretchRatio(2.0);
+                                    setRetopoAirDistThreshold(0.025);
+                                  } else {
+                                    setRetopoMaxStretchRatio(2.6);
+                                    setRetopoAirDistThreshold(0.035);
+                                  }
+                                }}
+                                className={`py-1 px-0.5 rounded text-[7.5px] font-bold text-center cursor-pointer transition-all ${
+                                  retopoAirSensitivity === s.id
+                                    ? 'bg-cyan-600 text-white shadow-sm'
+                                    : 'bg-zinc-900/90 text-zinc-400 hover:text-zinc-200 border border-white/5'
+                                }`}
+                              >
+                                <div>{s.label}</div>
+                                <div className="text-[6.5px] font-normal opacity-80">{s.sub}</div>
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* Sliders de ajuste fino */}
+                          <div className="space-y-1 pt-0.5">
+                            <div className="flex items-center justify-between text-[7.5px] text-zinc-300">
+                              <span>Sensibilidad / Umbral Aire:</span>
+                              <span className="font-mono text-cyan-300 font-bold">{retopoAirDistThreshold.toFixed(3)}</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.01}
+                              max={0.08}
+                              step={0.005}
+                              value={retopoAirDistThreshold}
+                              onChange={e => setRetopoAirDistThreshold(parseFloat(e.target.value))}
+                              className="w-full h-1 accent-cyan-400 bg-zinc-800 rounded cursor-pointer"
+                            />
+
+                            <div className="flex items-center justify-between text-[7.5px] text-zinc-300 pt-0.5">
+                              <span>Estiramiento Máx. Aristas:</span>
+                              <span className="font-mono text-cyan-300 font-bold">{retopoMaxStretchRatio.toFixed(1)}x</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={1.6}
+                              max={4.0}
+                              step={0.1}
+                              value={retopoMaxStretchRatio}
+                              onChange={e => setRetopoMaxStretchRatio(parseFloat(e.target.value))}
+                              className="w-full h-1 accent-cyan-400 bg-zinc-800 rounded cursor-pointer"
+                            />
+                          </div>
+
+                          {/* Auto-sellar huecos checkbox */}
+                          <label className="flex items-center justify-between gap-1.5 p-1 bg-zinc-900/80 rounded border border-white/5 cursor-pointer">
+                            <span className="text-[7.5px] text-zinc-300">Auto-sellar aberturas y huecos al podar</span>
+                            <input
+                              type="checkbox"
+                              checked={retopoAutoFillHoles}
+                              onChange={e => setRetopoAutoFillHoles(e.target.checked)}
+                              className="w-3.5 h-3.5 accent-emerald-500 rounded cursor-pointer"
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
 
                     <button
                       type="button"
                       disabled={isApplyingVacuum || isApplyingShrinkwrap}
                       onClick={async () => {
-                        const targetObj = resolvedTarget;
+                        const targetObj = resolvedTarget || availableTargets[0];
                         if (!targetObj) {
                           alert('Para ajustar la silueta se requiere una malla objetivo (High-Poly) sobre la cual proyectar los vértices.');
                           return;
@@ -3101,11 +3525,25 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         setIsApplyingVacuum(true);
                         try {
                           await applySilhouetteVacuumWrapToObject(obj.id, targetObj.id, {
-                            autoSubdivide: true,
-                            minFacesTarget: 6000,
-                            iterations: 5,
-                            relaxation: 0.42,
-                            offset: shrinkwrapOffset
+                            autoSubdivide: false,
+                            iterations: 6,
+                            relaxation: 0.22,
+                            offset: shrinkwrapOffset,
+                            clampToRayHitsOnly: retopoClampRayHits,
+                            pruneAirFaces: retopoPruneAir,
+                            sensitivity: retopoAirSensitivity,
+                            airDistanceThreshold: retopoAirDistThreshold,
+                            maxStretchRatio: retopoMaxStretchRatio,
+                            autoFillHoles: retopoAutoFillHoles,
+                            aggressivePruning: retopoAirSensitivity === 'aggressive',
+                            optimizeTopology: retopoAutoOptimize,
+                            reductionRatio: retopoOptimizationRatio,
+                            preserveCreases: retopoPreserveCreases,
+                            creaseAngleDeg: retopoCreaseAngleDeg,
+                            outputTopology: retopoOutputMode,
+                            snapPlanarFaces: true,
+                            snapSharpFeatures: true,
+                            antiRounding: true
                           });
                         } catch (err) {
                           console.error('Error applying vacuum shrinkwrap:', err);
@@ -3119,6 +3557,223 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                       <Sparkles size={12} />
                       <span>{isApplyingVacuum ? 'Ajustando y Succionando Silueta...' : 'Ceñir a Silueta Completa Ahora'}</span>
                     </button>
+
+                    <div className="grid grid-cols-3 gap-1 pt-0.5">
+                      <button
+                        type="button"
+                        disabled={isApplyingVacuum || isApplyingShrinkwrap || isPruningAir}
+                        onClick={async () => {
+                          const targetObj = resolvedTarget || availableTargets[0];
+                          if (!targetObj) {
+                            alert('Selecciona una malla objetivo (High-Poly) para detectar qué caras están suspendidas en el aire.');
+                            return;
+                          }
+
+                          setIsPruningAir(true);
+                          try {
+                            let cageObjId = obj.id;
+                            let highPolyId = targetObj.id;
+                            // Si el usuario tiene seleccionada la estrella o modelo original en vez de la jaula de envoltura:
+                            if (!obj.name.toLowerCase().includes('cage') && !obj.name.toLowerCase().includes('envoltura')) {
+                              const allObjs = useStore.getState().project.objects;
+                              const matchingCage = allObjs.find(o => o.id !== obj.id && (o.name.toLowerCase().includes('cage') || o.name.toLowerCase().includes('envoltura')));
+                              if (matchingCage) {
+                                cageObjId = matchingCage.id;
+                                highPolyId = obj.id;
+                              }
+                            }
+
+                            await pruneAirBridgingFacesToObject(cageObjId, highPolyId, {
+                              sensitivity: retopoAirSensitivity,
+                              airDistanceThreshold: retopoAirDistThreshold,
+                              maxStretchRatio: retopoMaxStretchRatio,
+                              autoFillHoles: retopoAutoFillHoles,
+                              offset: shrinkwrapOffset
+                            });
+                          } catch (err) {
+                            console.error('Error podando caras en el aire:', err);
+                            alert('Ocurrió un error al podar las membranas flotantes.');
+                          } finally {
+                            setIsPruningAir(false);
+                          }
+                        }}
+                        className="py-1.5 px-1 bg-amber-950/70 hover:bg-amber-900/90 text-amber-200 border border-amber-500/60 rounded font-bold text-[7.5px] flex items-center justify-center gap-0.5 cursor-pointer transition-all active:scale-95 shadow-sm text-center"
+                        title="Elimina telas y membranas suspendidas en el aire respetando la superficie y sin crear agujeros"
+                      >
+                        <Scissors size={10} className="text-amber-400 shrink-0" />
+                        <span>{isPruningAir ? 'Podando...' : '✂️ Podar Telas'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isCleaningSpikes}
+                        onClick={async () => {
+                          const targetObj = resolvedTarget || availableTargets[0];
+                          setIsCleaningSpikes(true);
+                          try {
+                            await cleanSpikesObject(obj.id, targetObj?.id);
+                          } catch (err) {
+                            console.error('Error limpiando espinas:', err);
+                          } finally {
+                            setIsCleaningSpikes(false);
+                          }
+                        }}
+                        className="py-1.5 px-1 bg-indigo-950/70 hover:bg-indigo-900/90 text-indigo-200 border border-indigo-500/60 rounded font-bold text-[7.5px] flex items-center justify-center gap-0.5 cursor-pointer transition-all active:scale-95 shadow-sm text-center"
+                        title="Elimina rebabas, triángulos filosos o en aguja y caras invertidas suavizando el corte"
+                      >
+                        <Sparkles size={10} className="text-indigo-400 shrink-0" />
+                        <span>{isCleaningSpikes ? 'Limpiando...' : '🧹 Limpiar Espinas'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isFillingHoles}
+                        onClick={async () => {
+                          setIsFillingHoles(true);
+                          try {
+                            await fillHolesObject(obj.id);
+                          } catch (err) {
+                            console.error('Error tapando huecos:', err);
+                          } finally {
+                            setIsFillingHoles(false);
+                          }
+                        }}
+                        className="py-1.5 px-1 bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-200 border border-emerald-500/60 rounded font-bold text-[7.5px] flex items-center justify-center gap-0.5 cursor-pointer transition-all active:scale-95 shadow-sm text-center"
+                        title="Cierra y triangula automáticamente todos los agujeros o bordes abiertos de la malla"
+                      >
+                        <span>{isFillingHoles ? 'Sellando...' : '🕳️ Tapar Huecos'}</span>
+                      </button>
+                    </div>
+
+                    {/* Optimización de Malla y Reducción Estructural de Polígonos */}
+                    <div className="p-2 bg-gradient-to-br from-cyan-950/40 via-blue-950/30 to-zinc-900/60 border border-cyan-500/40 rounded-lg space-y-1.5 mt-2 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-bold text-[8.5px] text-cyan-200">
+                          <Sparkles size={11} className="text-cyan-400" />
+                          <span>Optimizar Malla (Reducir Polígonos)</span>
+                        </div>
+                        <span className="text-[7.5px] px-1.5 py-0.5 rounded bg-cyan-900/60 border border-cyan-400/30 text-cyan-300 font-mono font-bold">
+                          {obj.faces?.length || 0} caras
+                        </span>
+                      </div>
+                      <p className="text-[7.5px] text-zinc-300 leading-tight">
+                        Reduce la densidad poligonal conservando el 100% de la forma y aristas vivas mediante simplificación geométrica adaptativa y reproyección al objetivo.
+                      </p>
+
+                      <div className="space-y-1 bg-black/40 p-1.5 rounded border border-white/5">
+                        <div className="flex items-center justify-between text-[7px] text-zinc-300">
+                          <span>Nivel de reducción:</span>
+                          <span className="font-mono font-bold text-cyan-300">
+                            {retopoOptimizationRatio === 0.5 ? '50% (Fiel)' : retopoOptimizationRatio === 0.35 ? '65% (Equilibrada ★)' : retopoOptimizationRatio === 0.2 ? '80% (Agresiva)' : '90% (Low-Poly)'}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1">
+                          {[
+                            { label: '50%', val: 0.5 },
+                            { label: '65% ★', val: 0.35 },
+                            { label: '80%', val: 0.2 },
+                            { label: '90%', val: 0.1 }
+                          ].map(preset => (
+                            <button
+                              key={preset.val}
+                              type="button"
+                              onClick={() => setRetopoOptimizationRatio(preset.val)}
+                              className={`py-0.5 px-0.5 rounded text-[7px] font-mono font-bold transition-all cursor-pointer ${
+                                retopoOptimizationRatio === preset.val
+                                  ? 'bg-cyan-600 text-white shadow-sm ring-1 ring-cyan-400'
+                                  : 'bg-zinc-800/80 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'
+                              }`}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-1 pt-1">
+                          <label className="flex items-center gap-1 text-[7px] text-zinc-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={retopoPreserveCreases}
+                              onChange={e => setRetopoPreserveCreases(e.target.checked)}
+                              className="w-3 h-3 accent-cyan-500 rounded cursor-pointer"
+                            />
+                            <span>Bloquear aristas vivas</span>
+                          </label>
+
+                          <label className="flex items-center gap-1 text-[7px] text-zinc-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={retopoReprojectTarget}
+                              onChange={e => setRetopoReprojectTarget(e.target.checked)}
+                              className="w-3 h-3 accent-cyan-500 rounded cursor-pointer"
+                            />
+                            <span>{resolvedTarget ? `Reproyectar a "${resolvedTarget.name.slice(0, 10)}"` : 'Reproyectar a forma original'}</span>
+                          </label>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                          <span className="text-[7px] text-zinc-400">Topología:</span>
+                          <div className="flex items-center gap-1 bg-zinc-900 p-0.5 rounded border border-white/5">
+                            <button
+                              type="button"
+                              onClick={() => setRetopoOutputMode('QUAD_DOMINANT')}
+                              className={`px-1.5 py-0.5 rounded text-[7px] font-bold transition-all ${
+                                retopoOutputMode === 'QUAD_DOMINANT' ? 'bg-cyan-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              Quads
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRetopoOutputMode('PURE_QUADS')}
+                              className={`px-1.5 py-0.5 rounded text-[7px] font-bold transition-all ${
+                                retopoOutputMode === 'PURE_QUADS' ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              100% Quads
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setRetopoOutputMode('TRIANGLES')}
+                              className={`px-1.5 py-0.5 rounded text-[7px] font-bold transition-all ${
+                                retopoOutputMode === 'TRIANGLES' ? 'bg-cyan-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              Triángulos
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={isOptimizingMesh || isApplyingVacuum}
+                        onClick={async () => {
+                          setIsOptimizingMesh(true);
+                          try {
+                            const targetObj = resolvedTarget;
+                            await optimizeConformedMeshToObject(obj.id, targetObj?.id, {
+                              targetReductionRatio: retopoOptimizationRatio,
+                              preserveCreases: retopoPreserveCreases,
+                              creaseAngleDeg: retopoCreaseAngleDeg,
+                              outputTopology: retopoOutputMode,
+                              reprojectToTarget: retopoReprojectTarget,
+                              offset: shrinkwrapOffset,
+                              errorTolerance: 0.035
+                            });
+                          } catch (err) {
+                            console.error('Error optimizando malla:', err);
+                            alert('Ocurrió un error al optimizar la malla.');
+                          } finally {
+                            setIsOptimizingMesh(false);
+                          }
+                        }}
+                        className="w-full py-1.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white rounded font-bold text-[8.5px] flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md active:scale-95"
+                      >
+                        <Sparkles size={11} />
+                        <span>{isOptimizingMesh ? 'Optimizando Estructura...' : '⚡ Reducir Polígonos Ahora'}</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* Standard 1-Pass Shrinkwrap Button & Helpers */}
@@ -3174,6 +3829,145 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         <span>✨ Suavizar y Relajar</span>
                       </button>
                     </div>
+                  </div>
+
+                  {/* ── SECCIÓN: REMALLADO VOXEL (SDF + MARCHING CUBES - PIPELINE COMFY3D / MICHAEL GOLD) ── */}
+                  <div className="p-2.5 bg-gradient-to-br from-indigo-950/40 via-purple-950/30 to-zinc-950/80 border border-indigo-500/40 rounded-lg space-y-2 mt-2 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 font-bold text-[9px] text-indigo-200">
+                        <Layers size={12} className="text-indigo-400 animate-pulse" />
+                        <span>🧬 Remallado Voxel (SDF + Anti-Redondeo)</span>
+                      </div>
+                      <span className="text-[7.5px] px-1.5 py-0.5 rounded bg-indigo-900/60 border border-indigo-400/30 text-indigo-300 font-mono font-bold">
+                        100% Estanco
+                      </span>
+                    </div>
+
+                    <p className="text-[7.5px] text-zinc-300 leading-tight">
+                      Basado en el pipeline de <b>Michael Gold (Comfy3D / GeomPack)</b>: Rasteriza en campo SDF implícito, extrae isosuperficie con Marching Cubes, proyecta con BVH y <b>ancla las caras planas y puntas vivas</b> para evitar el redondeo.
+                    </p>
+
+                    <div className="space-y-1.5 bg-black/40 p-2 rounded border border-white/5">
+                      {/* Presupuesto de caras */}
+                      <div className="space-y-0.5">
+                        <div className="flex items-center justify-between text-[7.5px] text-zinc-300">
+                          <span>Presupuesto objetivo:</span>
+                          <span className="font-mono font-bold text-indigo-300">{voxelTargetFaces} caras</span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1">
+                          {[
+                            { label: '400', val: 400 },
+                            { label: '800 ★', val: 800 },
+                            { label: '1500', val: 1500 },
+                            { label: '3000', val: 3000 }
+                          ].map(p => (
+                            <button
+                              key={p.val}
+                              type="button"
+                              onClick={() => setVoxelTargetFaces(p.val)}
+                              className={`py-0.5 rounded text-[7px] font-mono font-bold transition-all cursor-pointer ${
+                                voxelTargetFaces === p.val
+                                  ? 'bg-indigo-600 text-white shadow-sm ring-1 ring-indigo-400'
+                                  : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                              }`}
+                            >
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Resolución Voxel */}
+                      <div className="space-y-0.5 pt-0.5">
+                        <div className="flex items-center justify-between text-[7.5px] text-zinc-300">
+                          <span>Resolución del Voxel Grid:</span>
+                          <span className="font-mono font-bold text-indigo-300">{voxelResolution}³ vóxeles</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={24}
+                          max={64}
+                          step={4}
+                          value={voxelResolution}
+                          onChange={e => setVoxelResolution(parseInt(e.target.value))}
+                          className="w-full h-1 accent-indigo-400 bg-zinc-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      {/* Claves Anti-Redondeo */}
+                      <div className="space-y-1 pt-1 border-t border-white/5">
+                        <label className="flex items-center gap-1.5 text-[7.5px] text-indigo-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={voxelPreserveSharp}
+                            onChange={e => setVoxelPreserveSharp(e.target.checked)}
+                            className="w-3.5 h-3.5 accent-indigo-500 rounded cursor-pointer"
+                          />
+                          <span className="font-medium">Bloquear Puntas y Esquinas Vivas (Anti-Redondeo)</span>
+                        </label>
+
+                        <label className="flex items-center gap-1.5 text-[7.5px] text-indigo-200 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={voxelSnapPlanar}
+                            onChange={e => setVoxelSnapPlanar(e.target.checked)}
+                            className="w-3.5 h-3.5 accent-indigo-500 rounded cursor-pointer"
+                          />
+                          <span className="font-medium">Anclar Cara Superior/Inferior Plana (Cero Abombamiento)</span>
+                        </label>
+                      </div>
+
+                      {/* Modo de salida */}
+                      <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                        <span className="text-[7.5px] text-zinc-400">Flujo de Salida:</span>
+                        <div className="flex items-center gap-1 bg-zinc-900 p-0.5 rounded border border-white/5">
+                          <button
+                            type="button"
+                            onClick={() => setVoxelOutputMode('QUAD_DOMINANT')}
+                            className={`px-1.5 py-0.5 rounded text-[7px] font-bold transition-all ${
+                              voxelOutputMode === 'QUAD_DOMINANT' ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                            }`}
+                          >
+                            Quads Dominantes
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setVoxelOutputMode('TRIANGLES')}
+                            className={`px-1.5 py-0.5 rounded text-[7px] font-bold transition-all ${
+                              voxelOutputMode === 'TRIANGLES' ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                            }`}
+                          >
+                            Triángulos
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isVoxelRemeshing || isApplyingVacuum || isApplyingShrinkwrap}
+                      onClick={async () => {
+                        setIsVoxelRemeshing(true);
+                        try {
+                          await applyVoxelRemeshToObject(obj.id, {
+                            targetFaces: voxelTargetFaces,
+                            voxelResolution,
+                            preserveSharpFeatures: voxelPreserveSharp,
+                            snapPlanarFaces: voxelSnapPlanar,
+                            outputTopology: voxelOutputMode
+                          });
+                        } catch (err) {
+                          console.error('Error in voxel remesh:', err);
+                          alert('Ocurrió un error al ejecutar el Remallado Voxel.');
+                        } finally {
+                          setIsVoxelRemeshing(false);
+                        }
+                      }}
+                      className="w-full py-2 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:to-pink-500 disabled:opacity-50 text-white rounded font-bold text-[9px] flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-md active:scale-95"
+                    >
+                      <Sparkles size={12} />
+                      <span>{isVoxelRemeshing ? 'Rasterizando y Remallando Vóxeles...' : '🚀 Ejecutar Remallado Voxel Estanco'}</span>
+                    </button>
                   </div>
                 </div>
               );
@@ -3618,7 +4412,7 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                 : 'text-zinc-400 hover:text-fuchsia-300'
             }`}
           >
-            🔷 ZRemesher
+            🔷 Remeser
           </button>
         </div>
 
@@ -3647,12 +4441,12 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
         </div>
 
         {optTab === 'ZREMESHER' ? (
-          /* Modo ZRemesher: Auto-Retopología con Flujo de Quads */
+          /* Modo Remeser: Auto-Retopología con Flujo de Quads */
           <div className="p-2.5 rounded-lg border border-fuchsia-500/30 bg-gradient-to-b from-fuchsia-950/40 via-zinc-900/80 to-zinc-900 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-bold text-fuchsia-300 uppercase tracking-wide flex items-center gap-1.5">
                 <Layers size={13} className="text-fuchsia-400" />
-                ZRemesher: Auto-Retopología
+                Remeser: Auto-Retopología
               </span>
               <span className="text-[8px] bg-fuchsia-950 text-fuchsia-200 border border-fuchsia-500/40 px-1.5 py-0.5 rounded font-mono font-bold">
                 Quad Flow
@@ -3675,7 +4469,7 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                       ? 'bg-fuchsia-600 border-fuchsia-400 text-white shadow'
                       : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-white'
                   }`}
-                  title="Cuadriláteros dominantes con bucles de bordes suaves (Estándar ZRemesher)"
+                  title="Cuadriláteros dominantes con bucles de bordes suaves (Estándar Remeser)"
                 >
                   🔷 Quads Dom.
                 </button>
@@ -4153,7 +4947,7 @@ const OptimizeMeshSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
             {isOptimizing
               ? 'Procesando retopología...'
               : optTab === 'ZREMESHER'
-                ? `⚡ Ejecutar ZRemesher (${retopoMode === 'PURE_QUADS' ? '100% Quads' : retopoMode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'} ~${retopoTargetPolys.toLocaleString()}p)`
+                ? `⚡ Ejecutar Remeser (${retopoMode === 'PURE_QUADS' ? '100% Quads' : retopoMode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'} ~${retopoTargetPolys.toLocaleString()}p)`
                 : optTab === 'CURVED'
                   ? `Optimizar Curvas ${selectedGLTFMeshes.length > 0 ? `(${selectedGLTFMeshes.length} partes)` : 'y Redondeados'} (-${reductionPercent}%)`
                   : `Optimizar ${selectedGLTFMeshes.length > 0 ? `Selección (${selectedGLTFMeshes.length} partes)` : 'Malla Completa'}`}

@@ -353,7 +353,97 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
       groupRef.current?.children.find((c: any) => c.userData?.id === id) ||
       primitivesGroupRef.current?.children.find((c: any) => c.userData?.id === id)) as THREE.Mesh | undefined;
   };
+
+  const getAllObjectMeshes = (id: string | null | undefined): THREE.Mesh[] => {
+    if (!id) return [];
+    const results: THREE.Mesh[] = [];
+    const main = meshesRef.current.get(id);
+    if (main) {
+      main.updateMatrixWorld(true);
+      if ((main as THREE.Mesh).isMesh) {
+        results.push(main as THREE.Mesh);
+      } else {
+        main.traverse((child: any) => {
+          if (child.isMesh && !child.userData?.isWireOverlay && child.visible !== false) {
+            results.push(child);
+          }
+        });
+      }
+    }
+    // Also check primitivesGroup for proxy meshes if main didn't yield meshes
+    if (results.length === 0 && primitivesGroupRef.current) {
+      primitivesGroupRef.current.updateMatrixWorld(true);
+      primitivesGroupRef.current.children.forEach((c: any) => {
+        if (c.userData?.id === id && (c as THREE.Mesh).isMesh) {
+          results.push(c as THREE.Mesh);
+        }
+      });
+    }
+    // Also check groupRef
+    if (results.length === 0 && groupRef.current) {
+      groupRef.current.updateMatrixWorld(true);
+      groupRef.current.children.forEach((c: any) => {
+        if (c.userData?.id === id) {
+          if ((c as THREE.Mesh).isMesh) results.push(c as THREE.Mesh);
+          else {
+            c.traverse((ch: any) => {
+              if (ch.isMesh && !ch.userData?.isWireOverlay && ch.visible !== false) {
+                results.push(ch);
+              }
+            });
+          }
+        }
+      });
+    }
+    return results;
+  };
+
+  const getObjectRealBox = (id: string | null | undefined): THREE.Box3 | null => {
+    if (!id) return null;
+    const meshes = getAllObjectMeshes(id);
+    if (meshes.length === 0) return null;
+    const box = new THREE.Box3();
+    const tempPt = new THREE.Vector3();
+
+    meshes.forEach(m => {
+      m.updateMatrixWorld(true);
+      const isSkinned = (m as any).isSkinnedMesh &&
+        (m as THREE.SkinnedMesh).skeleton &&
+        m.geometry?.attributes?.skinIndex &&
+        m.geometry?.attributes?.skinWeight;
+
+      if (isSkinned) {
+        const sm = m as THREE.SkinnedMesh;
+        if (sm.skeleton) sm.skeleton.update();
+        const pos = sm.geometry.attributes.position;
+        if (pos) {
+          for (let i = 0; i < pos.count; i++) {
+            tempPt.fromBufferAttribute(pos, i);
+            try {
+              if (typeof (sm as any).applyBoneTransform === 'function') {
+                (sm as any).applyBoneTransform(i, tempPt);
+              }
+            } catch {}
+            tempPt.applyMatrix4(sm.matrixWorld);
+            if (isFinite(tempPt.x) && isFinite(tempPt.y) && isFinite(tempPt.z)) {
+              box.expandByPoint(tempPt);
+            }
+          }
+        }
+      } else {
+        const meshBox = new THREE.Box3().setFromObject(m);
+        if (!meshBox.isEmpty() && isFinite(meshBox.min.x) && isFinite(meshBox.max.x)) {
+          box.union(meshBox);
+        }
+      }
+    });
+    return box.isEmpty() ? null : box;
+  };
+
   (window as any).__getObjectMesh = getObjectMesh;
+  (window as any).__getAllObjectMeshes = getAllObjectMeshes;
+  (window as any).__getObjectRealBox = getObjectRealBox;
+  (window as any).__viewportCamera = () => cameraRef.current;
 
   const getCoincidentVertices = (geometry: THREE.BufferGeometry, index: number): number[] => {
     const pos = geometry.getAttribute('position');
@@ -2831,7 +2921,7 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
 
       // ── Wireframe overlay (Topology-based) ───────────────────────────────
       const uniqueEdges = (obj.faces && obj.faces.length > 0) || (obj.wireframeEdges && obj.wireframeEdges.length > 0)
-        ? extractUniqueEdges(obj, { dissolveCoplanars: false })
+        ? extractUniqueEdges(obj, { dissolveCoplanars: true })
         : [];
 
       const edgePositions: number[] = [];

@@ -11,7 +11,7 @@ export type RetopologyMode = 'QUAD_DOMINANT' | 'PURE_QUADS' | 'ISOTROPIC_TRI';
 export interface RetopologyOptions {
   targetCount?: number;             // Recuento deseado de polígonos (ej: 2025)
   targetRatio?: number;             // O ratio directo respecto al original (ej: 0.25 = 25%)
-  mode?: RetopologyMode;            // 'QUAD_DOMINANT' (ZRemesher estándar), 'PURE_QUADS', 'ISOTROPIC_TRI'
+  mode?: RetopologyMode;            // 'QUAD_DOMINANT' (Remeser estándar), 'PURE_QUADS', 'ISOTROPIC_TRI'
   adaptiveCurvature?: boolean;      // Distribuir densidad según curvatura y detalles
   curvatureSensitivity?: number;    // Sensibilidad (0.0 a 1.0)
   preserveCreases?: boolean;        // Alinear bucles con aristas vivas y costuras
@@ -74,7 +74,7 @@ function vDist(a: V3, b: V3): number {
 // ─────────────────────────────────────────────────────────────────────────────
 // Algoritmo Quad Flow: Emparejamiento Óptimo de Triángulos en Cuadriláteros
 // ─────────────────────────────────────────────────────────────────────────────
-interface TriangleFace {
+export interface TriangleFace {
   indices: [number, number, number];
   materialIndex?: number;
 }
@@ -155,7 +155,7 @@ export function pairTrianglesIntoQuads(
     const dotN = vDot(nA, nB);
 
     // Si el ángulo entre triángulos es muy pronunciado o supera la arista viva, no fusionar
-    if (dotN < 0.60) return;
+    if (dotN < 0.40) return;
     if (preserveCreases && dotN < creaseCos) return;
 
     const shared0 = entry.v0;
@@ -187,22 +187,12 @@ export function pairTrianglesIntoQuads(
     const p2 = getPos(q2);
     const p3 = getPos(q3);
 
-    // Vectores de las aristas del cuadrilátero
+    // 2. Vectores de las aristas del cuadrilátero
     const e0 = vSub(p1, p0);
     const e1 = vSub(p2, p1);
     const e2 = vSub(p3, p2);
     const e3 = vSub(p0, p3);
 
-    const c0 = vCross(e0, e1);
-    const c1 = vCross(e1, e2);
-    const c2 = vCross(e2, e3);
-    const c3 = vCross(e3, e0);
-
-    // Verificar que el cuadrilátero sea convexo Y que su orientación coincida estrictamente con la normal de triA (anti-inversión)
-    if (vDot(c0, nA) <= 0.05 || vDot(c1, nA) <= 0.05 || vDot(c2, nA) <= 0.05 || vDot(c3, nA) <= 0.05) return;
-
-    // Puntuación de calidad inspirada en el solver de campos de Instant Meshes:
-    // 1. Ortogonalidad de las 4 esquinas (los quads ideales de Instant Meshes tienen ángulos cercanos a 90°)
     const len0 = Math.max(1e-6, Math.sqrt(vDot(e0, e0)));
     const len1 = Math.max(1e-6, Math.sqrt(vDot(e1, e1)));
     const len2 = Math.max(1e-6, Math.sqrt(vDot(e2, e2)));
@@ -213,6 +203,16 @@ export function pairTrianglesIntoQuads(
     const u2: V3 = [e2[0] / len2, e2[1] / len2, e2[2] / len2];
     const u3: V3 = [e3[0] / len3, e3[1] / len3, e3[2] / len3];
 
+    // Verificar que el cuadrilátero sea convexo Y que su orientación coincida estrictamente con la normal de triA (anti-inversión)
+    // Usamos giros normalizados unitarios para que la comprobación sea 100% independiente de la escala métrica de la malla
+    const turn0 = vDot(vCross(u3, u0), nA);
+    const turn1 = vDot(vCross(u0, u1), nA);
+    const turn2 = vDot(vCross(u1, u2), nA);
+    const turn3 = vDot(vCross(u2, u3), nA);
+    if (turn0 < -0.02 || turn1 < -0.02 || turn2 < -0.02 || turn3 < -0.02) return;
+
+    // Puntuación de calidad inspirada en el solver de campos de Instant Meshes:
+    // 1. Ortogonalidad de las 4 esquinas (los quads ideales tienen ángulos cercanos a 90°)
     const orthoDev = (Math.abs(vDot(u0, u1)) + Math.abs(vDot(u1, u2)) + Math.abs(vDot(u2, u3)) + Math.abs(vDot(u3, u0))) / 4;
     const orthoScore = 1.0 - Math.min(1.0, orthoDev);
 
@@ -225,6 +225,7 @@ export function pairTrianglesIntoQuads(
     const edgeAspect = minEdge / (maxEdge + 1e-6);
 
     // 3. Planaridad del cuadrilátero
+    const c0 = vCross(e0, e1);
     const planarity = Math.max(0, 1.0 - Math.abs(vDot(vSub(p3, p0), c0)) / ((diag1 * diag2) + 1e-6));
 
     // Score global ponderado
@@ -239,8 +240,22 @@ export function pairTrianglesIntoQuads(
     });
   });
 
-  // 4. Ordenar candidatos por calidad geométrica (mejor score primero)
-  candidates.sort((a, b) => b.score - a.score);
+  // 4. Contar cuántas opciones de emparejamiento tiene cada triángulo (grado en el grafo)
+  const deg = new Int32Array(tris.length);
+  for (const cand of candidates) {
+    deg[cand.fA]++;
+    deg[cand.fB]++;
+  }
+
+  // Ordenar candidatos:
+  // Máxima prioridad a triángulos con menor grado (pocas opciones) para evitar dejar triángulos huérfanos con diagonales
+  // A igualdad de grado, desempatar por el score de forma y planaridad
+  candidates.sort((a, b) => {
+    const minDegA = Math.min(deg[a.fA], deg[a.fB]);
+    const minDegB = Math.min(deg[b.fA], deg[b.fB]);
+    if (minDegA !== minDegB) return minDegA - minDegB;
+    return b.score - a.score;
+  });
 
   const used = new Uint8Array(tris.length);
   const quads: [number, number, number, number][] = [];
@@ -272,6 +287,80 @@ export function pairTrianglesIntoQuads(
       // Preservar la diagonal original q1-q3 rotando el quad para alineación canónica
       orderedIndices.push(q0, q1, q3, q2, q3, q1);
       quads.push([q1, q2, q3, q0]);
+    }
+  }
+
+  // 5. Pase secundario para triángulos coplanares restantes
+  // Busca cualquier pareja de triángulos adyacentes aún libres que compartan una arista
+  const remainingIdxs: number[] = [];
+  for (let i = 0; i < tris.length; i++) {
+    if (!used[i]) remainingIdxs.push(i);
+  }
+
+  if (remainingIdxs.length >= 2) {
+    for (let i = 0; i < remainingIdxs.length; i++) {
+      const idxA = remainingIdxs[i];
+      if (used[idxA]) continue;
+      const triA = tris[idxA];
+      const nA = triNormals[idxA];
+
+      for (let j = i + 1; j < remainingIdxs.length; j++) {
+        const idxB = remainingIdxs[j];
+        if (used[idxB]) continue;
+        const triB = tris[idxB];
+        if (triA.materialIndex !== triB.materialIndex) continue;
+
+        const nB = triNormals[idxB];
+        if (vDot(nA, nB) < (preserveCreases ? creaseCos : 0.60)) continue;
+
+        // Comprobar arista compartida
+        const shared: number[] = [];
+        for (const va of triA.indices) {
+          if (triB.indices.includes(va)) shared.push(va);
+        }
+        if (shared.length !== 2) continue;
+
+        const oppA = triA.indices.find(v => !shared.includes(v));
+        const oppB = triB.indices.find(v => !shared.includes(v));
+        if (oppA === undefined || oppB === undefined) continue;
+
+        const idxInA = triA.indices.indexOf(oppA);
+        const vStart = triA.indices[(idxInA + 1) % 3];
+        const vEnd = triA.indices[(idxInA + 2) % 3];
+
+        // Validar convexidad estricta para no crear quads no convexos o en mariposa/reloj de arena
+        const p0 = getPos(oppA);
+        const p1 = getPos(vStart);
+        const p2 = getPos(oppB);
+        const p3 = getPos(vEnd);
+
+        const e0 = vSub(p1, p0);
+        const e1 = vSub(p2, p1);
+        const e2 = vSub(p3, p2);
+        const e3 = vSub(p0, p3);
+
+        const len0 = Math.max(1e-6, Math.sqrt(vDot(e0, e0)));
+        const len1 = Math.max(1e-6, Math.sqrt(vDot(e1, e1)));
+        const len2 = Math.max(1e-6, Math.sqrt(vDot(e2, e2)));
+        const len3 = Math.max(1e-6, Math.sqrt(vDot(e3, e3)));
+
+        const u0: V3 = [e0[0] / len0, e0[1] / len0, e0[2] / len0];
+        const u1: V3 = [e1[0] / len1, e1[1] / len1, e1[2] / len1];
+        const u2: V3 = [e2[0] / len2, e2[1] / len2, e2[2] / len2];
+        const u3: V3 = [e3[0] / len3, e3[1] / len3, e3[2] / len3];
+
+        const t0 = vDot(vCross(u3, u0), nA);
+        const t1 = vDot(vCross(u0, u1), nA);
+        const t2 = vDot(vCross(u1, u2), nA);
+        const t3 = vDot(vCross(u2, u3), nA);
+        if (t0 <= 0.005 || t1 <= 0.005 || t2 <= 0.005 || t3 <= 0.005) continue;
+
+        used[idxA] = 1;
+        used[idxB] = 1;
+        quads.push([oppA, vStart, oppB, vEnd]);
+        orderedIndices.push(oppA, vStart, oppB, oppA, oppB, vEnd);
+        break;
+      }
     }
   }
 
@@ -367,7 +456,7 @@ export async function retopologizeMesh(
     await (Meshopt as any).ready;
   }
 
-  if (onProgress) onProgress(10, 'Analizando malla para ZRemesher...');
+  if (onProgress) onProgress(10, 'Analizando malla para Remeser...');
 
   // 1. Extraer vértices con offsets
   const rawVerts: V3[] = (input.vertices || []).map((v, i) => {
@@ -436,34 +525,134 @@ export async function retopologizeMesh(
 
   // 3. Si el objetivo es menor que el número actual, aplicar reducción controlada con Meshopt
   if (targetPolys < initialTrisCount) {
-    const targetIndexCount = targetPolys * 3;
+    const rawTarget = Math.floor(targetPolys) * 3;
     const flags = preserveCreases ? ['LockBorder'] : [];
-    const attempts = [
-      { err: 0.02, flags: flags as any },
-      { err: 0.05, flags: flags as any },
-      { err: 0.15, flags: flags as any },
-      { err: 0.35, flags: flags as any },
-      { err: 0.60, flags: flags as any },
-    ];
-    if (preserveCreases) {
-      attempts.push({ err: 0.40, flags: [] as any });
+
+    // Calcular normales por vértice para preservación estructural con simplifyWithAttributes
+    let flatNormals: Float32Array | null = null;
+    try {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(flatPositions, 3));
+      geo.setIndex(new THREE.BufferAttribute(new Uint32Array(workingIndices), 1));
+      geo.computeVertexNormals();
+      flatNormals = geo.attributes.normal.array as Float32Array;
+    } catch (eNorm) {}
+
+    // Tier 1: Reducción guiada por normales con preservación de aristas vivas
+    if (flatNormals && flatNormals.length === flatPositions.length) {
+      const targetIndexCount = Math.min(workingIndices.length, Math.max(12, rawTarget));
+      const targetCountMultiple3 = Math.floor(targetIndexCount / 3) * 3;
+      if (targetCountMultiple3 < workingIndices.length) {
+        const attrAttempts = [
+          { err: 0.03, weights: [1.0, 1.0, 1.0] },
+          { err: 0.08, weights: [1.2, 1.2, 1.2] },
+          { err: 0.20, weights: [1.5, 1.5, 1.5] },
+        ];
+        for (const att of attrAttempts) {
+          try {
+            const res = Meshopt.simplifyWithAttributes(
+              workingIndices,
+              flatPositions,
+              3,
+              flatNormals,
+              3,
+              att.weights,
+              null,
+              targetCountMultiple3,
+              att.err,
+              flags as any
+            );
+            if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
+              workingIndices = res[0];
+              if (workingIndices.length <= targetCountMultiple3 * 1.15) break;
+            }
+          } catch (eAttr) {}
+        }
+      }
     }
 
-    for (const att of attempts) {
-      try {
-        const res = Meshopt.simplify(
-          workingIndices,
-          flatPositions,
-          3,
-          targetIndexCount,
-          att.err,
-          att.flags
-        );
-        if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
-          workingIndices = res[0];
-          if (workingIndices.length <= targetIndexCount * 1.15) break;
-        }
-      } catch (e) {}
+    // Tier 2: Simplificación geométrica iterativa
+    if (workingIndices.length > rawTarget * 1.05) {
+      const attempts = [
+        { err: 0.03, flags: flags as any },
+        { err: 0.06, flags: flags as any },
+        { err: 0.15, flags: flags as any },
+        { err: 0.35, flags: flags as any },
+      ];
+      if (preserveCreases) {
+        attempts.push({ err: 0.40, flags: [] as any });
+      }
+
+      for (const att of attempts) {
+        const targetIndexCount = Math.min(workingIndices.length, Math.max(12, rawTarget));
+        const targetCountMultiple3 = Math.floor(targetIndexCount / 3) * 3;
+        if (targetCountMultiple3 >= workingIndices.length) break;
+
+        try {
+          const res = Meshopt.simplify(
+            workingIndices,
+            flatPositions,
+            3,
+            targetCountMultiple3,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
+            workingIndices = res[0];
+            if (workingIndices.length <= targetCountMultiple3 * 1.15) break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // Tier 3: Si LockBorder limitó la reducción, intentar sin bloqueo de bordes
+    if (workingIndices.length > rawTarget * 1.20) {
+      const attemptsNoLock = [
+        { err: 0.15, flags: [] as any },
+        { err: 0.35, flags: [] as any },
+        { err: 0.65, flags: [] as any },
+      ];
+      for (const att of attemptsNoLock) {
+        const targetIndexCount = Math.min(workingIndices.length, Math.max(12, rawTarget));
+        const targetCountMultiple3 = Math.floor(targetIndexCount / 3) * 3;
+        if (targetCountMultiple3 >= workingIndices.length) break;
+
+        try {
+          const res = Meshopt.simplify(
+            workingIndices,
+            flatPositions,
+            3,
+            targetCountMultiple3,
+            att.err,
+            att.flags
+          );
+          if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
+            workingIndices = res[0];
+            if (workingIndices.length <= targetCountMultiple3 * 1.15) break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // Tier 4: Garantía de simplificación (simplifySloppy) si la geometría tiene bordes abiertos o no-múltiplex
+    if (workingIndices.length > rawTarget * 1.20) {
+      const targetIndexCount = Math.min(workingIndices.length, Math.max(12, rawTarget));
+      const targetCountMultiple3 = Math.floor(targetIndexCount / 3) * 3;
+      if (targetCountMultiple3 < workingIndices.length) {
+        try {
+          const res = Meshopt.simplifySloppy(
+            workingIndices,
+            flatPositions,
+            3,
+            null,
+            targetCountMultiple3,
+            0.5
+          );
+          if (res && res[0] && res[0].length >= 12 && res[0].length < workingIndices.length) {
+            workingIndices = res[0];
+          }
+        } catch (eSloppy) {}
+      }
     }
   }
 
@@ -477,7 +666,7 @@ export async function retopologizeMesh(
     });
   }
 
-  // 5. Aplicar ZRemesher Quad Flow
+  // 5. Aplicar Remeser Quad Flow
   const quadResult = pairTrianglesIntoQuads(simplifiedTris, flatPositions, {
     preserveCreases,
     creaseAngleDeg
@@ -499,51 +688,11 @@ export async function retopologizeMesh(
       quadCount++;
     });
 
-    // Añadir Triángulos no emparejados
-    if (mode === 'PURE_QUADS' && quadResult.remainingTris.length > 0) {
-      // Subdivisión canónica de triángulos en quads puros sin dejar ningún triángulo
-      const edgeMidMap = new Map<string, number>();
-      const currentVerts = [...rawVerts];
-      
-      const getMid = (a: number, b: number): number => {
-        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
-        if (edgeMidMap.has(key)) return edgeMidMap.get(key)!;
-        const pA = currentVerts[a];
-        const pB = currentVerts[b];
-        const m: V3 = [(pA[0] + pB[0]) * 0.5, (pA[1] + pB[1]) * 0.5, (pA[2] + pB[2]) * 0.5];
-        const idx = currentVerts.length;
-        currentVerts.push(m);
-        edgeMidMap.set(key, idx);
-        return idx;
-      };
-
-      quadResult.remainingTris.forEach(t => {
-        const [v0, v1, v2] = t;
-        const p0 = currentVerts[v0];
-        const p1 = currentVerts[v1];
-        const p2 = currentVerts[v2];
-        const c: V3 = [(p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3, (p0[2] + p1[2] + p2[2]) / 3];
-        const cIdx = currentVerts.length;
-        currentVerts.push(c);
-
-        const m01 = getMid(v0, v1);
-        const m12 = getMid(v1, v2);
-        const m20 = getMid(v2, v0);
-
-        finalFaces.push({ indices: [v0, m01, cIdx, m20] });
-        finalFaces.push({ indices: [v1, m12, cIdx, m01] });
-        finalFaces.push({ indices: [v2, m20, cIdx, m12] });
-        quadCount += 3;
-      });
-
-      rawVerts.length = 0;
-      rawVerts.push(...currentVerts);
-    } else {
-      quadResult.remainingTris.forEach(t => {
-        finalFaces.push({ indices: [t[0], t[1], t[2]] });
-        triCount++;
-      });
-    }
+    // Añadir Triángulos no emparejados de forma limpia sin crear T-junctions ni aristas cruzadas
+    quadResult.remainingTris.forEach(t => {
+      finalFaces.push({ indices: [t[0], t[1], t[2]] });
+      triCount++;
+    });
   }
 
   // 6. Compactar vértices utilizados
@@ -573,7 +722,7 @@ export async function retopologizeMesh(
     vertices: compactedVerts,
     faces: compactedFaces,
     report: [
-      `ZRemesher: ${mode === 'PURE_QUADS' ? '100% Quads' : mode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'}`,
+      `Remeser: ${mode === 'PURE_QUADS' ? '100% Quads' : mode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'}`,
       `De ${initialFaceCount.toLocaleString()} caras a ${finalFacesCount.toLocaleString()} (${quadCount.toLocaleString()} quads, ${triCount.toLocaleString()} tris)`,
       `Reducción: ${reductionPct > 0 ? `-${reductionPct}%` : `+${Math.abs(reductionPct)}%`}`,
       `Vértices: ${compactedVerts.length.toLocaleString()}`
@@ -590,7 +739,7 @@ export async function retopologizeMesh(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Retopologizador ZRemesher de Modelos GLB / GLTF (Zero-Loss UVs y Materiales)
+// Retopologizador Remeser de Modelos GLB / GLTF (Zero-Loss UVs y Materiales)
 // ─────────────────────────────────────────────────────────────────────────────
 export async function retopologizeGLBModel(
   obj: CSGObject,
@@ -664,7 +813,7 @@ export async function retopologizeGLBModel(
 
   if (onProgress) {
     const targetEst = Math.round(totalOriginalFaces * globalRatio);
-    await onProgress(20, `ZRemesher: reduciendo de ${totalOriginalFaces.toLocaleString()} a ~${targetEst.toLocaleString()} caras (-${Math.round((1 - globalRatio) * 100)}%)...`);
+    await onProgress(20, `Remeser: reduciendo de ${totalOriginalFaces.toLocaleString()} a ~${targetEst.toLocaleString()} caras (-${Math.round((1 - globalRatio) * 100)}%)...`);
   }
 
   let modified = false;
@@ -713,26 +862,21 @@ export async function retopologizeGLBModel(
 
     if (onProgress) {
       const pct = Math.round(25 + (m / meshesToProcess.length) * 50);
-      await onProgress(pct, `ZRemesher en ${mesh.name || `Parte ${m + 1}`}: preservando texturas y geometría...`);
+      await onProgress(pct, `Remeser en ${mesh.name || `Parte ${m + 1}`}: preservando texturas y geometría...`);
     }
 
     let simplifiedIndices: Uint32Array | null = null;
 
     if (hasUV) {
-      // Simplificación con protección multi-atributo de textura UV
+      // Tier 1: Simplificación con protección multi-atributo de textura UV
       const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
-      const uvWeights = [2.0, 2.0];
+      const uvWeights = [1.5, 1.5];
 
       const attempts = [
-        { err: 0.02, flags: ['LockBorder'] as any },
         { err: 0.05, flags: ['LockBorder'] as any },
         { err: 0.15, flags: ['LockBorder'] as any },
         { err: 0.35, flags: ['LockBorder'] as any },
-        { err: 0.60, flags: ['LockBorder'] as any },
       ];
-      if (!preserveCreases || globalRatio < 0.35) {
-        attempts.push({ err: 0.35, flags: [] as any }, { err: 0.60, flags: [] as any });
-      }
 
       for (const att of attempts) {
         try {
@@ -754,20 +898,46 @@ export async function retopologizeGLBModel(
           }
         } catch (eSimp) {}
       }
-    } else {
-      // Sin UVs: Simplificación posicional estándar con LockBorder
-      const flags = preserveCreases ? ['LockBorder'] : [];
-      const attempts = [
-        { err: 0.05, flags: flags as any },
-        { err: 0.15, flags: flags as any },
-        { err: 0.35, flags: flags as any },
-        { err: 0.60, flags: flags as any },
-      ];
-      if (!preserveCreases || globalRatio < 0.35) {
-        attempts.push({ err: 0.45, flags: [] as any });
-      }
 
-      for (const att of attempts) {
+      // Tier 2: Si LockBorder limitó la reducción en costuras UV, probar sin LockBorder
+      if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25) {
+        const attemptsNoLock = [
+          { err: 0.15, flags: [] as any },
+          { err: 0.35, flags: [] as any },
+          { err: 0.60, flags: [] as any },
+        ];
+        for (const att of attemptsNoLock) {
+          try {
+            const res = Meshopt.simplifyWithAttributes(
+              indexArray,
+              posArray,
+              3,
+              uvArray,
+              2,
+              uvWeights,
+              null,
+              targetIndicesCount,
+              att.err,
+              att.flags
+            );
+            if (res && res[0] && res[0].length >= 12 && res[0].length < (simplifiedIndices ? simplifiedIndices.length : indexArray.length)) {
+              simplifiedIndices = res[0];
+              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+            }
+          } catch (eSimp) {}
+        }
+      }
+    }
+
+    // Tier 3: Simplificación posicional pura si los atributos UV bloquearon la reducción
+    if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25) {
+      const attemptsPos = [
+        { err: 0.10, flags: preserveCreases ? ['LockBorder'] : [] },
+        { err: 0.25, flags: [] },
+        { err: 0.50, flags: [] },
+        { err: 0.75, flags: [] }
+      ];
+      for (const att of attemptsPos) {
         try {
           const res = Meshopt.simplify(
             indexArray,
@@ -775,9 +945,9 @@ export async function retopologizeGLBModel(
             3,
             targetIndicesCount,
             att.err,
-            att.flags
+            att.flags as any
           );
-          if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
+          if (res && res[0] && res[0].length >= 12 && res[0].length < (simplifiedIndices ? simplifiedIndices.length : indexArray.length)) {
             simplifiedIndices = res[0];
             if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
           }
@@ -785,9 +955,27 @@ export async function retopologizeGLBModel(
       }
     }
 
+    // Tier 4: Garantía absoluta de reducción: simplifySloppy
+    // (Resuelve geometrías no múltiplex, islas desconectadas y mallas complejas que no pueden reducirse con colapso conservador)
+    if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.20) {
+      try {
+        const res = Meshopt.simplifySloppy(
+          indexArray,
+          posArray,
+          3,
+          null,
+          targetIndicesCount,
+          0.5
+        );
+        if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
+          simplifiedIndices = res[0];
+        }
+      } catch (eSloppy) {}
+    }
+
     const finalSubIndices = simplifiedIndices && simplifiedIndices.length >= 12 ? simplifiedIndices : indexArray;
 
-    // 4. Estructuración ZRemesher Quad Flow (reordenamiento en cuadriláteros continuos)
+    // 4. Estructuración Remeser Quad Flow (reordenamiento en cuadriláteros continuos)
     const subTris: TriangleFace[] = [];
     for (let i = 0; i < finalSubIndices.length; i += 3) {
       subTris.push({
@@ -851,7 +1039,7 @@ export async function retopologizeGLBModel(
     }
   });
 
-  if (onProgress) await onProgress(100, '¡ZRemesher finalizado con éxito!');
+  if (onProgress) await onProgress(100, '¡Remeser finalizado con éxito!');
 
   return {
     ...obj,
@@ -866,5 +1054,78 @@ export async function retopologizeGLBModel(
       faces: Math.floor(accurateTotalFaces),
       quads: totalResultQuads
     }
+  };
+}
+
+/**
+ * Convierte cualquier malla con caras triangulares o cortes diagonales en caras
+ * cuadriláteras (Quads) limpias y continuas.
+ */
+export function convertMeshToQuads(
+  obj: CSGObject,
+  options: { preserveCreases?: boolean; creaseAngleDeg?: number } = {}
+): { updatedObject: CSGObject; quadsCount: number; trianglesCount: number } {
+  if (!obj.vertices || !obj.faces || obj.faces.length === 0) {
+    return { updatedObject: obj, quadsCount: 0, trianglesCount: 0 };
+  }
+
+  const { preserveCreases = false, creaseAngleDeg = 45 } = options;
+
+  const existingQuads: MeshFace[] = [];
+  const rawTris: TriangleFace[] = [];
+  const flatPos = new Float32Array(obj.vertices.length * 3);
+  for (let i = 0; i < obj.vertices.length; i++) {
+    const v = obj.vertices[i];
+    const vx = Array.isArray(v) ? v[0] : (v as any).x ?? 0;
+    const vy = Array.isArray(v) ? v[1] : (v as any).y ?? 0;
+    const vz = Array.isArray(v) ? v[2] : (v as any).z ?? 0;
+    flatPos[i * 3] = vx;
+    flatPos[i * 3 + 1] = vy;
+    flatPos[i * 3 + 2] = vz;
+  }
+
+  obj.faces.forEach(f => {
+    if (!f.indices) return;
+    if (f.indices.length === 4) {
+      existingQuads.push(f);
+    } else if (f.indices.length === 3) {
+      rawTris.push({ indices: [f.indices[0], f.indices[1], f.indices[2]], materialIndex: f.materialIndex });
+    } else if (f.indices.length > 4) {
+      for (let i = 1; i < f.indices.length - 1; i++) {
+        rawTris.push({ indices: [f.indices[0], f.indices[i], f.indices[i + 1]], materialIndex: f.materialIndex });
+      }
+    }
+  });
+
+  if (rawTris.length === 0) {
+    return {
+      updatedObject: obj,
+      quadsCount: existingQuads.length,
+      trianglesCount: 0
+    };
+  }
+
+  const quadRes = pairTrianglesIntoQuads(rawTris, flatPos, {
+    preserveCreases,
+    creaseAngleDeg
+  });
+
+  const newFaces: MeshFace[] = [...existingQuads];
+  quadRes.quads.forEach(q => {
+    newFaces.push({ indices: [q[0], q[1], q[2], q[3]] });
+  });
+  quadRes.remainingTris.forEach(t => {
+    newFaces.push({ indices: [t[0], t[1], t[2]] });
+  });
+
+  const updated: CSGObject = {
+    ...obj,
+    faces: newFaces
+  };
+
+  return {
+    updatedObject: updated,
+    quadsCount: existingQuads.length + quadRes.quads.length,
+    trianglesCount: quadRes.remainingTris.length
   };
 }

@@ -547,6 +547,7 @@ export interface CSGObject {
     faces: number;
     quads?: number;
     triangles?: number;
+    reductionPct?: number;
   };
 }
 
@@ -782,6 +783,10 @@ export interface AppState {
   saveHistory:  (actionLabel?: string, category?: HistoryStep['category']) => void;
   jumpToHistory: (targetIndex: number) => void;
   clearHistory: () => void;
+  deleteHistoryStep: (index: number) => void;
+  deleteFutureHistory: () => void;
+  deletePastHistory: () => void;
+  deleteHistoryRange: (fromIndex: number, toIndex: number) => void;
   isMaterialStudioOpen: boolean;
   materialStudioMaterialId: string | null;
   openMaterialStudio: (materialId?: string | null) => void;
