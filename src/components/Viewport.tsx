@@ -4626,9 +4626,9 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
               (gizmoStateRef.current as any).startNurbsCP = [...firstPt];
             } else {
               const _interp = getInterpolatedTransform(selObj, currentTime);
-              gizmoStateRef.current.startPos=[..._interp.position];
-              gizmoStateRef.current.startRot=[..._interp.rotation];
-              gizmoStateRef.current.startScale=[..._interp.scale];
+              gizmoStateRef.current.startPos=[..._interp.position] as [number, number, number];
+              gizmoStateRef.current.startRot=[..._interp.rotation] as [number, number, number];
+              gizmoStateRef.current.startScale=[..._interp.scale] as [number, number, number];
             }
           }
 
@@ -6247,10 +6247,11 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                 const start = gs.startTransforms[id];
                 const o = projectRef.current.objects.find(obj => obj.id === id);
                 const pos = start ? start.position : (o ? getInterpolatedTransform(o, currentTime).position : [0,0,0]);
+                const currentTrans = start || o?.transform || { position: [0, 0, 0] as V3, rotation: [0, 0, 0] as V3, scale: [1, 1, 1] as V3 };
                 return {
                   transform: {
-                    ...(start || o?.transform || {}),
-                    position: [pos[0] + move.x, pos[1] + move.y, pos[2] + move.z]
+                    ...currentTrans,
+                    position: [pos[0] + move.x, pos[1] + move.y, pos[2] + move.z] as V3
                   }
                 };
               });

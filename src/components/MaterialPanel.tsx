@@ -2314,7 +2314,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('library')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'library'
+              (activeTab as string) === 'library'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2325,7 +2325,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('textures')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'textures'
+              (activeTab as string) === 'textures'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2336,7 +2336,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('edit')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'edit'
+              (activeTab as string) === 'edit'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2701,7 +2701,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('library')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'library'
+              (activeTab as string) === 'library'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2712,7 +2712,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('textures')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'textures'
+              (activeTab as string) === 'textures'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2723,7 +2723,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('edit')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'edit'
+              (activeTab as string) === 'edit'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2962,7 +2962,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('library')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'library'
+              (activeTab as string) === 'library'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2973,7 +2973,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('textures')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'textures'
+              (activeTab as string) === 'textures'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -2984,7 +2984,7 @@ export const MaterialPanel: React.FC = () => {
           <button
             onClick={() => setActiveTab('edit')}
             className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-              activeTab === 'edit'
+              (activeTab as string) === 'edit'
                 ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
             }`}
@@ -3053,7 +3053,7 @@ export const MaterialPanel: React.FC = () => {
         <button
           onClick={() => setActiveTab('library')}
           className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-            activeTab === 'library'
+            (activeTab as string) === 'library'
               ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
               : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
           }`}
@@ -3064,7 +3064,7 @@ export const MaterialPanel: React.FC = () => {
         <button
           onClick={() => setActiveTab('textures')}
           className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-            activeTab === 'textures'
+            (activeTab as string) === 'textures'
               ? 'bg-emerald-600 text-white shadow-md shadow-emerald-600/30'
               : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
           }`}
@@ -3075,7 +3075,7 @@ export const MaterialPanel: React.FC = () => {
         <button
           onClick={() => setActiveTab('edit')}
           className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all ${
-            activeTab === 'edit'
+            (activeTab as string) === 'edit'
               ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30'
               : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60'
           }`}

@@ -98,6 +98,7 @@ export interface BlueprintImageConfig {
   // Zonas de Altura / Cavidad (ej. Asiento de sofá más bajo que los brazos)
   depthZones?: BlueprintDepthZone[];
   heightmapEnabled?: boolean;     // Activar relieve continuo por luminancia / sombras
+  enableHeightmap?: boolean;      // Alias para heightmapEnabled
   heightmapStrength?: number;    // Intensidad del relieve (0 a 100%, def: 50%)
   heightmapInvert?: boolean;      // Invertir mapa de alturas
 }
@@ -3666,7 +3667,7 @@ export function optimizeBlueprintMeshTopology(
  */
 export function generateBlueprintUVs(
   obj: { vertices: V3[]; faces: MeshFace[] },
-  viewKey: 'front' | 'side' | 'top' | 'back' | 'auto' = 'auto',
+  viewKey: BlueprintViewKey | 'auto' = 'auto',
   customDimensions?: V3,
   viewConfig?: BlueprintImageConfig,
   _boundsNormalized?: { minU: number; minV: number; maxU: number; maxV: number }
@@ -4086,7 +4087,7 @@ export function drawBlueprintPreview(
   selectionBox: { x1: number; y1: number; x2: number; y2: number } | null = null,
   showSymmetryGuides: boolean = true,
   ghostOverlays: GhostOverlayData[] = [],
-  laserOptions?: { enabled: boolean; position: number; viewKey?: 'front' | 'side' | 'top'; silhouetteOpacity?: number },
+  laserOptions?: { enabled: boolean; position: number; viewKey?: BlueprintViewKey; silhouetteOpacity?: number },
   depthZones?: BlueprintDepthZone[],
   selectedDepthZoneId?: string | null,
   activeDrawingDepthZone?: { x1: number; y1: number; x2: number; y2: number } | null

@@ -370,17 +370,19 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
   }>({ front: null, top: null, side: null, back: null });
 
   // Referencias para caché instantáneo en memoria (Cero Latencia en Sliders)
-  const loadedImageHashRef = useRef<{ [k in BlueprintViewKey]: string }>({
+  const loadedImageHashRef = useRef<{ [k in BlueprintViewKey]?: string }>({
     front: '',
     top: '',
     side: '',
-    back: ''
+    back: '',
+    bottom: ''
   });
-  const rawImagesRef = useRef<{ [k in BlueprintViewKey]: ImageData | null }>({
+  const rawImagesRef = useRef<{ [k in BlueprintViewKey]?: ImageData | null }>({
     front: null,
     top: null,
     side: null,
-    back: null
+    back: null,
+    bottom: null
   });
   rawImagesRef.current = rawImages;
 
@@ -3329,7 +3331,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
     setViewConfigs({
       front: { url: null, enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
       top:   { url: null, enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
-      side:  { url: null, enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 }
+      side:  { url: null, enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
+      back:  { url: null, enabled: false, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 }
     });
   };
 
@@ -3340,7 +3343,8 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
       setViewConfigs({
         front: { url: data.front, enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
         top:   { url: data.top,   enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
-        side:  { url: data.side,  enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 }
+        side:  { url: data.side,  enabled: true, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 },
+        back:  { url: (data as any).back || '', enabled: false, threshold: 45, detectionMode: 'LINE_ART', fillInterior: true, customBgColor: null, invert: false, dilation: 1, blurRadius: 1, denoiseIslandSize: 15, thinFeatureBoost: 45, contrast: 0, brightness: 0, grayscale: false, sharpen: 1, flipH: false, flipV: false, rotation: 0 }
       });
       setDimensions(data.dimensions);
       setShowPresetMenu(false);
@@ -3735,7 +3739,7 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
         const bNorm = boundsMap[targetViewKey];
         uvMesh = generateBlueprintUVs(
           { vertices: result.vertices, faces: result.faces },
-          targetViewKey,
+          targetViewKey as any,
           dimensions,
           viewCfg,
           bNorm
@@ -4514,9 +4518,9 @@ export const BlueprintCarverModal: React.FC<BlueprintCarverModalProps> = ({ isOp
                           {/* Selector de Herramienta: Puntero Directo vs Caja de Selección */}
                           <div className="flex items-center bg-zinc-900 border border-zinc-700 rounded p-0.5">
                             <button
-                              onClick={() => setEditSelectionTool('single')}
+                              onClick={() => setEditSelectionTool('pointer')}
                               className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold flex items-center gap-1 transition-colors ${
-                                editSelectionTool === 'single'
+                                editSelectionTool === 'pointer'
                                   ? 'bg-sky-600 text-white shadow'
                                   : 'text-zinc-400 hover:text-zinc-200'
                               }`}

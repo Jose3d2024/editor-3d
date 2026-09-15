@@ -499,7 +499,7 @@ export const Toolbar: React.FC = () => {
   const [showFile,    setShowFile]    = useState(false);
   const [showView,    setShowView]    = useState(false);
   const [createTab,   setCreateTab]   = useState<
-    'primitivo'|'nurbs'|'volumetric'|'particles'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'
+    'primitivo'|'nurbs'|'volumetric'|'particles'|'polygon'|'arc'|'lathe'|'sweep'|'loft'|'silueta'|'ingenieria'|'dibujar'|'geometria'|'generar'
   >('primitivo');
   const [editTab,     setEditTab]     = useState<'seleccion'|'transformar'|'modificar'|'malla'|'acciones'>('seleccion');
 
@@ -1472,7 +1472,7 @@ export const Toolbar: React.FC = () => {
                     )}
 
                     {/* ════ GEOMETRÍA SUB-TABS ════ */}
-                    {createTab==='geometria' && (
+                    {(createTab==='geometria' || createTab==='polygon' || createTab==='arc') && (
                       <div className="flex gap-1 mb-4 p-1 bg-zinc-800/50 rounded-lg">
                         <button onClick={()=>setCreateTab('polygon')} className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${createTab==='polygon'?'bg-violet-600 text-white':'text-zinc-400 hover:bg-zinc-700'}`}>Polígono</button>
                         <button onClick={()=>setCreateTab('arc')} className={`flex-1 py-1 rounded text-[10px] font-bold transition-colors ${createTab==='arc'?'bg-violet-600 text-white':'text-zinc-400 hover:bg-zinc-700'}`}>Arco</button>
@@ -1480,7 +1480,7 @@ export const Toolbar: React.FC = () => {
                     )}
 
                     {/* ════ GENERAR SUB-TABS ════ */}
-                    {createTab==='generar' && (
+                    {(createTab==='generar' || createTab==='lathe' || createTab==='sweep' || createTab==='loft' || createTab==='silueta' || createTab==='ingenieria') && (
                       <div className="grid grid-cols-3 gap-1 mb-4 p-1 bg-zinc-800/50 rounded-lg">
                         <button onClick={()=>setCreateTab('lathe')} className={`py-1 rounded text-[10px] font-bold transition-colors ${createTab==='lathe'?'bg-violet-600 text-white':'text-zinc-400 hover:bg-zinc-700'}`}>Torno</button>
                         <button onClick={()=>setCreateTab('sweep')} className={`py-1 rounded text-[10px] font-bold transition-colors ${createTab==='sweep'?'bg-violet-600 text-white':'text-zinc-400 hover:bg-zinc-700'}`}>Sweep</button>

@@ -401,8 +401,8 @@ export const MaterialStudioViewport: React.FC = () => {
     controls: OrbitControls;
     previewGroup: THREE.Group;
     lightsGroup: THREE.Group;
-    groundMesh: THREE.Mesh;
-    gridHelper: THREE.GridHelper;
+    groundMesh?: THREE.Mesh | null;
+    gridHelper?: THREE.GridHelper | null;
     currentMesh: THREE.Object3D | null;
     currentMaterial: THREE.Material | null;
     ambientLight: THREE.AmbientLight;
@@ -678,13 +678,13 @@ export const MaterialStudioViewport: React.FC = () => {
           sm.uniforms.uLightPosition.value.copy(refs.keyLight.position);
         }
         if (sm.uniforms?.uModelInverse && refs.previewGroup) {
-          let mesh = null;
+          let mesh: THREE.Mesh | null = null;
           refs.previewGroup.traverse((child) => {
-            if (child.isMesh) mesh = child;
+            if ((child as any).isMesh) mesh = child as THREE.Mesh;
           });
           if (mesh) {
-            mesh.updateMatrixWorld();
-            sm.uniforms.uModelInverse.value.copy(mesh.matrixWorld).invert();
+            (mesh as THREE.Mesh).updateMatrixWorld();
+            sm.uniforms.uModelInverse.value.copy((mesh as THREE.Mesh).matrixWorld).invert();
           }
         }
       }

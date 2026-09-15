@@ -102,7 +102,7 @@ export const CodeExporterModal: React.FC<Props> = ({ isOpen, onClose }) => {
       const p = obj.parameters || {};
 
       let geoCode = ``;
-      switch (obj.primitiveType) {
+      switch (obj.type) {
         case 'SPHERE':
           geoCode = `new THREE.SphereGeometry(${p.radius || 1}, ${p.radialSegments || 32}, ${p.segments || 16})`;
           break;
@@ -249,7 +249,7 @@ export const CodeExporterModal: React.FC<Props> = ({ isOpen, onClose }) => {
       const p = obj.parameters || {};
 
       let geomJsx = `<boxGeometry args={[1, 1, 1]} />`;
-      switch (obj.primitiveType) {
+      switch (obj.type) {
         case 'SPHERE':
           geomJsx = `<sphereGeometry args={[${p.radius || 1}, ${p.radialSegments || 32}, ${p.segments || 16}]} />`;
           break;

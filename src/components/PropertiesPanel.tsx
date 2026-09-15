@@ -2149,6 +2149,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
     isolateGLTFSelection,
     setIsolateGLTFSelection,
     addObject,
+    removeObject,
     selectObject
   } = useStore();
   const [smoothFactor, setSmoothFactor] = useState(0.5);
@@ -2825,6 +2826,9 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
               };
 
               const handleCreateWrapperCage = (subdivs = retopoCageSubdivs, shape = retopoCageShape) => {
+                if (isCurrentObjCage) {
+                  removeObject(obj.id);
+                }
                 const newObj = createRetopoCage({
                   targetObj: effectiveTarget,
                   subdivisions: subdivs,
@@ -3059,8 +3063,9 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                         <span className="text-zinc-400">Forma 3D:</span>
                         <div className="flex gap-1">
                           {[
-                            { id: 'ELLIPSOID', label: 'Elipsoide Proporcional' },
-                            { id: 'BOX', label: '📦 Caja (Recomendada para patas / bípedos)' }
+                            { id: 'ELLIPSOID', label: 'Elipsoide' },
+                            { id: 'CYLINDER', label: 'Cilindro (Estrellas / Radial)' },
+                            { id: 'BOX', label: '📦 Caja (Bípedos)' }
                           ].map(shape => (
                             <button
                               key={shape.id}
@@ -3210,22 +3215,42 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                             setIsApplyingVacuum(true);
                             try {
                               const targetObjForWrap = effectiveTarget;
-                              const newObj = createRetopoCage({
-                                targetObj: targetObjForWrap,
-                                subdivisions: retopoCageSubdivs,
-                                marginFactor: 1.08,
-                                shape: retopoCageShape
-                              });
-                              addObject(newObj);
-                              selectObject(newObj.id);
+                              let cageObjId: string;
+
+                              if (isCurrentObjCage) {
+                                cageObjId = obj.id;
+                              } else {
+                                const existingCage = project.objects.find(o =>
+                                  (o.parameters as any)?.isWrapperCage && (o.parameters as any)?.targetId === targetObjForWrap.id
+                                );
+                                if (existingCage) {
+                                  cageObjId = existingCage.id;
+                                  selectObject(cageObjId);
+                                } else {
+                                  const newObj = createRetopoCage({
+                                    targetObj: targetObjForWrap,
+                                    subdivisions: retopoCageSubdivs,
+                                    marginFactor: 1.08,
+                                    shape: retopoCageShape
+                                  });
+                                  addObject(newObj);
+                                  selectObject(newObj.id);
+                                  cageObjId = newObj.id;
+                                }
+                              }
+
                               setShrinkTargetId(targetObjForWrap.id);
-                              await applySilhouetteVacuumWrapToObject(newObj.id, targetObjForWrap.id, {
+                              await applySilhouetteVacuumWrapToObject(cageObjId, targetObjForWrap.id, {
                                 autoSubdivide: false,
                                 iterations: 6,
                                 relaxation: 0.22,
                                 offset: shrinkwrapOffset,
                                 clampToRayHitsOnly: false,
                                 pruneAirFaces: retopoPruneAir,
+                                sensitivity: retopoAirSensitivity,
+                                airDistanceThreshold: retopoAirDistThreshold,
+                                maxStretchRatio: retopoMaxStretchRatio,
+                                autoFillHoles: false,
                                 aggressivePruning: retopoAggressiveAir,
                                 optimizeTopology: retopoAutoOptimize,
                                 reductionRatio: retopoOptimizationRatio,
@@ -3534,7 +3559,7 @@ const MeshModifiersSection: React.FC<{ obj: CSGObject }> = ({ obj }) => {
                             sensitivity: retopoAirSensitivity,
                             airDistanceThreshold: retopoAirDistThreshold,
                             maxStretchRatio: retopoMaxStretchRatio,
-                            autoFillHoles: retopoAutoFillHoles,
+                            autoFillHoles: retopoPruneAir ? false : retopoAutoFillHoles,
                             aggressivePruning: retopoAirSensitivity === 'aggressive',
                             optimizeTopology: retopoAutoOptimize,
                             reductionRatio: retopoOptimizationRatio,

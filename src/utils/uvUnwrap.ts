@@ -1609,9 +1609,11 @@ export function calculateUVDistortionHeatmap(
   perFaceDistortion: number[]; // 0.0 (compressed) .. 0.5 (ideal) .. 1.0 (stretched)
   averageDistortion: number;
   maxStretch: number;
+  uvAreaTotal: number;
+  meshAreaTotal: number;
 } {
   if (!vertices.length || !faces.length) {
-    return { perFaceDistortion: [], averageDistortion: 0.5, maxStretch: 0.5 };
+    return { perFaceDistortion: [], averageDistortion: 0.5, maxStretch: 0.5, uvAreaTotal: 0, meshAreaTotal: 0 };
   }
 
   let totalArea3D = 0;
@@ -1670,7 +1672,9 @@ export function calculateUVDistortionHeatmap(
   return {
     perFaceDistortion,
     averageDistortion,
-    maxStretch: maxNorm
+    maxStretch: maxNorm,
+    uvAreaTotal: totalArea2D,
+    meshAreaTotal: totalArea3D
   };
 }
 

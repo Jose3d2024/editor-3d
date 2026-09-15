@@ -1125,7 +1125,7 @@ export function createRetopoCage(options: RetopoCageOptions = {}): CSGObject {
 
   return {
     id: cageId,
-    name: `Cage Envoltura ${shape === 'BOX' ? 'Caja' : 'Elipsoide'} ${segs}x${segs}${targetLabel}`,
+    name: `Cage Envoltura ${shape === 'BOX' ? 'Caja' : shape === 'CYLINDER' ? 'Cilindro' : 'Elipsoide'} ${segs}x${segs}${targetLabel}`,
     type: 'MESH',
     operation: 'ADD',
     keyframes: [],
@@ -1444,20 +1444,28 @@ export function cleanSpikesAndDegeneratesCore(
 
   for (let fi = 0; fi < faces.length; fi++) {
     const f = faces[fi];
-    const idxs = f.indices;
-    if (!idxs || idxs.length < 3) {
+    const rawIdxs = f.indices;
+    if (!rawIdxs || rawIdxs.length < 3) {
       removedCount++;
       continue;
     }
 
-    // 1. Duplicate indices within the same face
-    if (idxs[0] === idxs[1] || idxs[1] === idxs[2] || idxs[0] === idxs[2]) {
+    // 1. Eliminar vértices duplicados consecutivos dentro de la misma cara
+    const idxs: number[] = [];
+    for (let k = 0; k < rawIdxs.length; k++) {
+      const curr = rawIdxs[k];
+      const next = rawIdxs[(k + 1) % rawIdxs.length];
+      if (curr !== next) {
+        idxs.push(curr);
+      }
+    }
+    if (idxs.length < 3) {
       removedCount++;
       continue;
     }
 
-    // 1b. Duplicate / overlapping faces sharing the same 3 vertices (anti-caras dobles/duplicadas)
-    const sortedKey = [idxs[0], idxs[1], idxs[2]].sort((x, y) => x - y).join('_');
+    // 1b. Duplicate / overlapping faces sharing the same vertices (anti-caras dobles/duplicadas)
+    const sortedKey = [...idxs].sort((x, y) => x - y).join('_');
     if (seenFaceKeys.has(sortedKey)) {
       removedCount++;
       continue;
@@ -1472,37 +1480,44 @@ export function cleanSpikesAndDegeneratesCore(
       continue;
     }
 
-    const a = p0.distanceTo(p1);
-    const b = p1.distanceTo(p2);
-    const c = p2.distanceTo(p0);
-    const maxE = Math.max(a, b, c);
-    const minE = Math.min(a, b, c);
+    // 2. Cálculo de área real para cualquier polígono (triángulos y quads)
+    let totalArea = 0;
+    let maxE = 0;
+    let minE = Infinity;
+    for (let k = 0; k < idxs.length; k++) {
+      const pA = currentPositions[idxs[k]];
+      const pB = currentPositions[idxs[(k + 1) % idxs.length]];
+      if (pA && pB) {
+        const elen = pA.distanceTo(pB);
+        if (elen > maxE) maxE = elen;
+        if (elen < minE) minE = elen;
+      }
+    }
+    for (let k = 1; k < idxs.length - 1; k++) {
+      const v0 = currentPositions[idxs[0]];
+      const v1 = currentPositions[idxs[k]];
+      const v2 = currentPositions[idxs[k + 1]];
+      if (v0 && v1 && v2) {
+        const e1 = new THREE.Vector3().subVectors(v1, v0);
+        const e2 = new THREE.Vector3().subVectors(v2, v0);
+        totalArea += 0.5 * e1.cross(e2).length();
+      }
+    }
 
-    if (minE < 1e-6 || maxE < 1e-6) {
+    if (minE < 1e-6 || maxE < 1e-6 || totalArea <= 1e-12) {
       removedCount++;
       continue;
     }
 
-    // 2. Heron's formula for aspect ratio / needle check
-    const s = (a + b + c) * 0.5;
-    const areaSq = s * (s - a) * (s - b) * (s - c);
-    if (areaSq <= 1e-12) {
-      removedCount++;
-      continue;
-    }
-    const area = Math.sqrt(areaSq);
-    const hMin = (2 * area) / maxE;
+    // Solo eliminar si es un triángulo/quad degenerado colapsado sin área real
+    const hMin = (2 * totalArea) / Math.max(1e-6, maxE);
     const aspectRatio = maxE / Math.max(1e-6, hMin);
-
-    // Solo eliminar si es un triángulo colapsado extremadamente agudo (aguja degenerada real sin área)
-    // NUNCA eliminar caras simplemente alargadas (como las que cubren extremidades o cilindros)
-    // para evitar abrir agujeros en la malla
-    if (aspectRatio > 35.0 && areaSq <= 1e-8) {
+    if (aspectRatio > 45.0 && totalArea <= 1e-8) {
       removedCount++;
       continue;
     }
 
-    // 3. Antenna check (faces with 2 boundary edges sticking out like single pins into the air)
+    // 3. Antenna check (faces with 3 boundary edges sticking out like single isolated fins into the air)
     let boundaryEdges = 0;
     for (let k = 0; k < idxs.length; k++) {
       const eA = Math.min(idxs[k], idxs[(k + 1) % idxs.length]);
@@ -1511,11 +1526,13 @@ export function cleanSpikesAndDegeneratesCore(
         boundaryEdges++;
       }
     }
-    if (boundaryEdges >= 2 && faces.length > 50) {
-      // Solo considerar antena suelta si su centroide está fuera de la superficie del modelo
+    if (boundaryEdges >= 3 && faces.length > 50) {
+      // Solo considerar antena suelta si su centroide está completamente fuera de la superficie del modelo
       let isFloating = false;
       if (targetBvh) {
-        const centroid = new THREE.Vector3().add(p0).add(p1).add(p2).multiplyScalar(1 / 3);
+        const centroid = new THREE.Vector3();
+        for (const vi of idxs) centroid.add(currentPositions[vi]);
+        centroid.divideScalar(idxs.length);
         hitTmp.distance = Infinity;
         hitTmp.faceIndex = -1;
         const res = targetBvh.closestPointToPoint(centroid, hitTmp as any);
@@ -1529,34 +1546,7 @@ export function cleanSpikesAndDegeneratesCore(
       }
     }
 
-    // 4. Inverted face check (opposes target surface normal)
-    let finalIndices = [...idxs];
-    if (targetBvh) {
-      const e1 = new THREE.Vector3().subVectors(p1, p0);
-      const e2 = new THREE.Vector3().subVectors(p2, p0);
-      const fn = new THREE.Vector3().crossVectors(e1, e2).normalize();
-      const centroid = new THREE.Vector3().add(p0).add(p1).add(p2).multiplyScalar(1 / 3);
-
-      hitTmp.distance = Infinity;
-      hitTmp.faceIndex = -1;
-      const res = targetBvh.closestPointToPoint(centroid, hitTmp as any);
-
-      if (res && res.point) {
-        const tn = getTargetNormal(res.faceIndex);
-        const dot = fn.dot(tn);
-
-        // Si la cara está invertida (apunta hacia dentro del modelo, dot < -0.2)
-        // Volteamos su winding order siempre para corregir la normal sin romper la malla
-        if (dot < -0.2) {
-          finalIndices = [idxs[0], idxs[2], idxs[1]];
-        }
-      }
-    }
-
-    keptFaces.push({
-      ...f,
-      indices: finalIndices
-    });
+    keptFaces.push(f);
   }
 
   // 5. Re-index vertices to remove orphaned vertices
@@ -1699,11 +1689,11 @@ export function pruneAirBridgingFacesCore(
 
   // Distance beyond which a face centroid is considered floating in open air:
   const airDistThresh = options.airDistanceThreshold
-    ? Math.max(0.005, options.airDistanceThreshold)
-    : Math.max(0.015, Math.min(tgtDiag * defaultAirThreshRel, medianEdge * (sensitivity === 'aggressive' ? 1.0 : 1.35)));
+    ? (options.airDistanceThreshold > 1 ? options.airDistanceThreshold : Math.max(0.015, tgtDiag * options.airDistanceThreshold))
+    : Math.max(0.02, tgtDiag * (sensitivity === 'aggressive' ? 0.018 : sensitivity === 'conservative' ? 0.045 : 0.028), medianEdge * (sensitivity === 'aggressive' ? 0.45 : 0.75));
 
-  // Surface adherence tolerance (calibrated tightly to mesh edge resolution):
-  const surfaceTolerance = Math.min(Math.max(0.003, medianEdge * 0.4), tgtDiag * 0.012);
+  // Surface adherence tolerance:
+  const surfaceTolerance = Math.max(0.008, tgtDiag * 0.01, medianEdge * 0.4);
 
   // Pre-calculate vertex distances to target surface
   const numVerts = currentPositions.length;
@@ -1712,6 +1702,7 @@ export function pruneAirBridgingFacesCore(
 
   const tgtPosAttr = targetGeo.getAttribute('position');
   const tgtIndex = targetGeo.getIndex();
+  const tgtNormAttr = targetGeo.getAttribute('normal');
   const getTargetFaceNormal = (faceIndex: number): THREE.Vector3 => {
     if (faceIndex < 0 || !tgtPosAttr) return new THREE.Vector3(0, 1, 0);
     let i0 = faceIndex * 3;
@@ -1732,6 +1723,17 @@ export function pruneAirBridgingFacesCore(
       new THREE.Vector3().subVectors(p1, p0),
       new THREE.Vector3().subVectors(p2, p0)
     ).normalize();
+
+    if (tgtNormAttr) {
+      const n0 = new THREE.Vector3().fromBufferAttribute(tgtNormAttr, i0);
+      const n1 = new THREE.Vector3().fromBufferAttribute(tgtNormAttr, i1);
+      const n2 = new THREE.Vector3().fromBufferAttribute(tgtNormAttr, i2);
+      const avgN = n0.add(n1).add(n2).normalize();
+      if (avgN.lengthSq() > 1e-4 && fn.dot(avgN) < 0) {
+        fn.negate();
+      }
+    }
+
     return fn.lengthSq() < 1e-6 ? new THREE.Vector3(0, 1, 0) : fn;
   };
   const getTargetNormal = getTargetFaceNormal;
@@ -1814,13 +1816,17 @@ export function pruneAirBridgingFacesCore(
       if (elen > extremeStretchEdge) hasExtremeEdge = true;
       if (elen > maxAllowedEdge) {
         hasStretchedEdge = true;
+      }
 
+      // Detectar si el punto medio de esta arista está suspendido en el aire cruzando un abismo
+      // Solo se evalúa en aristas estiradas que cruzan distancias significativas
+      if (elen > maxAllowedEdge) {
         const mid = new THREE.Vector3().addVectors(pA, pB).multiplyScalar(0.5);
         hitTmp.distance = Infinity;
         hitTmp.faceIndex = -1;
         const midRes = targetBvh.closestPointToPoint(mid, hitTmp as any);
         if (midRes && midRes.point) {
-          if (mid.distanceTo(midRes.point) > faceTolerance) {
+          if (mid.distanceTo(midRes.point) > airDistThresh * 1.8) {
             stretchedMidpointInAir = true;
           }
         }
@@ -1839,63 +1845,23 @@ export function pruneAirBridgingFacesCore(
     const cenRes = targetBvh.closestPointToPoint(centroid, hitTmp as any);
     const distToSurface = (cenRes && cenRes.point) ? centroid.distanceTo(cenRes.point) : 0;
 
-    const p0 = currentPositions[idxs[0]];
-    const p1 = currentPositions[idxs[1]];
-    const p2 = currentPositions[idxs[2]];
-
-    let normalDot = 1.0;
-    if (cenRes && cenRes.point && cenRes.faceIndex >= 0) {
-      // 1. Obtener la normal de la cara más cercana del modelo original (Target Normal)
-      const tn = getTargetFaceNormal(cenRes.faceIndex);
-      
-      // 2. Calcular la normal de la cara actual de la envoltura (Face Normal)
-      const e1 = new THREE.Vector3().subVectors(p1, p0);
-      const e2 = new THREE.Vector3().subVectors(p2, p0);
-      const fn = new THREE.Vector3().crossVectors(e1, e2).normalize();
-      
-      // 3. Evaluar el producto escalar (Dot Product) de ambas normales
-      normalDot = Math.abs(fn.dot(tn));
-    }
-
-    // ── 🛡️ REGLAS DE INMUNIDAD TOPOLÓGICA ──
-    // 0. Si la cara reposa a ras de la superficie del modelo Y su normal concuerda: NUNCA PODAR
-    if (distToSurface <= surfaceTolerance * 1.5 && normalDot > 0.35 && !hasExtremeEdge && !stretchedMidpointInAir) {
+    // ── 🛡️ REGLA FUNDAMENTAL DE PROTECCIÓN DE SUPERFICIE ──
+    // Si la cara reposa directamente sobre la superficie del modelo (centroide próximo a la superficie):
+    // NUNCA SE PODA. Preserva caras sobre el modelo, biseles, alas, valles y aristas vivas.
+    if (distToSurface <= airDistThresh * 1.1) {
       retainedFaces.push(f);
       continue;
     }
 
-    // 1. Detección de velas / membranas que cruzan abismos en el aire (cruces entre puntas o alas):
-    const isBridgingVoid = distToSurface > airDistThresh ||
-      ((hasExtremeEdge || faceMaxEdge > maxAllowedEdge * 1.8) && (distToSurface > airDistThresh * 0.7 || stretchedMidpointInAir)) ||
-      (normalDot < 0.25 && distToSurface > surfaceTolerance * 1.8);
-
-    if (isBridgingVoid) {
-      prunedCount++;
+    if (vertsOnSurfaceCount >= 3 && distToSurface <= airDistThresh * 1.5) {
+      retainedFaces.push(f);
       continue;
     }
 
-    // Si los 3 vértices están en la superficie y la cara no está en el aire:
-    if (vertsOnSurfaceCount >= 3) {
-      if (distToSurface <= airDistThresh && normalDot > 0.2) {
-        retainedFaces.push(f);
-        continue;
-      }
-    }
-
-    // 2. Si 2 vértices están en la superficie:
-    if (vertsOnSurfaceCount >= 2) {
-      if ((hasExtremeEdge || hasStretchedEdge) && (stretchedMidpointInAir || distToSurface > airDistThresh * 0.75)) {
-        prunedCount++;
-        continue;
-      }
-      if (distToSurface <= airDistThresh && normalDot > 0.3) {
-        retainedFaces.push(f);
-        continue;
-      }
-    }
-
-    // ── ✂️ APLICACIÓN DE LOS CRITERIOS DE ELIMINACIÓN REVISADOS ──
-    if (distToSurface > airDistThresh || vertsOnSurfaceCount <= 1 || normalDot < 0.25) {
+    // ── ✂️ PODA DE MEMBRANAS Y TELAS SUSPENDIDAS EN EL AIRE ──
+    // Se eliminan caras que estén suspendidas en el aire entre extremidades o abismos
+    // (lejos de la superficie del modelo O con aristas estiradas O con centroide/punto medio flotando en el aire)
+    if (distToSurface > airDistThresh * 1.35 || hasStretchedEdge || vertsOnSurfaceCount <= 1 || stretchedMidpointInAir) {
       prunedCount++;
       continue;
     }
@@ -3096,7 +3062,7 @@ export async function applySilhouetteVacuumWrap(
     iterations = 5,
     relaxation = 0.15,
     offset = 0.003,
-    pruneAirFaces = true,
+    pruneAirFaces = false,
     airDistanceThreshold,
     maxStretchRatio = 2.2,
     minIslandFaces = 4,
@@ -3319,45 +3285,12 @@ export async function applySilhouetteVacuumWrap(
 
   let finalNormals: THREE.Vector3[] = Array.from({ length: numVerts }, () => new THREE.Vector3(0, 1, 0));
 
-  // Determine cage bounding box and geometric roles for enclosing cages (Box, Ellipsoid, Cylinder)
+  // Determine cage bounding box and scale
   const srcCageBox = new THREE.Box3();
   for (const p of currentPositions) srcCageBox.expandByPoint(p);
   const srcCageCenterWorld = srcCageBox.getCenter(new THREE.Vector3());
 
-  type CageRole = 'TOP_CAP' | 'BOTTOM_CAP' | 'SIDE_WALL';
-  const cageRoles: CageRole[] = new Array(numVerts);
-
-  for (let i = 0; i < numVerts; i++) {
-    if (isRetopoPlane) {
-      cageRoles[i] = 'SIDE_WALL';
-      continue;
-    }
-    const p = currentPositions[i];
-    const outDir = p.clone().sub(srcCageCenterWorld).normalize();
-    const n = srcNormalsWorld[i];
-
-    if (n.y > 0.75 || Math.abs(p.y - srcCageBox.max.y) < 1e-3) {
-      cageRoles[i] = 'TOP_CAP';
-    } else if (n.y < -0.75 || Math.abs(p.y - srcCageBox.min.y) < 1e-3) {
-      cageRoles[i] = 'BOTTOM_CAP';
-    } else {
-      cageRoles[i] = 'SIDE_WALL';
-    }
-  }
-
-  // Check if target object has flat top/bottom planar caps
-  let targetHasFlatTop = false;
-  let targetHasFlatBottom = false;
-  for (const pl of targetPlanarPlanes) {
-    if (pl.normal.y > 0.85 && Math.abs(pl.d - tgtBox.max.y) < 0.02) targetHasFlatTop = true;
-    if (pl.normal.y < -0.85 && Math.abs(pl.d - (-tgtBox.min.y)) < 0.02) targetHasFlatBottom = true;
-  }
-  if (tgtBox.max.y - tgtBox.min.y > 0.01) {
-    targetHasFlatTop = true;
-    targetHasFlatBottom = true;
-  }
-
-  // Comprobar si la malla ya está ceñida o muy cerca de la superficie (ej. segundo pase o refinamiento)
+  // Comprobar si la malla ya está ceñida o muy cerca de la superficie
   let initialCloseCount = 0;
   const sampleVertStep = Math.max(1, Math.floor(numVerts / 50));
   for (let si = 0; si < numVerts; si += sampleVertStep) {
@@ -3370,162 +3303,92 @@ export async function applySilhouetteVacuumWrap(
   }
   const isAlreadyConformed = initialCloseCount / Math.ceil(numVerts / sampleVertStep) > 0.6;
 
-  // Step 4: High-Precision Projection with Inward Raycasting + Tangential Surface Relaxation
-  for (let pass = 0; pass < iterations; pass++) {
-    const isFinalPass = pass === iterations - 1;
+  report.push(`Ceñido iterativo de silueta (${iterations} pases, relajación tangencial y adaptación a la superficie)...`);
 
-    // A. Project every vertex onto target surface
+  const rayDistanceLimit = tgtDiag * 2.5;
+
+  for (let pass = 0; pass < iterations; pass++) {
+    const isFirstPass = pass === 0;
+    const progress = (pass + 1) / iterations;
+    const stepAlpha = isFirstPass ? 1.0 : Math.min(0.85, 0.45 + progress * 0.4);
+
     for (let i = 0; i < numVerts; i++) {
       const vWorld = currentPositions[i];
       let snappedPoint: THREE.Vector3 | null = null;
       let snappedNormal: THREE.Vector3 | null = null;
 
-      const currentNorm = (pass === 0 ? srcNormalsWorld[i] : finalNormals[i]);
-      const role = cageRoles[i];
-
       if (isRetopoPlane) {
-        // Plano Quads: Project along the plane's normal towards the target
+        // Plano Quads: Proyectar a lo largo de la normal del plano hacia el objetivo
+        const currentNorm = (pass === 0 ? srcNormalsWorld[i] : finalNormals[i]);
         const rayDir = currentNorm.clone().negate().normalize();
         const rayPos = new THREE.Ray(vWorld, rayDir);
-        const hitPos = targetBvh.raycastFirst(rayPos, THREE.DoubleSide as any);
-        if (hitPos && hitPos.point.distanceTo(vWorld) <= maxRayDistance) {
+        const hitPos = targetBvh.raycastFirst(rayPos);
+        if (hitPos && hitPos.point && hitPos.point.distanceTo(vWorld) <= rayDistanceLimit) {
           snappedPoint = hitPos.point.clone();
           snappedNormal = hitPos.normal || getTargetFaceNormal(hitPos.faceIndex);
         } else {
-          // Also test opposite direction in case plane faces outward
           const rayNeg = new THREE.Ray(vWorld, rayDir.clone().negate());
-          const hitNeg = targetBvh.raycastFirst(rayNeg, THREE.DoubleSide as any);
-          if (hitNeg && hitNeg.point.distanceTo(vWorld) <= maxRayDistance) {
+          const hitNeg = targetBvh.raycastFirst(rayNeg);
+          if (hitNeg && hitNeg.point && hitNeg.point.distanceTo(vWorld) <= rayDistanceLimit) {
             snappedPoint = hitNeg.point.clone();
             snappedNormal = hitNeg.normal || getTargetFaceNormal(hitNeg.faceIndex);
           }
         }
-      } else {
-        // Enclosing 3D Cage (Box, Ellipsoid, Cylinder):
-        // En Pase 0: succión inicial inteligente con rayos desde la jaula exterior hacia la silueta
-        if (pass === 0 && !isAlreadyConformed) {
-          if (role === 'TOP_CAP') {
-            // Proyección vertical directa hacia abajo (-Y)
-            const hitDown = targetBvh.raycastFirst(new THREE.Ray(vWorld, new THREE.Vector3(0, -1, 0)), THREE.DoubleSide as any);
-            if (hitDown && Math.abs(hitDown.point.y - tgtBox.max.y) < tgtDiag * 0.08) {
-              snappedPoint = hitDown.point.clone();
-              snappedNormal = getTargetFaceNormal(hitDown.faceIndex);
-            } else {
-              // Fuera de la huella superior: proyectar sobre el plano superior y clampear Y estrictamente
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const res = targetBvh.closestPointToPoint(new THREE.Vector3(vWorld.x, tgtBox.max.y, vWorld.z), closestHit as any);
-              if (res && res.point) {
-                snappedPoint = res.point.clone();
-                if (targetHasFlatTop) snappedPoint.y = tgtBox.max.y;
-                snappedNormal = new THREE.Vector3(0, 1, 0);
-              }
-            }
-          } else if (role === 'BOTTOM_CAP') {
-            // Proyección vertical directa hacia arriba (+Y)
-            const hitUp = targetBvh.raycastFirst(new THREE.Ray(vWorld, new THREE.Vector3(0, 1, 0)), THREE.DoubleSide as any);
-            if (hitUp && Math.abs(hitUp.point.y - tgtBox.min.y) < tgtDiag * 0.08) {
-              snappedPoint = hitUp.point.clone();
-              snappedNormal = getTargetFaceNormal(hitUp.faceIndex);
-            } else {
-              // Fuera de la huella inferior: proyectar sobre el plano inferior y clampear Y estrictamente
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const res = targetBvh.closestPointToPoint(new THREE.Vector3(vWorld.x, tgtBox.min.y, vWorld.z), closestHit as any);
-              if (res && res.point) {
-                snappedPoint = res.point.clone();
-                if (targetHasFlatBottom) snappedPoint.y = tgtBox.min.y;
-                snappedNormal = new THREE.Vector3(0, -1, 0);
-              }
-            }
-          } else {
-            // PAREDES LATERALES: Succión radial horizontal hacia el eje central a la misma elevación
-            const axisPt = new THREE.Vector3(tgtCenterWorld.x, vWorld.y, tgtCenterWorld.z);
-            const dirRadial = axisPt.clone().sub(vWorld);
-            let hitRadialPt: THREE.Vector3 | null = null;
-            let hitRadialNorm: THREE.Vector3 | null = null;
 
-            if (dirRadial.length() > 1e-4) {
-              dirRadial.normalize();
-              const hitRad = targetBvh.raycastFirst(new THREE.Ray(vWorld, dirRadial), THREE.DoubleSide as any);
-              if (hitRad && hitRad.point.distanceTo(vWorld) <= maxRayDistance) {
-                snappedPoint = hitRad.point.clone();
-                snappedNormal = getTargetFaceNormal(hitRad.faceIndex);
-              }
-            }
-
-            if (!snappedPoint) {
-              // 2. Proyección ortogonal a lo largo de la normal invertida de la jaula
-              const pureInward = currentNorm.clone().negate().normalize();
-              const hitInward = targetBvh.raycastFirst(new THREE.Ray(vWorld, pureInward), THREE.DoubleSide as any);
-              if (hitInward && hitInward.point.distanceTo(vWorld) <= maxRayDistance) {
-                snappedPoint = hitInward.point.clone();
-                snappedNormal = getTargetFaceNormal(hitInward.faceIndex);
-              }
-            }
-
-            if (!snappedPoint) {
-              // 3. Rayo hacia el centro 3D del objetivo
-              const dirCenter = tgtCenterWorld.clone().sub(vWorld).normalize();
-              const hitCenter = targetBvh.raycastFirst(new THREE.Ray(vWorld, dirCenter), THREE.DoubleSide as any);
-              if (hitCenter) {
-                snappedPoint = hitCenter.point.clone();
-                snappedNormal = getTargetFaceNormal(hitCenter.faceIndex);
-              }
-            }
-
-            if (!snappedPoint) {
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const res = targetBvh.closestPointToPoint(vWorld, closestHit as any);
-              if (res && res.point) {
-                snappedPoint = res.point.clone();
-                snappedNormal = getTargetFaceNormal(res.faceIndex);
-              }
-            }
-          }
-        } else {
-          // Pases subsecuentes (pass > 0): El vértice ya se encuentra sobre o muy cerca de la superficie.
-          // NUNCA disparar rayos sin límite hacia el interior porque atravesarían el volumen hacia la cara opuesta.
-          // Se proyecta con máxima precisión al punto más cercano de la superficie (closestPointToPoint).
+        // Fallback con BVH
+        if (!snappedPoint) {
           closestHit.distance = Infinity;
           closestHit.faceIndex = -1;
           const res = targetBvh.closestPointToPoint(vWorld, closestHit as any);
           if (res && res.point) {
             snappedPoint = res.point.clone();
             snappedNormal = getTargetFaceNormal(res.faceIndex);
-            if (role === 'TOP_CAP' && targetHasFlatTop) {
-              snappedPoint.y = tgtBox.max.y;
-              snappedNormal = new THREE.Vector3(0, 1, 0);
-            } else if (role === 'BOTTOM_CAP' && targetHasFlatBottom) {
-              snappedPoint.y = tgtBox.min.y;
-              snappedNormal = new THREE.Vector3(0, -1, 0);
-            }
           }
         }
-      }
+      } else {
+        // Jaula de Envoltura (Box / Sphere / Cylinder 360°):
+        // Proyección directa y robusta hacia la superficie exterior del modelo objetivo
+        closestHit.distance = Infinity;
+        closestHit.faceIndex = -1;
+        const res = targetBvh.closestPointToPoint(vWorld, closestHit as any);
 
-      // Fallback para Pase 0 si todos los rayos fallaron
-      if (!snappedPoint) {
-        if (!config.clampToRayHitsOnly || !isRetopoPlane) {
-          closestHit.distance = Infinity;
-          closestHit.faceIndex = -1;
-          const res = targetBvh.closestPointToPoint(vWorld, closestHit as any);
-          if (res && res.point) {
+        const normIn = (pass === 0 ? srcNormalsWorld[i] : finalNormals[i]).clone().negate().normalize();
+        const toCenter = tgtCenterWorld.clone().sub(vWorld);
+        const centerIn = toCenter.lengthSq() > 1e-6 ? toCenter.normalize() : normIn;
+        const dirIn = new THREE.Vector3().addVectors(normIn.multiplyScalar(0.35), centerIn.multiplyScalar(0.65)).normalize();
+
+        const ray = new THREE.Ray(vWorld, dirIn);
+        const hit = targetBvh.raycastFirst(ray);
+
+        if (res && res.point) {
+          const dClosest = vWorld.distanceTo(res.point);
+          const dRay = (hit && hit.point) ? vWorld.distanceTo(hit.point) : Infinity;
+          // Preferimos el punto más cercano para capturar valles y concavidades; solo usamos el rayo si está muy alineado y no está más lejos
+          if (hit && hit.point && dRay <= rayDistanceLimit && dRay <= dClosest * 1.1) {
+            snappedPoint = hit.point.clone();
+            snappedNormal = hit.normal || getTargetFaceNormal(hit.faceIndex);
+          } else {
             snappedPoint = res.point.clone();
             snappedNormal = getTargetFaceNormal(res.faceIndex);
           }
+        } else if (hit && hit.point && hit.point.distanceTo(vWorld) <= rayDistanceLimit) {
+          snappedPoint = hit.point.clone();
+          snappedNormal = hit.normal || getTargetFaceNormal(hit.faceIndex);
         }
       }
 
       if (snappedPoint) {
-        currentPositions[i].copy(snappedPoint);
-        finalNormals[i] = snappedNormal || new THREE.Vector3(0, 1, 0);
+        if (isFirstPass) {
+          currentPositions[i].copy(snappedPoint);
+        } else {
+          currentPositions[i].lerp(snappedPoint, stepAlpha);
+        }
+        finalNormals[i] = (snappedNormal || new THREE.Vector3(0, 1, 0)).clone();
       }
     }
 
-    // B. Relajación tangencial uniforme entre pases con preservación de características
-    if (!isFinalPass && relaxation > 0) {
+    // Relajación tangencial uniforme entre pases con preservación de características
+    if (relaxation > 0) {
       const curEdgeLengths: number[] = [];
       const sampleStep = Math.max(1, Math.floor(srcFaces.length / 400));
       for (let fIdx = 0; fIdx < srcFaces.length; fIdx += sampleStep) {
@@ -3539,93 +3402,60 @@ export async function applySilhouetteVacuumWrap(
 
       const smoothed = currentPositions.map(p => p.clone());
       for (let i = 0; i < numVerts; i++) {
-        const role = cageRoles[i];
         const nbs = neighbors[i];
         if (nbs.length > 0) {
-          const n_i = finalNormals[i];
-          const avg = new THREE.Vector3();
-          let totalWeight = 0;
-
-          for (let k = 0; k < nbs.length; k++) {
-            const nbIdx = nbs[k];
-            const n_j = finalNormals[nbIdx];
-            const dot = n_i.dot(n_j);
-            // Ponderación por alineación de normales: solo relaja con vecinos de orientación coherente.
-            // Umbral estricto (dot > 0.70): EVITA TIRAR DE LOS VÉRTICES FUERA DE VALLES O CONCAVIDADES.
-            if (dot > 0.70) {
-              const w = dot * dot;
-              avg.addScaledVector(currentPositions[nbIdx], w);
-              totalWeight += w;
+          // Preservar esquinas vivas: si el vértice está anclado a una punta viva, no desplazarlo
+          if ((snapSharpFeatures || antiRounding) && targetSharpPts.length > 0) {
+            let isNearSharp = false;
+            for (const sp of targetSharpPts) {
+              if (currentPositions[i].distanceTo(sp) < curMedianEdge * 0.35) {
+                isNearSharp = true;
+                break;
+              }
             }
+            if (isNearSharp) continue;
           }
 
-          if (totalWeight > 0) {
-            avg.divideScalar(totalWeight);
-            const diff = avg.sub(currentPositions[i]);
-            const norm = finalNormals[i];
+          const avg = new THREE.Vector3();
+          for (let k = 0; k < nbs.length; k++) {
+            avg.add(currentPositions[nbs[k]]);
+          }
+          avg.divideScalar(nbs.length);
+          const diff = avg.sub(currentPositions[i]);
+          const norm = finalNormals[i];
 
-            // Preservar esquinas vivas: si el vértice está cerca de una esquina o punta viva, no desplazarlo
-            if ((snapSharpFeatures || antiRounding) && targetSharpPts.length > 0) {
-              let isNearSharp = false;
-              for (const sp of targetSharpPts) {
-                if (currentPositions[i].distanceTo(sp) < curMedianEdge * 0.4) {
-                  isNearSharp = true;
+          // Proyectar diferencia en el plano tangente a la superficie
+          const normalComp = norm.clone().multiplyScalar(diff.dot(norm));
+          const tangentDiff = diff.sub(normalComp);
+
+          // Limitar desplazamiento máximo por paso de relajación para estabilidad numérica
+          const maxStep = Math.max(curMedianEdge * 0.45, 0.01);
+          if (tangentDiff.length() > maxStep) {
+            tangentDiff.normalize().multiplyScalar(maxStep);
+          }
+
+          const relaxedPos = currentPositions[i].clone().addScaledVector(tangentDiff, relaxation * 0.35);
+
+          // Re-snap directo a la superficie mediante BVH
+          closestHit.distance = Infinity;
+          closestHit.faceIndex = -1;
+          const rSnap = targetBvh.closestPointToPoint(relaxedPos, closestHit as any);
+          if (rSnap && rSnap.point) {
+            smoothed[i].copy(rSnap.point);
+            if (rSnap.faceIndex >= 0) finalNormals[i] = getTargetFaceNormal(rSnap.faceIndex);
+          } else {
+            smoothed[i].copy(relaxedPos);
+          }
+
+          // Restricción planar durante la relajación: mantener caras coplanares estrictamente planas
+          if (snapPlanarFaces && targetPlanarPlanes.length > 0) {
+            for (const pl of targetPlanarPlanes) {
+              if (Math.abs(finalNormals[i].dot(pl.normal)) > 0.88) {
+                const distToPlane = pl.normal.dot(smoothed[i]) - pl.d;
+                if (Math.abs(distToPlane) < 0.05) {
+                  smoothed[i].addScaledVector(pl.normal, -distToPlane);
                   break;
                 }
-              }
-              if (isNearSharp) continue;
-            }
-
-            if (role === 'TOP_CAP') {
-              // Tapa superior: relajación horizontal en XZ con re-proyección a la superficie
-              diff.y = 0;
-              const relaxed = currentPositions[i].clone().addScaledVector(diff, relaxation * 0.35);
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const rSnap = targetBvh.closestPointToPoint(relaxed, closestHit as any);
-              if (rSnap && rSnap.point) {
-                smoothed[i].copy(rSnap.point);
-                if (targetHasFlatTop) smoothed[i].y = tgtBox.max.y;
-                finalNormals[i] = new THREE.Vector3(0, 1, 0);
-              } else {
-                smoothed[i].copy(relaxed);
-                if (targetHasFlatTop) smoothed[i].y = tgtBox.max.y;
-              }
-            } else if (role === 'BOTTOM_CAP') {
-              // Tapa inferior: relajación horizontal en XZ con re-proyección a la superficie
-              diff.y = 0;
-              const relaxed = currentPositions[i].clone().addScaledVector(diff, relaxation * 0.35);
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const rSnap = targetBvh.closestPointToPoint(relaxed, closestHit as any);
-              if (rSnap && rSnap.point) {
-                smoothed[i].copy(rSnap.point);
-                if (targetHasFlatBottom) smoothed[i].y = tgtBox.min.y;
-                finalNormals[i] = new THREE.Vector3(0, -1, 0);
-              } else {
-                smoothed[i].copy(relaxed);
-                if (targetHasFlatBottom) smoothed[i].y = tgtBox.min.y;
-              }
-            } else {
-              // Proyectar diferencia en el plano tangente a la superficie
-              const normalComp = norm.clone().multiplyScalar(diff.dot(norm));
-              const tangentDiff = diff.sub(normalComp);
-
-              // Limitar desplazamiento máximo por paso de relajación para estabilidad numérica
-              const maxStep = Math.max(curMedianEdge * 0.4, 0.01);
-              if (tangentDiff.length() > maxStep) {
-                tangentDiff.normalize().multiplyScalar(maxStep);
-              }
-
-              const relaxedPos = currentPositions[i].clone().addScaledVector(tangentDiff, relaxation * 0.35);
-              closestHit.distance = Infinity;
-              closestHit.faceIndex = -1;
-              const rSnap = targetBvh.closestPointToPoint(relaxedPos, closestHit as any);
-              if (rSnap && rSnap.point) {
-                smoothed[i].copy(rSnap.point);
-                if (rSnap.faceIndex >= 0) finalNormals[i] = getTargetFaceNormal(rSnap.faceIndex);
-              } else {
-                smoothed[i].copy(relaxedPos);
               }
             }
           }
@@ -3634,6 +3464,13 @@ export async function applySilhouetteVacuumWrap(
       for (let i = 0; i < numVerts; i++) {
         currentPositions[i].copy(smoothed[i]);
       }
+    }
+  }
+
+  // Aplicar desplazamiento final (offset) a lo largo de las normales de la superficie
+  if (offset !== 0) {
+    for (let i = 0; i < numVerts; i++) {
+      currentPositions[i].addScaledVector(finalNormals[i], offset);
     }
   }
 
@@ -3718,9 +3555,9 @@ export async function applySilhouetteVacuumWrap(
           indices: f.indices.map(oldIdx => oldToNewIdx.get(oldIdx)!)
         }));
 
-        // EJECUCIÓN DEL AUTO-SELLADO ROBUSTO 3D (sellado conservador de micro-huecos para no re-crear velas podadas)
-        if (config.autoFillHoles !== false) {
-          const maxHoleEdges = config.maxHoleEdges ?? (pruneAirFaces ? 12 : 60);
+        // EJECUCIÓN DEL AUTO-SELLADO ROBUSTO 3D (Solo si no se están podando membranas en el aire)
+        if (config.autoFillHoles === true && !pruneAirFaces) {
+          const maxHoleEdges = config.maxHoleEdges ?? 8;
           const holeRes = fillSmallBoundaryHoles(tempLocalVerts, newFaces, maxHoleEdges, targetBvh);
           
           if (holeRes.holesFilled > 0) {
@@ -3849,10 +3686,10 @@ export async function applySilhouetteVacuumWrap(
   // 🏁 BLOQUE DE CIERRE, SOLDADURA TOPOLÓGICA Y EMPAQUETADO FINAL (OPTIMIZADO)
   // =========================================================================
   
-  // Garantía de estanqueidad (watertight): sellar pequeñas perforaciones si está habilitado
-  if (!isRetopoPlane && config.autoFillHoles !== false && srcFaces.length > 0) {
+  // Garantía de estanqueidad (watertight): sellar pequeñas perforaciones si está habilitado explícitamente y no se podaron membranas
+  if (!isRetopoPlane && config.autoFillHoles === true && !pruneAirFaces && srcFaces.length > 0) {
     const tempLocal: V3[] = currentPositions.map(p => [p.x, p.y, p.z]);
-    const maxBoundaryHole = config.maxHoleEdges ?? (pruneAirFaces ? 12 : 24);
+    const maxBoundaryHole = config.maxHoleEdges ?? 8;
     const sealRes = fillSmallBoundaryHoles(tempLocal, srcFaces, maxBoundaryHole, targetBvh);
     if (sealRes.holesFilled > 0) {
       srcFaces = sealRes.faces;
@@ -3896,6 +3733,7 @@ export async function applySilhouetteVacuumWrap(
     }
 
     const weldedFaces: MeshFace[] = [];
+    const seenWeldedKeys = new Set<string>();
     for (const f of srcFaces) {
       const mapped = f.indices.map(idx => remap.get(idx) ?? idx);
       const clean: number[] = [];
@@ -3908,13 +3746,30 @@ export async function applySilhouetteVacuumWrap(
         clean.pop();
       }
       if (clean.length >= 3) {
-        weldedFaces.push({ ...f, indices: clean });
+        const key = [...clean].sort((a, b) => a - b).join('_');
+        if (!seenWeldedKeys.has(key)) {
+          seenWeldedKeys.add(key);
+          weldedFaces.push({ ...f, indices: clean });
+        }
       }
     }
     finalVerts.length = 0;
     finalVerts.push(...weldedVerts);
     finalFaces = weldedFaces;
   }
+
+  // Deduplicación estricta de caras (Garantía anti-doble malla)
+  const finalUniqueFaces: MeshFace[] = [];
+  const finalSeenKeys = new Set<string>();
+  for (const f of finalFaces) {
+    if (!f.indices || f.indices.length < 3) continue;
+    const k = [...f.indices].sort((a, b) => a - b).join('_');
+    if (!finalSeenKeys.has(k)) {
+      finalSeenKeys.add(k);
+      finalUniqueFaces.push(f);
+    }
+  }
+  finalFaces = finalUniqueFaces;
 
   report.push(`Envoltura ceñida a silueta completada con éxito:`);
   report.push(`- ${finalVerts.length.toLocaleString()} vértices adaptados ceñidos a la silueta.`);
@@ -4018,12 +3873,26 @@ export async function applySilhouetteVacuumWrap(
     }));
   }
 
+  // Deduplicación final de outputFaces por si hubo optimización topológica
+  const uniqueOutputFaces: MeshFace[] = [];
+  const seenOutputKeys = new Set<string>();
+  for (const f of outputFaces) {
+    if (!f.indices || f.indices.length < 3) continue;
+    const k = [...f.indices].sort((a, b) => a - b).join('_');
+    if (!seenOutputKeys.has(k)) {
+      seenOutputKeys.add(k);
+      uniqueOutputFaces.push(f);
+    }
+  }
+  outputFaces = uniqueOutputFaces;
+
   // 7. RETORNAR EL OBJETO TOTALMENTE MANIFOLD, ESTANCO Y CONTINUO
   return {
     updatedObject: {
       ...resolvedSource,
       vertices: outputVerts,
       faces: outputFaces,
+      opacity: targetObj?.opacity ?? 1.0,
       materialId: targetObj?.materialId ?? resolvedSource.materialId,
       material: targetObj?.material ? JSON.parse(JSON.stringify(targetObj.material)) : resolvedSource.material,
       color: targetObj?.color ?? resolvedSource.color,

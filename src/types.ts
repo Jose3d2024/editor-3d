@@ -392,6 +392,7 @@ export interface MaterialData {
   iceConfig?: IceShaderConfig;
   isCSM?: boolean;
   csmConfig?: CSMConfig;
+  customShaderMaterial?: any;
   isGlass?: boolean;
   glassConfig?: GlassMaterialConfig;
 }
@@ -622,7 +623,7 @@ export interface EnvironmentSettings {
   maxResolution?: number;
 }
 
-export type ViewportType   = 'PERSPECTIVE' | 'TOP' | 'BOTTOM' | 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT';
+export type ViewportType   = 'PERSPECTIVE' | 'TOP' | 'BOTTOM' | 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT' | 'CAMERA';
 export type ViewportLayoutPreset = 
   | 'QUAD' 
   | 'SINGLE' 
