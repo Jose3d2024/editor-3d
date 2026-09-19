@@ -148,6 +148,125 @@ export function extractUniqueEdges(
 }
 
 /**
+ * Extrae aristas para BufferGeometry (ej. mallas GLTF/GLB importadas),
+ * filtrando automáticamente aristas diagonales interiores entre triángulos coplanares.
+ * Devuelve un BufferGeometry de LineSegments listo para renderizado limpio.
+ */
+export function extractEdgesFromBufferGeometry(
+  geometry: THREE.BufferGeometry,
+  options?: { dissolveCoplanars?: boolean; coplanarAngleDeg?: number }
+): THREE.BufferGeometry {
+  const posAttr = geometry.attributes.position;
+  if (!posAttr || posAttr.count < 3) return new THREE.BufferGeometry();
+
+  const dissolveCoplanars = options?.dissolveCoplanars ?? true;
+  const coplanarAngleDeg = options?.coplanarAngleDeg ?? 3.5;
+  const cosTol = Math.cos((coplanarAngleDeg * Math.PI) / 180);
+
+  const indexAttr = geometry.index;
+  const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+
+  // 1. Soldar vértices coincidentes por posición espacial
+  const quant = 10000;
+  const keyMap = new Map<string, number>();
+  const remap = new Int32Array(posAttr.count);
+  const verts: THREE.Vector3[] = [];
+  let uCount = 0;
+
+  for (let i = 0; i < posAttr.count; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const z = posAttr.getZ(i);
+    const k = `${Math.round(x * quant)}_${Math.round(y * quant)}_${Math.round(z * quant)}`;
+    let id = keyMap.get(k);
+    if (id === undefined) {
+      id = uCount++;
+      keyMap.set(k, id);
+      verts.push(new THREE.Vector3(x, y, z));
+    }
+    remap[i] = id;
+  }
+
+  const edgeToFaces = new Map<string, { fIdx: number; va: number; vb: number }[]>();
+  const faceNormals: THREE.Vector3[] = [];
+  const faces: [number, number, number][] = [];
+
+  for (let f = 0; f < triCount; f++) {
+    let i0: number, i1: number, i2: number;
+    if (indexAttr) {
+      i0 = remap[indexAttr.getX(f * 3)];
+      i1 = remap[indexAttr.getX(f * 3 + 1)];
+      i2 = remap[indexAttr.getX(f * 3 + 2)];
+    } else {
+      i0 = remap[f * 3];
+      i1 = remap[f * 3 + 1];
+      i2 = remap[f * 3 + 2];
+    }
+    faces.push([i0, i1, i2]);
+
+    const p0 = verts[i0], p1 = verts[i1], p2 = verts[i2];
+    const n = new THREE.Vector3();
+    if (p0 && p1 && p2) {
+      n.crossVectors(new THREE.Vector3().subVectors(p2, p1), new THREE.Vector3().subVectors(p0, p1));
+      if (n.lengthSq() > 1e-12) n.normalize(); else n.set(0, 1, 0);
+    } else {
+      n.set(0, 1, 0);
+    }
+    faceNormals.push(n);
+
+    const edges: [number, number][] = [
+      [Math.min(i0, i1), Math.max(i0, i1)],
+      [Math.min(i1, i2), Math.max(i1, i2)],
+      [Math.min(i2, i0), Math.max(i2, i0)]
+    ];
+    for (const [va, vb] of edges) {
+      if (va === vb) continue;
+      const k = `${va}_${vb}`;
+      let list = edgeToFaces.get(k);
+      if (!list) {
+        list = [];
+        edgeToFaces.set(k, list);
+      }
+      list.push({ fIdx: f, va, vb });
+    }
+  }
+
+  const edgePositions: number[] = [];
+  edgeToFaces.forEach((sharedList) => {
+    const { va, vb } = sharedList[0];
+    if (dissolveCoplanars && sharedList.length === 2) {
+      const f0 = sharedList[0].fIdx;
+      const f1 = sharedList[1].fIdx;
+      const n0 = faceNormals[f0];
+      const n1 = faceNormals[f1];
+      if (n0 && n1 && n0.dot(n1) >= cosTol) {
+        const f0Idxs = faces[f0];
+        const f1Idxs = faces[f1];
+        const opp0 = f0Idxs.find(v => v !== va && v !== vb);
+        const opp1 = f1Idxs.find(v => v !== va && v !== vb);
+        if (opp0 !== undefined && opp1 !== undefined && verts[va] && verts[vb] && verts[opp0] && verts[opp1]) {
+          const pA = verts[va], pB = verts[vb], p0 = verts[opp0], p1 = verts[opp1];
+          const edgeDir = new THREE.Vector3().subVectors(pB, pA).normalize();
+          const side0 = new THREE.Vector3().crossVectors(edgeDir, p0.clone().sub(pA)).dot(n0);
+          const side1 = new THREE.Vector3().crossVectors(edgeDir, p1.clone().sub(pA)).dot(n0);
+          if (side0 * side1 < -1e-6) {
+            return; // Disolver diagonal interna entre caras coplanares
+          }
+        }
+      }
+    }
+    const pA = verts[va], pB = verts[vb];
+    if (pA && pB) {
+      edgePositions.push(pA.x, pA.y, pA.z, pB.x, pB.y, pB.z);
+    }
+  });
+
+  const edgeGeo = new THREE.BufferGeometry();
+  edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+  return edgeGeo;
+}
+
+/**
  * Crea una geometría sólida 3D de tubos cilíndricos y esferas de unión siguiendo todas las aristas.
  * Este resultado es 100% Manifold y compatible con STL (impresión 3D), OBJ y GLTF/GLB.
  */

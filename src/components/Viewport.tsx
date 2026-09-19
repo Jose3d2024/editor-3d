@@ -35,7 +35,7 @@ import { evaluateCameraTransform } from '../utils/cameraPathHelper';
 import { generateNurbsSurfaceIsoparms } from '../utils/nurbs';
 import { Plus, Minus, ChevronDown, Globe, Camera, Target, Eye, X, Magnet } from 'lucide-react';
 import { fileToDataURL } from '../utils/silhouettes';
-import { extractUniqueEdges } from '../utils/wireframeMesh';
+import { extractUniqueEdges, extractEdgesFromBufferGeometry } from '../utils/wireframeMesh';
 import { getLoopCutPreview } from '../utils/loopCut';
 import { safeFixed, safeNum } from '../utils/numberUtils';
 import { projectVerticesToFaces } from '../utils/faceSnap';
@@ -2243,12 +2243,17 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             if (customMaterial) {
+              customMaterial.side = THREE.DoubleSide;
+              (customMaterial as any).shadowSide = THREE.DoubleSide;
               mesh.material = customMaterial;
             } else {
               const mapMaterial = (origMat: THREE.Material) => {
                 const projMat = projectMaterials.find(m => m.id === origMat.userData.csgMaterialId);
                 if (projMat && (projMat as any).userModified) {
-                  return getMaterialForObject(obj, projMat);
+                  const m = getMaterialForObject(obj, projMat);
+                  m.side = THREE.DoubleSide;
+                  (m as any).shadowSide = THREE.DoubleSide;
+                  return m;
                 }
                 if (viewMode !== 'TEXTURED' && viewMode !== 'TEXTURED_WIREFRAME') {
                   const cloned = (origMat as any).clone();
@@ -2263,9 +2268,14 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
                   if (obj.color && obj.color !== '#ffffff' && cloned.color) {
                     cloned.color.set(obj.color);
                   }
+                  cloned.side = THREE.DoubleSide;
+                  cloned.shadowSide = THREE.DoubleSide;
                   cloned.needsUpdate = true;
                   return cloned;
                 }
+                origMat.side = THREE.DoubleSide;
+                (origMat as any).shadowSide = THREE.DoubleSide;
+                origMat.needsUpdate = true;
                 return origMat;
               };
 
@@ -2288,54 +2298,54 @@ export const Viewport: React.FC<ViewportProps> = ({ type: initialType, title: in
             }
 
             if (mesh.material) {
+              const isWireMode = viewMode === 'WIREFRAME';
               if (Array.isArray(mesh.material)) {
                 mesh.material = mesh.material.map(m => {
                   const cloned = m;
-                  (cloned as any).wireframe = viewMode === 'WIREFRAME';
+                  (cloned as any).wireframe = false;
+                  (cloned as any).visible = !isWireMode;
                   return cloned;
                 });
               } else {
                 const cloned = mesh.material;
-                (cloned as any).wireframe = viewMode === 'WIREFRAME';
+                (cloned as any).wireframe = false;
+                (cloned as any).visible = !isWireMode;
                 mesh.material = cloned;
               }
             }
 
-            // If TEXTURED_WIREFRAME, add a clean wireframe overlay on top of the textured mesh
-            if (viewMode === 'TEXTURED_WIREFRAME') {
-              const wireMat = new THREE.MeshBasicMaterial({
-                wireframe: true,
-                color: isSelected ? 0x38bdf8 : 0x0284c7,
-                transparent: true,
-                opacity: 0.65,
-                depthTest: true,
-                depthWrite: false,
-                polygonOffset: true,
-                polygonOffsetFactor: -1,
-                polygonOffsetUnits: -4,
+            // If TEXTURED_WIREFRAME or WIREFRAME, add a clean topology-based edge overlay (with coplanar diagonal dissolution)
+            if (viewMode === 'TEXTURED_WIREFRAME' || viewMode === 'WIREFRAME') {
+              const edgeGeo = extractEdgesFromBufferGeometry(mesh.geometry, {
+                dissolveCoplanars: true,
+                coplanarAngleDeg: 3.5
               });
 
-              let wireOverlay: THREE.Mesh;
-              if ((mesh as THREE.SkinnedMesh).isSkinnedMesh) {
-                const skinnedMesh = mesh as THREE.SkinnedMesh;
-                const skinnedWire = new THREE.SkinnedMesh(skinnedMesh.geometry, wireMat);
-                skinnedWire.bind(skinnedMesh.skeleton, skinnedMesh.bindMatrix);
-                skinnedWire.bindMode = skinnedMesh.bindMode;
-                wireOverlay = skinnedWire;
-              } else {
-                wireOverlay = new THREE.Mesh(mesh.geometry, wireMat);
-              }
+              if (edgeGeo && edgeGeo.attributes.position && edgeGeo.attributes.position.count > 0) {
+                const isWireOnly = viewMode === 'WIREFRAME';
+                const wireColor = isWireOnly
+                  ? (isSelected ? 0x4f8ef7 : 0x22dd44)
+                  : (isSelected ? 0x38bdf8 : 0x0284c7);
 
-              wireOverlay.position.set(0, 0, 0);
-              wireOverlay.rotation.set(0, 0, 0);
-              wireOverlay.scale.set(1, 1, 1);
-              wireOverlay.userData.isWireOverlay = true;
-              wireOverlay.renderOrder = 2;
-              if (mesh.morphTargetInfluences) {
-                wireOverlay.morphTargetInfluences = mesh.morphTargetInfluences;
-                wireOverlay.morphTargetDictionary = mesh.morphTargetDictionary;
+                const edgeMat = new THREE.LineBasicMaterial({
+                  color: wireColor,
+                  transparent: true,
+                  opacity: isWireOnly ? 1.0 : 0.85,
+                  depthTest: true,
+                  depthWrite: false,
+                  polygonOffset: !isWireOnly,
+                  polygonOffsetFactor: -1,
+                  polygonOffsetUnits: -4,
+                });
+
+                const edgeLines = new THREE.LineSegments(edgeGeo, edgeMat);
+                edgeLines.position.set(0, 0, 0);
+                edgeLines.rotation.set(0, 0, 0);
+                edgeLines.scale.set(1, 1, 1);
+                edgeLines.userData.isWireOverlay = true;
+                edgeLines.renderOrder = 2;
+                mesh.add(edgeLines);
               }
-              mesh.add(wireOverlay);
             }
           }
         };

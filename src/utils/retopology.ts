@@ -5,6 +5,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { MeshoptSimplifier as Meshopt, MeshoptDecoder } from 'meshoptimizer';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CSGObject, MeshFace, V3 } from '../types';
+import { computeSmoothNormalsByPosition } from './meshUtils';
 
 export type RetopologyMode = 'QUAD_DOMINANT' | 'PURE_QUADS' | 'ISOTROPIC_TRI';
 
@@ -16,6 +17,8 @@ export interface RetopologyOptions {
   curvatureSensitivity?: number;    // Sensibilidad (0.0 a 1.0)
   preserveCreases?: boolean;        // Alinear bucles con aristas vivas y costuras
   creaseAngleDeg?: number;          // Umbral de aristas vivas (default 35°)
+  hardSurfaceProtection?: boolean;  // Preservación estricta de paneles y piezas mecánicas/naves (impide colapso de alas finas)
+  snapPlanarFaces?: boolean;        // Aplanar matemáticamente las alas y paneles coplanares (evita abolladuras)
   symmetryAxis?: 'NONE' | 'X' | 'Y' | 'Z';
   smoothIterations?: number;
   projectToSurface?: boolean;       // Proyección a superficie original
@@ -228,8 +231,11 @@ export function pairTrianglesIntoQuads(
     const c0 = vCross(e0, e1);
     const planarity = Math.max(0, 1.0 - Math.abs(vDot(vSub(p3, p0), c0)) / ((diag1 * diag2) + 1e-6));
 
-    // Score global ponderado
-    const score = dotN * 3.0 + orthoScore * 2.5 + diagAspect * 1.5 + edgeAspect * 1.0 + planarity * 2.0;
+    // Si ambos triángulos son estrictamente coplanares (ej: paneles planos de naves, alas o cortes mecánicos)
+    const isCoplanar = dotN >= 0.998;
+
+    // Score global ponderado: Prioridad máxima a quads coplanares ortogonales limpios
+    const score = (isCoplanar ? 14.0 : dotN * 3.0) + orthoScore * 4.0 + diagAspect * 2.0 + edgeAspect * 1.5 + planarity * 3.0;
 
     candidates.push({
       fA,
@@ -279,7 +285,8 @@ export function pairTrianglesIntoQuads(
     const normDiag1B = vCross(vSub(p2, p0), vSub(p3, p0));
     const canFlipDiag = vDot(normDiag1A, nA) > 0.6 && vDot(normDiag1B, nA) > 0.6;
 
-    if (canFlipDiag && vDist(p0, p2) <= vDist(p1, p3) * 1.15) {
+    // Si existen coordenadas UV, NUNCA invertir la diagonal porque rompería la continuidad de la textura
+    if (!uvs && canFlipDiag && vDist(p0, p2) <= vDist(p1, p3) * 1.15) {
       // Triangulación por diagonal q0-q2
       orderedIndices.push(q0, q1, q2, q0, q2, q3);
       quads.push([q0, q1, q2, q3]);
@@ -358,7 +365,12 @@ export function pairTrianglesIntoQuads(
         used[idxA] = 1;
         used[idxB] = 1;
         quads.push([oppA, vStart, oppB, vEnd]);
-        orderedIndices.push(oppA, vStart, oppB, oppA, oppB, vEnd);
+        // Si hay UVs, conservar la diagonal original (vStart, vEnd) para evitar torcer la textura
+        if (uvs) {
+          orderedIndices.push(oppA, vStart, vEnd, oppB, vEnd, vStart);
+        } else {
+          orderedIndices.push(oppA, vStart, oppB, oppA, oppB, vEnd);
+        }
         break;
       }
     }
@@ -430,8 +442,10 @@ function compactGeometry(
   }
   compactedGeo.setIndex(new THREE.BufferAttribute(remappedIndices, 1));
 
-  // Recalcular normales suaves de la nueva topología para evitar caras sombreadas oscuras o invertidas
-  compactedGeo.computeVertexNormals();
+  // Solo recalcular normales si la geometría original no disponía de normales válidas
+  if (!sourceGeo.attributes.normal) {
+    compactedGeo.computeVertexNormals();
+  }
 
   return compactedGeo;
 }
@@ -579,7 +593,7 @@ export async function retopologizeMesh(
         { err: 0.15, flags: flags as any },
         { err: 0.35, flags: flags as any },
       ];
-      if (preserveCreases) {
+      if (!preserveCreases) {
         attempts.push({ err: 0.40, flags: [] as any });
       }
 
@@ -605,8 +619,8 @@ export async function retopologizeMesh(
       }
     }
 
-    // Tier 3: Si LockBorder limitó la reducción, intentar sin bloqueo de bordes
-    if (workingIndices.length > rawTarget * 1.20) {
+    // Tier 3: Si LockBorder limitó la reducción, intentar sin bloqueo de bordes SOLO si !preserveCreases
+    if (!preserveCreases && workingIndices.length > rawTarget * 1.20) {
       const attemptsNoLock = [
         { err: 0.15, flags: [] as any },
         { err: 0.35, flags: [] as any },
@@ -634,8 +648,9 @@ export async function retopologizeMesh(
       }
     }
 
-    // Tier 4: Garantía de simplificación (simplifySloppy) si la geometría tiene bordes abiertos o no-múltiplex
-    if (workingIndices.length > rawTarget * 1.20) {
+    // Tier 4: Garantía de simplificación (simplifySloppy) SOLO si !preserveCreases
+    // (NUNCA en modelos con aristas vivas, alas finas o paneles de naves espaciales para evitar colapso cruzado)
+    if (!preserveCreases && workingIndices.length > rawTarget * 1.20) {
       const targetIndexCount = Math.min(workingIndices.length, Math.max(12, rawTarget));
       const targetCountMultiple3 = Math.floor(targetIndexCount / 3) * 3;
       if (targetCountMultiple3 < workingIndices.length) {
@@ -711,6 +726,12 @@ export async function retopologizeMesh(
     indices: f.indices.map(idx => oldToNew.get(idx)!)
   }));
 
+  // Aplanar matemáticamente paneles coplanares (evita abolladuras en alas de naves y placas)
+  let finalVerts = compactedVerts;
+  if (options.snapPlanarFaces !== false) {
+    finalVerts = snapPlanarClusters(compactedVerts, compactedFaces, creaseAngleDeg || 35, 0.04);
+  }
+
   const finalFacesCount = compactedFaces.length;
   const reductionPct = initialFaceCount > 0
     ? Math.round(((initialFaceCount - finalFacesCount) / initialFaceCount) * 100)
@@ -719,7 +740,7 @@ export async function retopologizeMesh(
   if (onProgress) onProgress(100, '¡Retopología completada con éxito!');
 
   return {
-    vertices: compactedVerts,
+    vertices: finalVerts,
     faces: compactedFaces,
     report: [
       `Remeser: ${mode === 'PURE_QUADS' ? '100% Quads' : mode === 'QUAD_DOMINANT' ? 'Quads Dominantes' : 'Isótropo'}`,
@@ -870,41 +891,54 @@ export async function retopologizeGLBModel(
     if (hasUV) {
       // Tier 1: Simplificación con protección multi-atributo de textura UV
       const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
-      const uvWeights = [1.5, 1.5];
+      let scale = 1.0;
+      try {
+        scale = Meshopt.getScale(posArray, 3);
+      } catch (e) {
+        scale = 1.0;
+      }
+      // Ponderación de UV adaptada a la escala de la geometría para evitar bloquear la reducción
+      const uvWeight = Math.max(0.1, Math.min(2.0, scale * 0.25));
+      const uvWeights = [uvWeight, uvWeight];
 
-      const attempts = [
-        { err: 0.05, flags: ['LockBorder'] as any },
-        { err: 0.15, flags: ['LockBorder'] as any },
-        { err: 0.35, flags: ['LockBorder'] as any },
-      ];
+      if (preserveCreases) {
+        const attempts = [
+          { err: 0.03, flags: ['LockBorder'] as any },
+          { err: 0.08, flags: ['LockBorder'] as any },
+          { err: 0.20, flags: ['LockBorder'] as any },
+        ];
 
-      for (const att of attempts) {
-        try {
-          const res = Meshopt.simplifyWithAttributes(
-            indexArray,
-            posArray,
-            3,
-            uvArray,
-            2,
-            uvWeights,
-            null,
-            targetIndicesCount,
-            att.err,
-            att.flags
-          );
-          if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
-            simplifiedIndices = res[0];
-            if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
-          }
-        } catch (eSimp) {}
+        for (const att of attempts) {
+          try {
+            const res = Meshopt.simplifyWithAttributes(
+              indexArray,
+              posArray,
+              3,
+              uvArray,
+              2,
+              uvWeights,
+              null,
+              targetIndicesCount,
+              att.err,
+              att.flags
+            );
+            if (res && res[0] && res[0].length >= 12 && res[0].length < indexArray.length) {
+              simplifiedIndices = res[0];
+              if (simplifiedIndices.length <= targetIndicesCount * 1.15) break;
+            }
+          } catch (eSimp) {}
+        }
       }
 
-      // Tier 2: Si LockBorder limitó la reducción en costuras UV, probar sin LockBorder
-      if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25) {
+      // Tier 2: Si LockBorder limitó la reducción en costuras UV o bordes de paneles abiertos (ej: alas o paneles de naves),
+      // simplificar con protección de UV sin LockBorder. Meshopt sigue protegiendo la textura con el error de atributos.
+      if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.18) {
         const attemptsNoLock = [
-          { err: 0.15, flags: [] as any },
-          { err: 0.35, flags: [] as any },
-          { err: 0.60, flags: [] as any },
+          { err: 0.03, flags: [] as any },
+          { err: 0.08, flags: [] as any },
+          { err: 0.20, flags: [] as any },
+          { err: 0.40, flags: [] as any },
+          { err: 0.65, flags: [] as any },
         ];
         for (const att of attemptsNoLock) {
           try {
@@ -929,13 +963,13 @@ export async function retopologizeGLBModel(
       }
     }
 
-    // Tier 3: Simplificación posicional pura si los atributos UV bloquearon la reducción
+    // Tier 3: Simplificación posicional pura si los atributos UV bloquearon la reducción o el modelo no tiene UVs
     if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.25) {
       const attemptsPos = [
-        { err: 0.10, flags: preserveCreases ? ['LockBorder'] : [] },
-        { err: 0.25, flags: [] },
-        { err: 0.50, flags: [] },
-        { err: 0.75, flags: [] }
+        { err: 0.05, flags: preserveCreases ? ['LockBorder'] : [] as any },
+        { err: 0.15, flags: [] as any },
+        { err: 0.35, flags: [] as any },
+        { err: 0.60, flags: [] as any },
       ];
       for (const att of attemptsPos) {
         try {
@@ -955,9 +989,8 @@ export async function retopologizeGLBModel(
       }
     }
 
-    // Tier 4: Garantía absoluta de reducción: simplifySloppy
-    // (Resuelve geometrías no múltiplex, islas desconectadas y mallas complejas que no pueden reducirse con colapso conservador)
-    if (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.20) {
+    // Tier 4: Garantía absoluta de reducción: simplifySloppy SOLO si no hay creases exigentes
+    if (!preserveCreases && (!simplifiedIndices || simplifiedIndices.length > targetIndicesCount * 1.20)) {
       try {
         const res = Meshopt.simplifySloppy(
           indexArray,
@@ -992,7 +1025,35 @@ export async function retopologizeGLBModel(
     totalResultQuads += quadPairResult.quads.length;
 
     // 5. Recompactación de la geometría (Zero-Loss de Atributos)
-    const newGeometry = compactGeometry(geometry, quadPairResult.orderedIndices);
+    // Para mallas con texturas UV, utilizamos directamente finalSubIndices de Meshopt
+    // para preservar exactamente la triangulación matemática óptima sin rotar diagonales
+    const indicesToUse = (hasUV && mode !== 'PURE_QUADS') ? finalSubIndices : quadPairResult.orderedIndices;
+    const newGeometry = compactGeometry(geometry, indicesToUse);
+
+    // Preservación estricta de normales:
+    // Si la geometría original ya disponía de normales calculadas por el modelador / normal maps,
+    // NO las sobreescribimos con normales suaves genéricas, ya que provocaría reflejos distorsionados y sombras arrugadas en paneles
+    if (!geometry.attributes.normal) {
+      const creaseRad = ((creaseAngleDeg || 35) * Math.PI) / 180;
+      try {
+        computeSmoothNormalsByPosition(newGeometry, creaseRad);
+      } catch (eNorm) {
+        newGeometry.computeVertexNormals();
+      }
+    } else {
+      // Normalizar vectores de normales transferidos para conservar precisión
+      const normAttr = newGeometry.attributes.normal;
+      const v = new THREE.Vector3();
+      for (let i = 0; i < normAttr.count; i++) {
+        v.fromBufferAttribute(normAttr, i);
+        if (v.lengthSq() > 1e-6) {
+          v.normalize();
+          normAttr.setXYZ(i, v.x, v.y, v.z);
+        }
+      }
+      normAttr.needsUpdate = true;
+    }
+
     mesh.geometry = newGeometry;
     modified = true;
 
@@ -1127,5 +1188,238 @@ export function convertMeshToQuads(
     updatedObject: updated,
     quadsCount: existingQuads.length + quadRes.quads.length,
     trianglesCount: quadRes.remainingTris.length
+  };
+}
+
+/**
+ * Detecta clusters de caras coplanares (como paneles solares, alas o caras de corte mecánico)
+ * y proyecta sus vértices estrictamente sobre el plano medio, eliminando arrugas y deformaciones.
+ */
+export function snapPlanarClusters(
+  vertices: V3[],
+  faces: MeshFace[],
+  angleToleranceDeg: number = 10.0,
+  maxPlaneDistRatio: number = 0.05
+): V3[] {
+  if (vertices.length < 3 || faces.length === 0) return vertices;
+
+  const faceNormals: (V3 | null)[] = [];
+  const faceCentroids: V3[] = [];
+  const cosTol = Math.cos((angleToleranceDeg * Math.PI) / 180);
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  const maxDim = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-4);
+  const maxAbsDist = maxDim * maxPlaneDistRatio;
+
+  for (let f = 0; f < faces.length; f++) {
+    const idxs = faces[f].indices || [];
+    if (idxs.length < 3) {
+      faceNormals.push(null);
+      faceCentroids.push([0, 0, 0]);
+      continue;
+    }
+    const p0 = vertices[idxs[0]], p1 = vertices[idxs[1]], p2 = vertices[idxs[2]];
+    if (!p0 || !p1 || !p2) {
+      faceNormals.push(null);
+      faceCentroids.push([0, 0, 0]);
+      continue;
+    }
+    const e1 = vSub(p1, p0);
+    const e2 = vSub(p2, p0);
+    const cr = vCross(e1, e2);
+    const len = Math.sqrt(cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]);
+    if (len < 1e-9) {
+      faceNormals.push(null);
+      faceCentroids.push([0, 0, 0]);
+      continue;
+    }
+    faceNormals.push([cr[0] / len, cr[1] / len, cr[2] / len]);
+
+    let cx = 0, cy = 0, cz = 0;
+    for (let k = 0; k < idxs.length; k++) {
+      const v = vertices[idxs[k]];
+      if (v) { cx += v[0]; cy += v[1]; cz += v[2]; }
+    }
+    faceCentroids.push([cx / idxs.length, cy / idxs.length, cz / idxs.length]);
+  }
+
+  const edgeToFaces = new Map<string, number[]>();
+  for (let f = 0; f < faces.length; f++) {
+    const idxs = faces[f].indices || [];
+    const len = idxs.length;
+    for (let i = 0; i < len; i++) {
+      const a = Math.min(idxs[i], idxs[(i + 1) % len]);
+      const b = Math.max(idxs[i], idxs[(i + 1) % len]);
+      const key = `${a}_${b}`;
+      let list = edgeToFaces.get(key);
+      if (!list) { list = []; edgeToFaces.set(key, list); }
+      list.push(f);
+    }
+  }
+
+  const visited = new Uint8Array(faces.length);
+  const clusters: number[][] = [];
+
+  for (let f = 0; f < faces.length; f++) {
+    if (visited[f] || !faceNormals[f]) continue;
+    const cluster: number[] = [];
+    const queue = [f];
+    visited[f] = 1;
+
+    const baseN = faceNormals[f]!;
+    const baseC = faceCentroids[f];
+
+    while (queue.length > 0) {
+      const cur = queue.pop()!;
+      cluster.push(cur);
+
+      const idxs = faces[cur].indices || [];
+      const len = idxs.length;
+      for (let i = 0; i < len; i++) {
+        const a = Math.min(idxs[i], idxs[(i + 1) % len]);
+        const b = Math.max(idxs[i], idxs[(i + 1) % len]);
+        const nbrs = edgeToFaces.get(`${a}_${b}`) || [];
+        for (const nbr of nbrs) {
+          if (!visited[nbr] && faceNormals[nbr]) {
+            const nN = faceNormals[nbr]!;
+            const dot = vDot(baseN, nN);
+            if (dot >= cosTol) {
+              const nbrC = faceCentroids[nbr];
+              const distToPlane = Math.abs(
+                (nbrC[0] - baseC[0]) * baseN[0] +
+                (nbrC[1] - baseC[1]) * baseN[1] +
+                (nbrC[2] - baseC[2]) * baseN[2]
+              );
+              if (distToPlane <= maxAbsDist) {
+                visited[nbr] = 1;
+                queue.push(nbr);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (cluster.length >= 2) {
+      clusters.push(cluster);
+    }
+  }
+
+  const outVerts: V3[] = vertices.map(v => [v[0], v[1], v[2]]);
+  const vertexClusters = new Map<number, { n: V3; c: V3; count: number }>();
+
+  for (const cluster of clusters) {
+    let avgNx = 0, avgNy = 0, avgNz = 0;
+    let avgCx = 0, avgCy = 0, avgCz = 0;
+    let totalWeight = 0;
+
+    for (const f of cluster) {
+      const n = faceNormals[f]!;
+      const c = faceCentroids[f];
+      avgNx += n[0]; avgNy += n[1]; avgNz += n[2];
+      avgCx += c[0]; avgCy += c[1]; avgCz += c[2];
+      totalWeight += 1;
+    }
+
+    const nLen = Math.sqrt(avgNx * avgNx + avgNy * avgNy + avgNz * avgNz);
+    if (nLen < 1e-6) continue;
+    const planeN: V3 = [avgNx / nLen, avgNy / nLen, avgNz / nLen];
+    const planeC: V3 = [avgCx / totalWeight, avgCy / totalWeight, avgCz / totalWeight];
+
+    const clusterVerts = new Set<number>();
+    for (const f of cluster) {
+      (faces[f].indices || []).forEach(idx => clusterVerts.add(idx));
+    }
+
+    clusterVerts.forEach(vIdx => {
+      const existing = vertexClusters.get(vIdx);
+      if (!existing) {
+        vertexClusters.set(vIdx, { n: planeN, c: planeC, count: 1 });
+      } else {
+        if (vDot(existing.n, planeN) >= cosTol) {
+          existing.n[0] += planeN[0]; existing.n[1] += planeN[1]; existing.n[2] += planeN[2];
+          existing.c[0] += planeC[0]; existing.c[1] += planeC[1]; existing.c[2] += planeC[2];
+          existing.count++;
+        }
+      }
+    });
+  }
+
+  vertexClusters.forEach((data, vIdx) => {
+    const orig = vertices[vIdx];
+    if (!orig) return;
+    const nLen = Math.sqrt(data.n[0] * data.n[0] + data.n[1] * data.n[1] + data.n[2] * data.n[2]);
+    if (nLen < 1e-6) return;
+    const n: V3 = [data.n[0] / nLen, data.n[1] / nLen, data.n[2] / nLen];
+    const c: V3 = [data.c[0] / data.count, data.c[1] / data.count, data.c[2] / data.count];
+
+    const dist = (orig[0] - c[0]) * n[0] + (orig[1] - c[1]) * n[1] + (orig[2] - c[2]) * n[2];
+    if (Math.abs(dist) <= maxAbsDist) {
+      outVerts[vIdx] = [
+        orig[0] - dist * n[0],
+        orig[1] - dist * n[1],
+        orig[2] - dist * n[2],
+      ];
+    }
+  });
+
+  return outVerts;
+}
+
+/**
+ * Repara una malla que haya sufrido arrugas, triangulaciones erráticas o sombreado deficiente.
+ * Aplana paneles coplanares, fusiona triángulos coplanares en cuadriláteros limpios y regenera
+ * normales con umbral de aristas vivas (crease angle).
+ */
+export function repairHardSurfacePolygons(
+  obj: CSGObject,
+  options: { creaseAngleDeg?: number; planarToleranceDeg?: number } = {}
+): { updatedObject: CSGObject; quadsCount: number; flattenedPanels: number; report: string[] } {
+  if (!obj.vertices || !obj.faces || obj.faces.length === 0) {
+    return { updatedObject: obj, quadsCount: 0, flattenedPanels: 0, report: ['Sin geometría'] };
+  }
+
+  const { creaseAngleDeg = 35, planarToleranceDeg = 12 } = options;
+
+  // 1. Aplanar paneles matemáticamente
+  const flattenedVerts = snapPlanarClusters(obj.vertices, obj.faces, planarToleranceDeg, 0.04);
+
+  // 2. Convertir triángulos coplanares a quads
+  const quadRes = convertMeshToQuads({ ...obj, vertices: flattenedVerts }, {
+    preserveCreases: true,
+    creaseAngleDeg
+  });
+
+  const updated: CSGObject = {
+    ...quadRes.updatedObject,
+    vertices: flattenedVerts,
+    parameters: {
+      ...obj.parameters,
+      creaseAngleDeg
+    },
+    smoothShading: true,
+    stats: {
+      vertices: flattenedVerts.length,
+      faces: quadRes.updatedObject.faces?.length || 0,
+      quads: quadRes.quadsCount,
+      triangles: quadRes.trianglesCount
+    }
+  };
+
+  return {
+    updatedObject: updated,
+    quadsCount: quadRes.quadsCount,
+    flattenedPanels: 1,
+    report: [
+      `Superficies duras reparadas: ${quadRes.quadsCount} quads generados`,
+      `Pliegues protegidos a ${creaseAngleDeg}°`
+    ]
   };
 }

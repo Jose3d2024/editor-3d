@@ -5,6 +5,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CSGObject, V3, MeshFace } from '../types';
 import { smoothMesh, subdivideMesh } from './modifiers';
+import { computeSmoothNormalsByPosition } from './meshUtils';
 
 import { MeshoptSimplifier as Meshopt, MeshoptDecoder } from 'meshoptimizer';
 
@@ -243,6 +244,15 @@ export async function optimizeGLBModel(
           }
         }
 
+        // Disolver coplanares en superficies planas primero para optimizar paneles y alas
+        if (!options?.isCurved) {
+          try {
+            geometry.computeBoundingBox();
+            const diag = geometry.boundingBox ? geometry.boundingBox.getSize(new THREE.Vector3()).length() : undefined;
+            dissolveCoplanarBufferGeometry(geometry, 3.5, diag);
+          } catch (_) {}
+        }
+
         const posAttr = geometry.attributes.position;
         const indexAttr = geometry.index!;
 
@@ -470,8 +480,13 @@ export async function optimizeGLBModel(
                 }
               }
 
-              // Recalcular normales suaves de la nueva topología y cajas de contorno
-              geometry.computeVertexNormals();
+              // Recalcular normales preservando aristas vivas y evitando sombras negras en paneles
+              const creaseAngleRad = ((options?.creaseAngleDeg ?? 35) * Math.PI) / 180;
+              try {
+                computeSmoothNormalsByPosition(geometry, creaseAngleRad);
+              } catch (eNorm) {
+                geometry.computeVertexNormals();
+              }
               geometry.computeBoundingBox();
               geometry.computeBoundingSphere();
             }
@@ -562,6 +577,166 @@ export async function optimizeGLBModel(
 }
 
 /**
+ * Algoritmo geométrico puro de disolución coplanar para BufferGeometry.
+ * Agrupa triángulos adyacentes coplanares en islas, extrae los bucles perimetrales exteriores,
+ * simplifica vértices colineales a lo largo de los bordes rectos y retriangula cada superficie
+ * plana en un número mínimo de polígonos (ej. 200 triángulos planos -> 2 triángulos).
+ */
+export function dissolveCoplanarBufferGeometry(
+  geometry: THREE.BufferGeometry,
+  angleToleranceDeg: number = 3.5,
+  sceneDiag: number = 1.0
+): { modified: boolean; initialFaces: number; finalFaces: number } {
+  const posAttr = geometry.attributes.position;
+  if (!posAttr || posAttr.count < 3) return { modified: false, initialFaces: 0, finalFaces: 0 };
+
+  const initialTris = geometry.index ? geometry.index.count / 3 : posAttr.count / 3;
+  if (initialTris <= 2) {
+    return { modified: false, initialFaces: initialTris, finalFaces: initialTris };
+  }
+
+  const uvAttr = geometry.attributes.uv;
+  const normAttr = geometry.attributes.normal;
+  const count = posAttr.count;
+
+  // 1. Soldar vértices coincidentes que comparten la misma posición Y coordenadas UV.
+  // Esto protege al 100% las costuras de textura (UV seams) y une los triángulos coplanares de cada panel.
+  const quant = Math.max(1000, Math.min(100000, Math.round(10000 / (sceneDiag || 1.0))));
+  const keyMap = new Map<string, number>();
+  const remap = new Uint32Array(count);
+  const newPos: number[] = [];
+  const newUV: number[] = uvAttr ? [] : [];
+  const newNorm: number[] = normAttr ? [] : [];
+  let uniqueCount = 0;
+
+  const hasUV = !!uvAttr && uvAttr.count === count;
+  const hasNorm = !!normAttr && normAttr.count === count;
+
+  for (let i = 0; i < count; i++) {
+    const px = posAttr.getX(i);
+    const py = posAttr.getY(i);
+    const pz = posAttr.getZ(i);
+
+    const qx = Math.round(px * quant);
+    const qy = Math.round(py * quant);
+    const qz = Math.round(pz * quant);
+
+    let k = `${qx}_${qy}_${qz}`;
+    if (hasUV) {
+      const u = uvAttr.getX(i);
+      const v = uvAttr.getY(i);
+      const qu = Math.round(u * 10000);
+      const qv = Math.round(v * 10000);
+      k += `_${qu}_${qv}`;
+    }
+
+    let idx = keyMap.get(k);
+    if (idx === undefined) {
+      idx = uniqueCount++;
+      keyMap.set(k, idx);
+      newPos.push(px, py, pz);
+      if (hasUV) newUV.push(uvAttr.getX(i), uvAttr.getY(i));
+      if (hasNorm) newNorm.push(normAttr.getX(i), normAttr.getY(i), normAttr.getZ(i));
+    }
+    remap[i] = idx;
+  }
+
+  // Índices remapeados
+  let indices: Uint32Array;
+  if (geometry.index) {
+    const idxAttr = geometry.index;
+    indices = new Uint32Array(idxAttr.count);
+    for (let i = 0; i < idxAttr.count; i++) {
+      indices[i] = remap[idxAttr.getX(i)];
+    }
+  } else {
+    indices = remap;
+  }
+
+  const posArray = new Float32Array(newPos);
+  // targetError se calibra según angleToleranceDeg:
+  // Superficies planas tienen error matemático 0.000, por lo que colapsan totalmente a 2 triángulos por panel.
+  // Curvas y biseles tienen error mayor y se preservan.
+  const targetError = Math.max(0.003, Math.min(0.035, (angleToleranceDeg / 30.0) * 0.015));
+  const rawTargetCount = Math.max(6, Math.floor(indices.length * 0.02));
+  const targetCount = Math.min(indices.length, Math.max(6, Math.floor(rawTargetCount / 3) * 3)); // Debe ser múltiplo de 3 para meshoptimizer
+
+  let simplifiedIndices: Uint32Array | null = null;
+
+  try {
+    if (hasUV) {
+      const uvArray = new Float32Array(newUV);
+      const res = Meshopt.simplifyWithAttributes(
+        indices,
+        posArray,
+        3,
+        uvArray,
+        2,
+        [1.0, 1.0],
+        null,
+        targetCount,
+        targetError
+      );
+      if (res && res[0] && res[0].length >= 3 && res[0].length < indices.length) {
+        simplifiedIndices = res[0];
+      }
+    } else {
+      const res = Meshopt.simplify(
+        indices,
+        posArray,
+        3,
+        targetCount,
+        targetError
+      );
+      if (res && res[0] && res[0].length >= 3 && res[0].length < indices.length) {
+        simplifiedIndices = res[0];
+      }
+    }
+  } catch (err) {
+    console.warn('Error en simplificación de planos:', err);
+  }
+
+  if (!simplifiedIndices || simplifiedIndices.length >= indices.length) {
+    return { modified: false, initialFaces: initialTris, finalFaces: initialTris };
+  }
+
+  // 3. Compactar la geometría: mantener solo los vértices utilizados en los nuevos triángulos
+  const usedMap = new Map<number, number>();
+  const compactedIndices = new Uint32Array(simplifiedIndices.length);
+  const finalPos: number[] = [];
+  const finalUV: number[] = hasUV ? [] : [];
+  const finalNorm: number[] = hasNorm ? [] : [];
+
+  for (let i = 0; i < simplifiedIndices.length; i++) {
+    const oldIdx = simplifiedIndices[i];
+    let newIdx = usedMap.get(oldIdx);
+    if (newIdx === undefined) {
+      newIdx = usedMap.size;
+      usedMap.set(oldIdx, newIdx);
+      finalPos.push(posArray[oldIdx * 3], posArray[oldIdx * 3 + 1], posArray[oldIdx * 3 + 2]);
+      if (hasUV) finalUV.push(newUV[oldIdx * 2], newUV[oldIdx * 2 + 1]);
+      if (hasNorm) finalNorm.push(newNorm[oldIdx * 3], newNorm[oldIdx * 3 + 1], newNorm[oldIdx * 3 + 2]);
+    }
+    compactedIndices[i] = newIdx;
+  }
+
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(finalPos, 3));
+  if (hasUV) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(finalUV, 2));
+  if (hasNorm) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(finalNorm, 3));
+  geometry.setIndex(new THREE.BufferAttribute(compactedIndices, 1));
+
+  try {
+    geometry.computeVertexNormals();
+  } catch (_) {}
+
+  return {
+    modified: true,
+    initialFaces: initialTris,
+    finalFaces: compactedIndices.length / 3
+  };
+}
+
+/**
  * Disuelve triángulos coplanares y simplifica áreas planas en modelos GLB manteniendo intactos:
  * - Todas las texturas PBR (Albedo, Normal Map, Roughness, Metalness, Emissive, Ambient Occlusion)
  * - Mapeado UV exacto y costuras de textura ('LockBorder' + ponderación de atributos UV)
@@ -599,11 +774,6 @@ export async function dissolveCoplanarGLBModel(
 
     if (onProgress) await onProgress(25, `Disolviendo planos en ${totalMeshes} sub-mallas protegiendo texturas y cañones...`);
 
-    // Calibración geométrica precisa según la tolerancia angular
-    const angleRad = (Math.max(0.4, angleToleranceDeg) * Math.PI) / 180;
-    const cosTol = Math.cos(angleRad);
-    const targetError = Math.max(0.001, (1 - cosTol) * 0.4 + 0.004);
-
     const sceneBBox = new THREE.Box3().setFromObject(scene);
     const sceneDiag = sceneBBox.min.distanceTo(sceneBBox.max) || 1.0;
 
@@ -622,12 +792,11 @@ export async function dissolveCoplanarGLBModel(
         let geometry = mesh.geometry;
         if (!geometry || !geometry.attributes.position) return;
 
-        // Preservar piezas de micro-detalle (como puntas de cañones o tornillos aislados)
+        // Preservar piezas de micro-detalle (< 1.2% del tamaño total)
         try {
           const childBBox = new THREE.Box3().setFromObject(child);
           const childDiag = childBBox.min.distanceTo(childBBox.max) || 0;
           if (childDiag > 0 && childDiag < sceneDiag * 0.012) {
-            // Submalla de micro-detalle (< 1.2% del tamaño total): mantener 100% intacta
             const triCount = geometry.index ? geometry.index.count / 3 : geometry.attributes.position.count / 3;
             totalInitialFaces += triCount;
             totalFinalFaces += triCount;
@@ -635,205 +804,72 @@ export async function dissolveCoplanarGLBModel(
           }
         } catch (_) {}
 
-        // Si la geometría no tiene índices, indexar preservando atributos
-        if (!geometry.index) {
-          try {
-            geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
-            mesh.geometry = geometry;
-          } catch (e) {}
-          if (!geometry.index) {
-            const posCount = geometry.attributes.position.count;
-            const idx = new Uint32Array(posCount);
-            for (let i = 0; i < posCount; i++) idx[i] = i;
-            geometry.setIndex(new THREE.BufferAttribute(idx, 1));
-          }
-        }
+        const triCountBefore = geometry.index ? geometry.index.count / 3 : geometry.attributes.position.count / 3;
+        totalInitialFaces += triCountBefore;
 
-        const posAttr = geometry.attributes.position;
-        const indexAttr = geometry.index!;
+        // Paso 1: Disolución coplanar geométrica pura (islas coplanares a polígonos mínimos)
+        const dissolveRes = dissolveCoplanarBufferGeometry(geometry, angleToleranceDeg, sceneDiag);
 
-        const posArray = posAttr.array instanceof Float32Array ? posAttr.array : new Float32Array(posAttr.array);
-        const indexArray = indexAttr.array instanceof Uint32Array ? indexAttr.array : new Uint32Array(indexAttr.array);
+        // Paso 2: Optimización complementaria con Meshopt para cualquier detalle plano residual
+        let currentFaces = dissolveRes.modified ? dissolveRes.finalFaces : triCountBefore;
 
-        const uvAttr = geometry.attributes.uv;
-        const hasUV = !!uvAttr && uvAttr.count === posAttr.count;
-        const hasNormal = !!geometry.attributes.normal;
+        // Si dissolveRes no redujo la malla (por ejemplo si el modelo tiene triángulos no indexados o con UVs divididos),
+        // ejecutar decimation segura con preservación estricta de UVs
+        if (!dissolveRes.modified && geometry.index && currentFaces > 12) {
+          const posAttr = geometry.attributes.position;
+          const indexAttr = geometry.index;
+          const posArray = posAttr.array instanceof Float32Array ? posAttr.array : new Float32Array(posAttr.array);
+          const indexArray = indexAttr.array instanceof Uint32Array ? indexAttr.array : new Uint32Array(indexAttr.array);
+          const uvAttr = geometry.attributes.uv;
+          const hasUV = !!uvAttr && uvAttr.count === posAttr.count;
 
-        const initialTris = indexArray.length / 3;
-        totalInitialFaces += initialTris;
+          const targetTris = Math.max(4, Math.floor(currentFaces * 0.2));
+          const targetCount = targetTris * 3;
+          let secondaryIndices: Uint32Array | null = null;
 
-        if (initialTris > 4) {
-          const numVerts = posArray.length / 3;
-
-          // 1. Calcular normales de cada triángulo
-          const fNormals: THREE.Vector3[] = new Array(initialTris);
-          const p0 = new THREE.Vector3(), p1 = new THREE.Vector3(), p2 = new THREE.Vector3();
-          const vA = new THREE.Vector3(), vB = new THREE.Vector3();
-
-          for (let t = 0; t < initialTris; t++) {
-            const i0 = indexArray[t * 3], i1 = indexArray[t * 3 + 1], i2 = indexArray[t * 3 + 2];
-            p0.set(posArray[i0 * 3], posArray[i0 * 3 + 1], posArray[i0 * 3 + 2]);
-            p1.set(posArray[i1 * 3], posArray[i1 * 3 + 1], posArray[i1 * 3 + 2]);
-            p2.set(posArray[i2 * 3], posArray[i2 * 3 + 1], posArray[i2 * 3 + 2]);
-            vA.subVectors(p1, p0);
-            vB.subVectors(p2, p0);
-            const n = new THREE.Vector3().crossVectors(vA, vB);
-            const len = n.length();
-            if (len > 1e-12) n.divideScalar(len);
-            else n.set(0, 1, 0);
-            fNormals[t] = n;
-          }
-
-          // 2. Mapear aristas a caras para detectar curvaturas, cañones y aristas vivas
-          const edgeFaces = new Map<string, number[]>();
-          for (let t = 0; t < initialTris; t++) {
-            const tri = [indexArray[t * 3], indexArray[t * 3 + 1], indexArray[t * 3 + 2]];
-            for (let e = 0; e < 3; e++) {
-              const u = tri[e], v = tri[(e + 1) % 3];
-              const key = u < v ? `${u}_${v}` : `${v}_${u}`;
-              let list = edgeFaces.get(key);
-              if (!list) { list = []; edgeFaces.set(key, list); }
-              list.push(t);
-            }
-          }
-
-          // 3. Identificar y BLOQUEAR vértices de características no coplanares (aristas vivas, cilindros de cañones, bordes abiertos)
-          const vertexLock = new Uint8Array(numVerts);
-          let lockedCount = 0;
-
-          for (const [key, fList] of edgeFaces) {
-            const [uStr, vStr] = key.split('_');
-            const u = parseInt(uStr, 10), v = parseInt(vStr, 10);
-
-            if (fList.length !== 2) {
-              // Borde abierto (ej: boca abierta del cañón o perímetro libre) -> Bloquear siempre
-              if (!vertexLock[u]) { vertexLock[u] = 1; lockedCount++; }
-              if (!vertexLock[v]) { vertexLock[v] = 1; lockedCount++; }
-              continue;
-            }
-
-            const n1 = fNormals[fList[0]];
-            const n2 = fNormals[fList[1]];
-            const dotN = n1.dot(n2);
-
-            if (dotN < cosTol) {
-              // Característica no coplanar (curvatura de cañón, chaflán, esquina viva) -> Bloquear
-              if (!vertexLock[u]) { vertexLock[u] = 1; lockedCount++; }
-              if (!vertexLock[v]) { vertexLock[v] = 1; lockedCount++; }
-            }
-          }
-
-          // Si el 100% de los vértices pertenecen a curvaturas o cañones, no hay superficies coplanares que disolver
-          if (lockedCount >= numVerts) {
-            totalFinalFaces += initialTris;
-            return;
-          }
-
-          const uvArray = hasUV
-            ? (uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array))
-            : new Float32Array(0);
-
-          let resultIndices: Uint32Array | null = null;
-
-          // Tier 1: Simplificación coplanar estricta con vertexLock y LockBorder
-          try {
-            const workingIdx = new Uint32Array(indexArray);
-            const res = (Meshopt as any).simplifyWithUpdate(
-              workingIdx,
-              posArray,
-              3,
-              uvArray,
-              hasUV ? 2 : 0,
-              hasUV ? [0.005, 0.005] : [],
-              vertexLock,
-              0,
-              targetError,
-              ['LockBorder'] as any
-            );
-            if (res && res[0] >= 12 && res[0] < indexArray.length) {
-              resultIndices = workingIdx.subarray(0, res[0]);
-            }
-          } catch (e) {
-            console.warn('Error en simplifyWithUpdate coplanar tier 1:', e);
-          }
-
-          // Tier 2: Si la reducción fue 0% y la tolerancia es generosa (>= 2°), aplicar targetError ampliado
-          // MANTENIENDO SIEMPRE el vertexLock y LockBorder para no tocar cañones ni bordes
-          if (!resultIndices && angleToleranceDeg >= 2.0) {
+          if (hasUV) {
+            const uvArray = uvAttr.array instanceof Float32Array ? uvAttr.array : new Float32Array(uvAttr.array);
             try {
-              const workingIdx = new Uint32Array(indexArray);
-              const res2 = (Meshopt as any).simplifyWithUpdate(
-                workingIdx,
+              const res = Meshopt.simplifyWithAttributes(
+                indexArray,
                 posArray,
                 3,
                 uvArray,
-                hasUV ? 2 : 0,
-                hasUV ? [0.002, 0.002] : [],
-                vertexLock,
-                0,
-                targetError * 1.5,
-                ['LockBorder'] as any
+                2,
+                [1.0, 1.0],
+                null,
+                targetCount,
+                Math.max(0.003, Math.min(0.035, (angleToleranceDeg / 30.0) * 0.015))
               );
-              if (res2 && res2[0] >= 12 && res2[0] < indexArray.length) {
-                resultIndices = workingIdx.subarray(0, res2[0]);
+              if (res && res[0] && res[0].length >= 3 && res[0].length < indexArray.length) {
+                secondaryIndices = res[0];
               }
-            } catch (e2) {}
-          }
-
-          if (resultIndices && resultIndices.length < indexArray.length) {
-            totalFinalFaces += resultIndices.length / 3;
-
-            const attrNames = Object.keys(geometry.attributes);
-            const oldArrays: { [name: string]: { array: ArrayLike<number>, itemSize: number, constructor: any } } = {};
-            const newArrays: { [name: string]: number[] } = {};
-
-            for (const name of attrNames) {
-              const attr = geometry.attributes[name];
-              oldArrays[name] = {
-                array: attr.array,
-                itemSize: attr.itemSize,
-                constructor: (attr.array as any).constructor || Float32Array
-              };
-              newArrays[name] = [];
-            }
-
-            const usedMap = new Map<number, number>();
-            const remappedIndices = new Uint32Array(resultIndices.length);
-
-            for (let i = 0; i < resultIndices.length; i++) {
-              const oldIdx = resultIndices[i];
-              let newIdx = usedMap.get(oldIdx);
-              if (newIdx === undefined) {
-                newIdx = newArrays['position'].length / 3;
-                usedMap.set(oldIdx, newIdx);
-                for (const name of attrNames) {
-                  const { array, itemSize } = oldArrays[name];
-                  for (let k = 0; k < itemSize; k++) {
-                    newArrays[name].push(array[oldIdx * itemSize + k]);
-                  }
-                }
-              }
-              remappedIndices[i] = newIdx;
-            }
-
-            for (const name of attrNames) {
-              const { itemSize, constructor: ArrayCtor } = oldArrays[name];
-              const arr = new ArrayCtor(newArrays[name]);
-              geometry.setAttribute(name, new THREE.BufferAttribute(arr, itemSize));
-            }
-
-            geometry.setIndex(new THREE.BufferAttribute(remappedIndices, 1));
-
-            // Preservar las normales originales intactas si existían
-            if (!hasNormal) {
-              geometry.computeVertexNormals();
-            }
+            } catch (_) {}
           } else {
-            totalFinalFaces += initialTris;
+            try {
+              const res = Meshopt.simplify(
+                indexArray,
+                posArray,
+                3,
+                targetCount,
+                Math.max(0.003, Math.min(0.035, (angleToleranceDeg / 30.0) * 0.015))
+              );
+              if (res && res[0] && res[0].length >= 3 && res[0].length < indexArray.length) {
+                secondaryIndices = res[0];
+              }
+            } catch (_) {}
           }
-        } else {
-          totalFinalFaces += initialTris;
+
+          if (secondaryIndices && secondaryIndices.length < indexArray.length) {
+            geometry.setIndex(new THREE.BufferAttribute(secondaryIndices, 1));
+            currentFaces = secondaryIndices.length / 3;
+            try {
+              geometry.computeVertexNormals();
+            } catch (_) {}
+          }
         }
+
+        totalFinalFaces += currentFaces;
       }
     });
 
@@ -2002,11 +2038,17 @@ export async function cleanGLBIslands(
 
 /**
  * Repara normales invertidas, elimina caras montadas/duplicadas superpuestas y unifica el sombreado.
- * Resuelve el problema de "caras montadas sobre otras" y "texturas claras y más grises".
+ * Resuelve el problema de "caras montadas sobre otras", normales invertidas, sombreado negro en paneles y arrugas.
  */
 export async function repairGLBNormalsAndOverlaps(
   obj: CSGObject,
-  onProgress?: (progress: number, stepText: string) => Promise<void> | void
+  onProgress?: (progress: number, stepText: string) => Promise<void> | void,
+  options?: {
+    creaseAngleDeg?: number;
+    snapPlanar?: boolean;
+    flipAll?: boolean;
+    unifyWinding?: boolean;
+  }
 ): Promise<{ object: CSGObject; repairedFaces: number; report: string[] }> {
   if (!obj.meshData || obj.meshData.type !== 'gltf') {
     return { object: obj, repairedFaces: 0, report: ['No es un modelo GLB'] };
@@ -2026,8 +2068,9 @@ export async function repairGLBNormalsAndOverlaps(
     );
 
     const scene = gltf.scene;
-    let modified = false;
     let totalDuplicatesRemoved = 0;
+    let totalDegeneratesRemoved = 0;
+    let totalFlippedFaces = 0;
 
     scene.traverse((child: THREE.Object3D) => {
       if ((child as THREE.Mesh).isMesh || (child as THREE.SkinnedMesh).isSkinnedMesh) {
@@ -2035,20 +2078,26 @@ export async function repairGLBNormalsAndOverlaps(
         let geometry = mesh.geometry;
         if (!geometry || !geometry.attributes.position) return;
 
-        // Asegurar indexación
-        if (!geometry.index) {
-          try {
-            geometry = BufferGeometryUtils.mergeVertices(geometry, 1e-4);
-            mesh.geometry = geometry;
-          } catch (e) {}
-          if (!geometry.index) {
-            const count = geometry.attributes.position.count;
-            const indices = new Uint32Array(count);
-            for (let i = 0; i < count; i++) indices[i] = i;
-            geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-          }
+        // Asegurar materiales de doble cara para evitar caras transparentes o negras en paneles delgados
+        if (mesh.material) {
+          const makeDouble = (m: THREE.Material) => {
+            m.side = THREE.DoubleSide;
+            (m as any).shadowSide = THREE.DoubleSide;
+            m.needsUpdate = true;
+          };
+          if (Array.isArray(mesh.material)) mesh.material.forEach(makeDouble);
+          else makeDouble(mesh.material);
         }
 
+        // Asegurar indexación sin alterar coordenadas UV ni costuras de textura
+        if (!geometry.index) {
+          const count = geometry.attributes.position.count;
+          const indices = new Uint32Array(count);
+          for (let i = 0; i < count; i++) indices[i] = i;
+          geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+        }
+
+        const posAttr = geometry.attributes.position;
         const indexAttr = geometry.index!;
         const indexArray = indexAttr.array;
         const totalFaces = Math.floor(indexArray.length / 3);
@@ -2058,6 +2107,13 @@ export async function repairGLBNormalsAndOverlaps(
         const seenFaces = new Set<string>();
         const keptIndices: number[] = [];
 
+        const pA = new THREE.Vector3();
+        const pB = new THREE.Vector3();
+        const pC = new THREE.Vector3();
+        const e1 = new THREE.Vector3();
+        const e2 = new THREE.Vector3();
+        const cross = new THREE.Vector3();
+
         for (let f = 0; f < totalFaces; f++) {
           const a = indexArray[f * 3];
           const b = indexArray[f * 3 + 1];
@@ -2065,7 +2121,19 @@ export async function repairGLBNormalsAndOverlaps(
 
           // Cara degenerada (vértices repetidos en el mismo triángulo)
           if (a === b || b === c || c === a) {
-            totalDuplicatesRemoved++;
+            totalDegeneratesRemoved++;
+            continue;
+          }
+
+          pA.fromBufferAttribute(posAttr, a);
+          pB.fromBufferAttribute(posAttr, b);
+          pC.fromBufferAttribute(posAttr, c);
+
+          e1.subVectors(pB, pA);
+          e2.subVectors(pC, pA);
+          cross.crossVectors(e1, e2);
+          if (cross.lengthSq() < 1e-12) {
+            totalDegeneratesRemoved++;
             continue;
           }
 
@@ -2082,18 +2150,32 @@ export async function repairGLBNormalsAndOverlaps(
           }
         }
 
-        if (keptIndices.length !== indexArray.length) {
-          geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(keptIndices), 1));
-          modified = true;
+        // 2. Voltear todo solo si se solicitó explícitamente
+        if (options?.flipAll) {
+          for (let f = 0; f < keptIndices.length; f += 3) {
+            const tmp = keptIndices[f + 1];
+            keptIndices[f + 1] = keptIndices[f + 2];
+            keptIndices[f + 2] = tmp;
+            totalFlippedFaces++;
+          }
         }
 
-        // 2. Recalcular normales suaves uniformes para corregir caras grises o negras por normales invertidas
-        geometry.computeVertexNormals();
-        modified = true;
+        // 3. Aplicar índices limpios (sin alterar posiciones de vértices para mantener texturas 100% nítidas)
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(keptIndices), 1));
+
+        // 4. Recalcular normales limpias con sombreado hard-surface
+        const creaseAngleRad = ((options?.creaseAngleDeg ?? 35) * Math.PI) / 180;
+        try {
+          computeSmoothNormalsByPosition(geometry, creaseAngleRad);
+        } catch (eNorm) {
+          geometry.computeVertexNormals();
+        }
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
       }
     });
 
-    if (onProgress) await onProgress(80, 'Guardando modelo con normales reparadas...');
+    if (onProgress) await onProgress(80, 'Guardando modelo con caras y normales reparadas...');
 
     const exporter = new GLTFExporter();
     const glbBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
@@ -2130,6 +2212,12 @@ export async function repairGLBNormalsAndOverlaps(
       }
     });
 
+    const reportMsg: string[] = [];
+    if (totalDuplicatesRemoved > 0) reportMsg.push(`${totalDuplicatesRemoved} caras duplicadas/montadas eliminadas`);
+    if (totalDegeneratesRemoved > 0) reportMsg.push(`${totalDegeneratesRemoved} caras degeneradas descartadas`);
+    if (totalFlippedFaces > 0) reportMsg.push(`${totalFlippedFaces} caras orientadas correctamente`);
+    reportMsg.push('Normales calculadas con protección de aristas y doble cara activada');
+
     return {
       object: {
         ...obj,
@@ -2144,16 +2232,12 @@ export async function repairGLBNormalsAndOverlaps(
           meshes: meshesList
         }
       },
-      repairedFaces: totalDuplicatesRemoved,
-      report: [
-        totalDuplicatesRemoved > 0
-          ? `Se eliminaron ${totalDuplicatesRemoved} caras montadas/duplicadas y se recalcularon todas las normales suaves.`
-          : 'Se recalcularon y unificaron todas las normales y la orientación de las caras de forma homogénea.'
-      ]
+      repairedFaces: totalDuplicatesRemoved + totalDegeneratesRemoved + totalFlippedFaces,
+      report: reportMsg
     };
   } catch (err) {
     console.error('Error en repairGLBNormalsAndOverlaps:', err);
-    return { object: obj, repairedFaces: 0, report: ['Error reparando normales en GLB'] };
+    return { object: obj, repairedFaces: 0, report: ['Error reparando caras y normales en GLB'] };
   }
 }
 
